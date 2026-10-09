@@ -1,0 +1,28 @@
+## Interface: 11509, 16001
+## Title: Midas |cffE8B44AAH|r
+## Notes: AH market analysis: today's Top Picks, opportunity ranking & price charts (built-in full AH scanner)
+## Author: Rebo
+## Version: 1.2.11
+## SavedVariables: MidasDB
+## AddonCompartmentFunc: Midas_OnCompartmentClick
+## X-Category: Auction/Economy
+## X-License: MIT
+
+Core.lua
+Compat.lua
+Theme.lua
+Data.lua
+Import.lua
+Comm.lua
+Scanner.lua
+ScannerModern.lua
+Logic.lua
+Trades.lua
+Charts.lua
+UI.lua
+Tooltip.lua
+Inventory.lua
+Vendor.lua
+Wealth.lua
+Minimap.lua
+API.lua
