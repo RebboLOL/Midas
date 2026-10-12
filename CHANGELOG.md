@@ -1,5 +1,12 @@
 # Midas – Changelog
 
+## 1.2.12 – 2026-10-12
+- **Easier to read.** The grey secondary text steps up in brightness across the whole window and the Midas tooltip lines, so labels and helper text no longer sink into the background.
+- **Price alerts: start-page card and a Watchlist view.** The movers card lists this realm's active below/above alerts, and the Watchlist tab's new "price alerts" toggle opens the full list with CURRENT prices - a price turns green or gold once its limit is hit, and a click opens the chart.
+- **Offer book: fresh asks join the running total.** Fixed a bug where the TOTAL column fell back to the scanned units right below a YOUR-ASK line, so the numbers no longer read straight down after posting - your clusters now count into every row beneath them, bars and buy-through hovers included.
+- **Offer book: the YOUR-ASK label steps aside.** The label of a freshly posted ask now sits beside its quantity bar - left or right, wherever there is room - instead of printing across it.
+- **Version in the footer.** The main window's footer shows the running Midas version on the far left.
+
 ## 1.2.11 – 2026-10-09
 - **Midas Discord.** Questions, bug reports and feature ideas now have a home at https://discord.gg/CfZgeyxAn5 - linked in the window footer, the Help tab, the get-started tour and "/midas discord" (click to copy).
 

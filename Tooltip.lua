@@ -47,10 +47,10 @@ local function annotate(tooltip, itemID)
 
   tooltip:AddLine(" ")
   tooltip:AddDoubleLine("|cffE8B44AMidas|r", sig, 0.91, 0.70, 0.29, r, g, b)
-  tooltip:AddDoubleLine("Current  " .. M.MoneyPlain(cur), fairTxt, r, g, b, 0.60, 0.63, 0.70)
+  tooltip:AddDoubleLine("Current  " .. M.MoneyPlain(cur), fairTxt, r, g, b, 0.78, 0.76, 0.70)
   if mode == "reduced" then tooltip:Show(); return end
-  tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyPlain(m.quick), 0.60, 0.63, 0.70, 0.60, 0.63, 0.70)
-  tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.60, 0.63, 0.70, 0.60, 0.63, 0.70)
+  tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyPlain(m.quick), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
+  tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   -- supply ladder of the newest scan: how much sits within 10% of the floor
   local dp = M.GetDepth and M.GetDepth(itemID)
   if dp and dp.levels[1] and (time() - (dp.ts or 0)) < 86400 then
@@ -58,7 +58,7 @@ local function annotate(tooltip, itemID)
     for _, l in ipairs(dp.levels) do
       if l.price <= cap then near = l.qty + near end
     end
-    tooltip:AddDoubleLine("Up to +10%:  " .. near, "Listed:  " .. (dp.listed or dp.units), 0.60, 0.63, 0.70, 0.60, 0.63, 0.70)
+    tooltip:AddDoubleLine("Up to +10%:  " .. near, "Listed:  " .. (dp.listed or dp.units), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   end
   -- sell chance of a 48h listing at the CURRENT price (the transparency line)
   if m.odds then
@@ -78,7 +78,7 @@ local function annotate(tooltip, itemID)
   if M.RealizedBuy then
     local paid, units = M.RealizedBuy(tostring(itemID))
     if paid and units > 0 then
-      tooltip:AddLine(string.format("You paid  %s avg  (%d bought)", M.MoneyPlain(paid), units), 0.60, 0.63, 0.70)
+      tooltip:AddLine(string.format("You paid  %s avg  (%d bought)", M.MoneyPlain(paid), units), 0.78, 0.76, 0.70)
     end
   end
   tooltip:Show()

@@ -43,9 +43,11 @@ T.C = {
   teal     = { 0.99,  0.80,  0.38  }, -- the Midas touch: price & value lines in gold
   mint     = { 0.20,  0.88,  0.74  }, -- Crafting asset class (the old teal)
   purple   = { 0.62,  0.55,  0.98  }, -- gold tied up in active auctions
-  text     = { 0.93,  0.90,  0.84  }, -- primary text (warm ivory)
-  sub      = { 0.63,  0.59,  0.50  }, -- secondary text / labels
-  muted    = { 0.40,  0.37,  0.30  }, -- tertiary / hints
+  -- brightened 1.2.14 after "everything too grey" feedback: the hierarchy
+  -- keeps its three steps, each step just sits higher above the background
+  text     = { 0.97,  0.95,  0.90  }, -- primary text (warm ivory)
+  sub      = { 0.76,  0.72,  0.62  }, -- secondary text / labels
+  muted    = { 0.52,  0.48,  0.39  }, -- tertiary / hints
 }
 T.SIZE = { h1 = 16, h2 = 12, body = 12, small = 11, tiny = 10 }
 
@@ -239,7 +241,7 @@ function T.Input(parent, w, h, placeholder, onChanged)
   local icon = box:CreateTexture(nil, "OVERLAY")
   icon:SetTexture("Interface\\Common\\UI-Searchbox-Icon")
   icon:SetSize(14, 14); icon:SetPoint("LEFT", 7, -1)
-  icon:SetVertexColor(0.60, 0.63, 0.70)
+  icon:SetVertexColor(0.78, 0.76, 0.70)
   local edit = CreateFrame("EditBox", nil, box)
   edit:SetPoint("LEFT", icon, "RIGHT", 6, 1); edit:SetPoint("RIGHT", -22, 0)
   edit:SetHeight((h or 22) - 2)

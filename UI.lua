@@ -227,8 +227,13 @@ function M.EnsureUI()
   dcBtn:SetScript("OnClick", function() M.ShowLinkCopy(M.DISCORD_URL, "Midas Discord") end)
   dcBtn:SetScript("OnEnter", function() dc:SetTextColor(C.accent[1], C.accent[2], C.accent[3]) end)
   dcBtn:SetScript("OnLeave", function() dc:SetTextColor(C.muted[1], C.muted[2], C.muted[3]) end)
+  -- running version, far left before the status text - fed by M.version, so
+  -- the release bump keeps it true without touching this line
+  local ver = T.Text(f, T.SIZE.tiny, "muted", T.FONT_MED)
+  ver:SetPoint("LEFT", f, "BOTTOMLEFT", 16, 21)
+  ver:SetText("v" .. (M.version or ""))
   M.footer:ClearAllPoints()
-  M.footer:SetPoint("LEFT", f, "BOTTOMLEFT", 16, 21)   -- same centre line as the scan button
+  M.footer:SetPoint("LEFT", ver, "RIGHT", 10, 0)   -- same centre line as the scan button
   M.footer:SetPoint("RIGHT", dc, "LEFT", -16, 0)
   M.footer:SetJustifyH("LEFT")
 
@@ -250,6 +255,7 @@ function M.SelectTab(i)
   if M.NWNavReset then M.NWNavReset() end
   if M.whyView then M.whyView:Hide() end
   if M.depthView then M.depthView:Hide() end
+  if M.alertsView then M.alertsView:Hide() end
   for j, p in ipairs(M.panels) do p:SetShown(j == i) end
   if M.tabBar then M.tabBar:Select(i) end
   M.RefreshUI()
@@ -1447,6 +1453,7 @@ end
 local W_COLS  = { { w = 170 }, { w = 70, just = "RIGHT" }, { w = 70, just = "RIGHT" }, { w = 50, just = "RIGHT" } }
 local MT_COLS = { { w = 190 }, { w = 48, just = "RIGHT" } }
 local MV_COLS = { { w = 150 }, { w = 100, just = "RIGHT" }, { w = 84, just = "RIGHT" } }
+local AL_COLS = { { w = 150 }, { w = 94, just = "RIGHT" }, { w = 90, just = "RIGHT" } }
 local LT_COLS = { { w = 44 }, { w = 46 }, { w = 150 }, { w = 84, just = "RIGHT" } }
 
 function M.BuildHome(panel)
@@ -1521,15 +1528,22 @@ function M.BuildHome(panel)
   h.wEmpty:SetText("Your watchlist is empty.\nOpen the Watchlist tab to search & add items \226\128\148 or right-click any item on this page to watch it.")
   h.wEmpty:Hide()
 
-  -- BIGGEST MOVERS ----------------------------------------------------------
+  -- BIGGEST MOVERS + PRICE ALERTS (one card, two compact sections) ----------
   local mv = homeCard(panel, "BIGGEST MOVERS", C.sub, "Net Worth")
   mv:SetPoint("TOPLEFT", 0, R3Y); mv:SetPoint("BOTTOMLEFT", 0, 0); mv:SetWidth(380)
   h.mvCard = mv
   -- character rows, not item rows: display-only (inert), no fake click promise
-  h.mvRows = homeRows(mv, 12, -46, MV_COLS, 4, 348, true)
+  h.mvRows = homeRows(mv, 12, -32, MV_COLS, 2, 348, true)
+  -- the card's lower half: this realm's active price alerts, click = chart
+  local alh = T.Text(mv, T.SIZE.tiny, "accent", T.FONT_MED)
+  alh:SetPoint("TOPLEFT", 12, -74); alh:SetText("PRICE ALERTS")
+  h.alMore = T.Text(mv, T.SIZE.tiny, "muted")
+  h.alMore:SetPoint("LEFT", alh, "RIGHT", 8, 0)
+  h.alRows = homeRows(mv, 12, -88, AL_COLS, 2, 348)
   if T.HelpTip then
-    T.HelpTip(mv, "Biggest movers", {
-      "Which characters gained or lost the most net worth since the previous daily snapshot." }, "ANCHOR_CURSOR")
+    T.HelpTip(mv, "Movers & alerts", {
+      "MOVERS: which characters gained or lost the most net worth since the previous daily snapshot.",
+      "PRICE ALERTS: this realm's active below/above limits. Click one to open its chart - the Charts tab sets and clears them." }, "ANCHOR_CURSOR")
   end
 
   -- YOUR TRADES -------------------------------------------------------------
@@ -1695,8 +1709,8 @@ function M.RefreshHome()
     end
   end
   table.sort(movers, function(a, b) return math.abs(a.d) > math.abs(b.d) end)
-  local mvN = math.max(4, math.floor((((h.mvCard and h.mvCard:GetHeight()) or 128) - 56) / HOME_ROWH))
-  for r = #h.mvRows + 1, mvN do h.mvRows.mk(r) end
+  -- fixed two rows: the card's lower half carries the price alerts
+  local mvN = #h.mvRows
   for r = 1, #h.mvRows do
     local e = (r <= mvN) and movers[r] or nil
     local row = h.mvRows[r]
@@ -1713,6 +1727,44 @@ function M.RefreshHome()
   if #movers == 0 then
     h.mvRows[1][1]:SetText(dPrev and "no changes since the last snapshot" or "snapshots build up daily")
     colorize(h.mvRows[1][1], C.muted)
+  end
+
+  -- price alerts (lower half of the movers card) -----------------------------
+  if h.alRows then
+    local al = M.db.alerts and M.db.alerts[realm]
+    local alist = {}
+    if al then
+      for key, a in pairs(al) do
+        if type(a) == "table" and (a.below or a.above) then
+          alist[#alist + 1] = { key = key, below = a.below, above = a.above }
+        end
+      end
+    end
+    table.sort(alist, function(a, b)
+      return (M.ItemName(a.key) or tostring(a.key)) < (M.ItemName(b.key) or tostring(b.key))
+    end)
+    -- the card bottom is elastic (the window resizes for real): grow the
+    -- alert rows into whatever height is actually there
+    local alN = math.max(2, math.floor((((h.mvCard and h.mvCard:GetHeight()) or 128) - 90) / HOME_ROWH))
+    for r = #h.alRows + 1, alN do h.alRows.mk(r) end
+    for r = 1, #h.alRows do
+      local e, row = (r <= alN) and alist[r] or nil, h.alRows[r]
+      if e then
+        setItemName(row[1], e.key)
+        row[2]:SetText(e.below and ("\226\137\164 " .. M.MoneyPlain(e.below)) or "")
+        colorize(row[2], C.green)
+        row[3]:SetText(e.above and ("\226\137\165 " .. M.MoneyPlain(e.above)) or "")
+        colorize(row[3], C.accent)
+        row.btn.key = e.key
+      else
+        clearHomeRow(row)
+      end
+    end
+    h.alMore:SetText(#alist > alN and ("+" .. (#alist - alN) .. " more") or "")
+    if #alist == 0 then
+      h.alRows[1][1]:SetText("none set - use below / above in the Charts tab")
+      colorize(h.alRows[1][1], C.muted)
+    end
   end
 
   -- your trades -------------------------------------------------------------
@@ -2278,7 +2330,10 @@ local function CreateRankTab(panel, opts)
     local tf = tg:CreateFontString(nil, "OVERLAY"); T.RegFont(tf, T.FONT_MED, T.SIZE.small)
     tf:SetPoint("LEFT", 0, 0); tf:SetJustifyH("LEFT"); tf:SetTextColor(T.Unpack(C.sub))
     tg.tf = tf
-    tg:SetScript("OnClick", function() st.showRemoved = not st.showRemoved; st.Refresh() end)
+    tg:SetScript("OnClick", function()
+      if M.alertsView then M.alertsView:Hide() end
+      st.showRemoved = not st.showRemoved; st.Refresh()
+    end)
     tg:SetScript("OnEnter", function() tf:SetTextColor(T.Unpack(C.text)) end)
     tg:SetScript("OnLeave", function()
       if st.showRemoved then tf:SetTextColor(T.Unpack(C.accent)) else tf:SetTextColor(T.Unpack(C.sub)) end
@@ -2298,6 +2353,7 @@ local function CreateRankTab(panel, opts)
     bf:SetPoint("RIGHT", 0, 0); bf:SetJustifyH("RIGHT"); bf:SetTextColor(T.Unpack(C.sub))
     bg2.tf = bf
     bg2:SetScript("OnClick", function()
+      if M.alertsView then M.alertsView:Hide() end
       st.showAll = not st.showAll
       st.showRemoved = nil
       st.Refresh()
@@ -2311,6 +2367,123 @@ local function CreateRankTab(panel, opts)
       T.HelpTip(bg2, "All items", {
         "Switches the table to EVERY item your scans and syncs have touched on this realm - not just your watchlist.",
         "Sort by any column, search as usual; a gold edge marks items already on your watchlist, right-click adds or removes one. Items below the ranking gate (too few days or too little supply) show price and supply only." })
+    end
+
+    -- third sub-view: this realm's price alerts with their CURRENT prices.
+    -- A plain overlay above the table (alerts are few - no scroll, no sort);
+    -- every row is a live item button: click = the chart, where limits live.
+    local av = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    av:SetPoint("TOPLEFT", 0, -24); av:SetPoint("BOTTOMRIGHT", 0, 0)
+    av:SetBackdrop(T.FLAT)
+    av:SetBackdropColor(C.bg1[1], C.bg1[2], C.bg1[3], 1)
+    av:SetBackdropBorderColor(C.border[1], C.border[2], C.border[3], 1)
+    av:SetFrameLevel(panel:GetFrameLevel() + 30)
+    av:Hide()
+    M.alertsView = av
+    local avTitle = T.Text(av, T.SIZE.small, "muted", T.FONT_MED)
+    avTitle:SetPoint("TOPLEFT", 12, -10)
+    local avHint = T.Text(av, T.SIZE.tiny, "muted")
+    avHint:SetPoint("TOPRIGHT", -12, -12); avHint:SetJustifyH("RIGHT")
+    avHint:SetText("click a row for its chart \194\183 limits are set there (below / above)")
+    local AV_COLS = {
+      { x = 12,  w = 230, j = "LEFT",  t = "ITEM" },
+      { x = 250, w = 90,  j = "RIGHT", t = "BELOW" },
+      { x = 348, w = 90,  j = "RIGHT", t = "CURRENT" },
+      { x = 446, w = 90,  j = "RIGHT", t = "ABOVE" },
+      { x = 544, w = 70,  j = "RIGHT", t = "VS FAIR" },
+    }
+    for _, c2 in ipairs(AV_COLS) do
+      local hc = T.Text(av, T.SIZE.tiny, "muted", T.FONT_MED)
+      hc:SetPoint("TOPLEFT", c2.x, -32); hc:SetWidth(c2.w); hc:SetJustifyH(c2.j); hc:SetText(c2.t)
+    end
+    av.rows = {}
+    for r2 = 1, 14 do
+      local b = CreateFrame("Button", nil, av)
+      b:SetPoint("TOPLEFT", 8, -46 - (r2 - 1) * 22); b:SetSize(630, 21)
+      b:SetFrameLevel(av:GetFrameLevel() + 2)
+      local zb = b:CreateTexture(nil, "BACKGROUND")
+      zb:SetAllPoints(); zb:SetColorTexture(1, 1, 1, 0.03); zb:SetShown(r2 % 2 == 0)
+      local hl3 = b:CreateTexture(nil, "HIGHLIGHT"); hl3:SetAllPoints(); hl3:SetColorTexture(1, 1, 1, 0.05)
+      local c3 = {}
+      for i2, d in ipairs(AV_COLS) do
+        c3[i2] = cell(b, d.x - 8, -4, d.w, d.j, T.SIZE.body)
+      end
+      b.c = c3
+      wireItemBtn(b)
+      b:Hide()
+      av.rows[r2] = b
+    end
+    av.more = T.Text(av, T.SIZE.tiny, "muted")
+    av.more:SetPoint("BOTTOMLEFT", 12, 10)
+    av.empty = T.Text(av, T.SIZE.body, "sub")
+    av.empty:SetPoint("CENTER", 0, 20); av.empty:SetWidth(520)
+    av.empty:SetJustifyH("CENTER"); av.empty:SetWordWrap(true); av.empty:SetSpacing(4)
+    av.empty:SetText("No price alerts on this realm yet.\nOpen an item in the Charts tab and set a below and/or above limit - Midas rings when a scan or sync crosses it.")
+    local function fillAlerts()
+      local realm = M.RealmKey()
+      local al = M.db and M.db.alerts and M.db.alerts[realm]
+      local list = {}
+      if al then
+        for key, a in pairs(al) do
+          if type(a) == "table" and (a.below or a.above) then
+            local m2 = M.Metrics(M.GetSeries(key) or {}, key)
+            local cur2 = (m2 and m2.cur and m2.cur > 0) and m2.cur or nil
+            local hit = (cur2 and ((a.below and cur2 <= a.below) or (a.above and cur2 >= a.above))) and true or false
+            list[#list + 1] = { key = key, below = a.below, above = a.above,
+                                cur = cur2, fair = m2 and m2.fair, hit = hit }
+          end
+        end
+      end
+      table.sort(list, function(x, y)
+        if x.hit ~= y.hit then return x.hit end
+        return (M.ItemName(x.key) or tostring(x.key)) < (M.ItemName(y.key) or tostring(y.key))
+      end)
+      avTitle:SetText("PRICE ALERTS  \194\183  " .. realm .. "  \194\183  " .. #list .. " active")
+      for r2 = 1, #av.rows do
+        local e, b = list[r2], av.rows[r2]
+        if e then
+          setItemName(b.c[1], e.key)
+          b.c[2]:SetText(e.below and M.MoneyPlain(e.below) or "\226\128\147")
+          colorize(b.c[2], e.below and C.green or C.muted)
+          b.c[3]:SetText(e.cur and M.MoneyPlain(e.cur) or "no data")
+          if e.cur and e.below and e.cur <= e.below then colorize(b.c[3], C.green)
+          elseif e.cur and e.above and e.cur >= e.above then colorize(b.c[3], C.accent)
+          else colorize(b.c[3], e.cur and C.text or C.muted) end
+          b.c[4]:SetText(e.above and M.MoneyPlain(e.above) or "\226\128\147")
+          colorize(b.c[4], e.above and C.accent or C.muted)
+          if e.cur and e.fair and e.fair > 0 then
+            local d2 = e.cur / e.fair - 1
+            b.c[5]:SetText(string.format("%+.0f%%", d2 * 100))
+            colorize(b.c[5], d2 < 0 and C.green or C.red)
+          else b.c[5]:SetText("") end
+          b.key = e.key
+          b:Show()
+        else
+          b.key = nil; b:Hide()
+        end
+      end
+      av.more:SetText(#list > #av.rows and ("+" .. (#list - #av.rows) .. " more alerts") or "")
+      av.empty:SetShown(#list == 0)
+    end
+    av:SetScript("OnShow", fillAlerts)
+    local ag = CreateFrame("Button", nil, panel)
+    ag:SetSize(110, 16); ag:SetPoint("TOPRIGHT", -8, -5)
+    local af = ag:CreateFontString(nil, "OVERLAY"); T.RegFont(af, T.FONT_MED, T.SIZE.small)
+    af:SetPoint("RIGHT", 0, 0); af:SetJustifyH("RIGHT")
+    local function agLabel()
+      if av:IsShown() then af:SetText("< back"); af:SetTextColor(T.Unpack(C.accent))
+      else af:SetText("price alerts \194\187"); af:SetTextColor(T.Unpack(C.sub)) end
+    end
+    ag:SetScript("OnClick", function() av:SetShown(not av:IsShown()) end)
+    ag:SetScript("OnEnter", function() af:SetTextColor(T.Unpack(C.text)) end)
+    ag:SetScript("OnLeave", agLabel)
+    av:HookScript("OnShow", agLabel)
+    av:HookScript("OnHide", agLabel)
+    agLabel()
+    if T.HelpTip then
+      T.HelpTip(ag, "Price alerts", {
+        "All below/above price alerts of this realm with their CURRENT prices - the price turns green once it is at or under your buy limit, gold once it reached your sell limit.",
+        "Click a row to open the item's chart (alerts are set and cleared there)." })
     end
   end
 
@@ -5771,21 +5944,22 @@ function M.BuildCharts(panel)
       if keepMk(mks[pi]) then seq[#seq + 1] = { mk = mks[pi] } end
       pi = pi + 1
     end
-    -- off-ladder YOUR-ASK bars sit on the same supply scale: widen it so a
-    -- cluster posted after the scan FITS at its cumulative position instead
-    -- of being squeezed against the right edge
+    -- off-ladder YOUR-ASK clusters EXTEND the supply, so the TOTAL column
+    -- reads straight down even right after posting: their units join the
+    -- running total of every row beneath them ("extra" in the loop below),
+    -- and the scale grows by the full sum so each bar fits at its shifted
+    -- cumulative position
+    local totalExtra = 0
     for _, s2 in ipairs(seq) do
       local mk2 = s2.mk
-      if mk2 and mk2.q and mk2.q > 0 then
-        local u2 = 0
-        for _, l in ipairs(lv) do if l.price <= mk2.p then u2 = u2 + l.qty end end
-        if u2 + mk2.q > maxCum then maxCum = u2 + mk2.q end
-      end
+      if mk2 and mk2.q and mk2.q > 0 then totalExtra = totalExtra + mk2.q end
     end
+    if totalExtra > 0 then maxCum = math.max(maxCum, gl[n].cum + totalExtra) end
 
     local nBelow, wall, fairMid, belowBot = 0, gl[1], nil, nil
     local mark25, mark50, r = false, false, 0
     local costCum, aucCum = 0, 0
+    local extra, extraCost = 0, 0   -- your off-ladder units/cost passed so far (joins TOTAL + hover)
     dv.ctx = { fair = fair, quick = m and m.quick, floor7 = m and m.floor7, paid = M.RealizedBuy and (M.RealizedBuy(key)) }
     local yy = TOP
     for _, s in ipairs(seq) do
@@ -5813,7 +5987,7 @@ function M.BuildCharts(panel)
             row.mark:SetText(row.mark:GetText() == "25%" and "25/50" or "50%"); mark50 = true
           end
         end
-        local prev = e.cum - e.qty
+        local prev = e.cum - e.qty + extra
         local gw = W * prev / maxCum
         row.ghost:ClearAllPoints(); row.ghost:SetPoint("LEFT", BX, 0); row.ghost:SetHeight(BH)
         if prev > 0 then row.ghost:SetWidth(math.max(1, gw)); row.ghost:Show() end
@@ -5863,9 +6037,9 @@ function M.BuildCharts(panel)
           end
         end
         costCum = costCum + e.cost; aucCum = aucCum + e.auctions
-        row.info = { lbl = e.lbl, price = e.price, units = e.cum, cost = costCum, auctions = aucCum }
+        row.info = { lbl = e.lbl, price = e.price, units = e.cum + extra, cost = costCum + extraCost, auctions = aucCum }
         row.auc:SetText("\195\151" .. e.auctions)
-        row.cum:SetText(e.cum)
+        row.cum:SetText(e.cum + extra)
         if fair then row.vs:SetText(string.format("%+.0f%%", (e.price / fair - 1) * 100)) end
       else
         -- marker row: slim, tinted, a hairline in its color from the start of
@@ -5880,7 +6054,7 @@ function M.BuildCharts(panel)
         yy = yy - MRH
         local u = 0
         for _, l in ipairs(lv) do if l.price <= mk.p then u = u + l.qty end end
-        local gx = W * math.min(u, maxCum) / maxCum
+        local gx = W * math.min(u + extra, maxCum) / maxCum
         row.tint:SetColorTexture(c[1], c[2], c[3], mk.fair and 0.09 or 0.05)
         row.price:SetText(M.MoneyPlain(mk.p)); row.price:SetTextColor(c[1], c[2], c[3])
         row.name:SetText(mk.lbl); row.name:SetTextColor(c[1], c[2], c[3])
@@ -5902,17 +6076,37 @@ function M.BuildCharts(panel)
         else
           row.bar:Hide()
         end
+        -- the label rides at the line tip - but a quantity BAR starts there
+        -- and runs right, which printed the text ACROSS the bar: put it
+        -- beside the bar instead (right of its end, or left of its start
+        -- when the right side is out of room)
+        row.name:ClearAllPoints()
+        if mbw > 0 then
+          local strW = (row.name:GetStringWidth() or 60) + 5
+          if gx + mbw + strW <= W then
+            row.name:SetPoint("LEFT", row, "LEFT", BX + gx + mbw + 5, 0)
+          elseif gx >= strW then
+            row.name:SetPoint("RIGHT", row, "LEFT", BX + gx - 5, 0)
+          else
+            row.name:SetPoint("RIGHT", row, "LEFT", BX + W, 0)
+          end
+        else
+          row.name:SetPoint("LEFT", row.dot, "RIGHT", 5, 0)
+        end
         row.line:ClearAllPoints(); row.line:SetPoint("LEFT", BX, 0)
         row.line:SetSize(math.max(1, gx), mk.fair and 2 or 1)
         row.line:SetColorTexture(c[1], c[2], c[3], 0.9); row.line:SetShown(gx >= 1)
         row.dot:ClearAllPoints(); row.dot:SetPoint("CENTER", row, "LEFT", BX + gx, 0)
         row.dot:SetVertexColor(c[1], c[2], c[3], 1)
         row.dot:SetShown(mbw <= 0)
-        row.cum:SetText(u + ((mk.q and mk.q > 0) and mk.q or 0)); row.cum:SetTextColor(c[1], c[2], c[3])
+        local mq = (mk.q and mk.q > 0) and mk.q or 0
+        row.cum:SetText(u + extra + mq); row.cum:SetTextColor(c[1], c[2], c[3])
         row.vs:SetText(fair and not mk.fair and string.format("%+.0f%%", (mk.p / fair - 1) * 100) or "")
         local mc, ma = 0, 0
         for _, l in ipairs(lv) do if l.price <= mk.p then mc = mc + l.qty * l.price; ma = ma + l.auctions end end
-        row.info = { lbl = M.MoneyPlain(mk.p), name = mk.lbl, rgb = c, price = mk.p, units = u, cost = mc, auctions = ma }
+        row.info = { lbl = M.MoneyPlain(mk.p), name = mk.lbl, rgb = c, price = mk.p,
+                     units = u + extra + mq, cost = mc + extraCost + mq * mk.p, auctions = ma }
+        if mq > 0 then extra = extra + mq; extraCost = extraCost + mq * mk.p end
       end
     end
     -- buy zone: from the top down to the Fair row (or the last level under Fair)

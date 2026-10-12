@@ -19,7 +19,7 @@ end
 -- ===== Tooltip content =======================================================
 function M.FillSellTooltip(tip)
   tip:AddLine("|cffE8B44AMidas|r  \194\183  Top sells from your holdings")
-  tip:AddLine("Bags \194\183 Bank \194\183 Mail", 0.60, 0.63, 0.70)
+  tip:AddLine("Bags \194\183 Bank \194\183 Mail", 0.78, 0.76, 0.70)
   tip:AddLine(" ")
 
   if not M.db then
