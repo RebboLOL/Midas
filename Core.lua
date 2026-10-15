@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.12"
+M.version = "1.2.13"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -294,6 +294,15 @@ function M.OnLogin()
       end
     end
   end
+  -- onboarding milestones (1.2.13): one-shot cards keyed to the own-scan-DAY
+  -- counter (UI.lua OB_STAGES; Data.lua bumps scanDays once per day with a
+  -- stored scan). obStage = highest card index shown (0 = none yet). Accounts
+  -- that pre-date the system are marked done (99): the cards must never fire
+  -- retroactively.
+  MidasDB.config.scanDays = MidasDB.config.scanDays or 0
+  if MidasDB.config.obStage == nil then
+    MidasDB.config.obStage = fresh and 0 or 99
+  end
   -- beta servers rename realms; every store keys by realm+faction, so history
   -- then LOOKS gone (it sits under the old key). Say it once per YOUNG key -
   -- empty, or scanned for less than two weeks (the user may have scanned on
@@ -342,13 +351,24 @@ function M.OnLogin()
     C_Timer.After(4, M.ShowForeverNote)
   end
   -- one-time "what's new" spotlight for bigger features (UI.lua M.NEWS). A
-  -- fresh install gets the get-started tour instead: the news would describe
-  -- changes to a UI the player has never seen.
-  if fresh and M.ShowGuide then
+  -- fresh install gets the onboarding welcome card instead (UI.lua OB_STAGES):
+  -- the news would describe changes to a UI the player has never seen, and
+  -- the welcome card hands out the full tour (M.ShowGuide) on its button.
+  if fresh and M.ShowOnboard then
     MidasDB.config.newsSeen = MidasDB.config.newsSeen or {}
     for _, e in ipairs(M.NEWS or {}) do MidasDB.config.newsSeen[e.id] = true end
-    C_Timer.After(9, function() M.ShowGuide() end)
-  elseif M.ShowWhatsNew then C_Timer.After(9, function() M.ShowWhatsNew() end) end
+    C_Timer.After(9, function()
+      if MidasDB.config.obStage == 0 and M.ShowOnboard then M.ShowOnboard(1) end
+    end)
+  elseif M.ShowWhatsNew then
+    C_Timer.After(9, function()
+      -- obStage 0 here = a fresh install whose welcome never displayed (quit
+      -- within 9s of first login): re-offer it once
+      if not M.ShowWhatsNew() and MidasDB.config.obStage == 0 and M.ShowOnboard then
+        M.ShowOnboard(1)
+      end
+    end)
+  end
 end
 
 function M.ShowForeverNote()

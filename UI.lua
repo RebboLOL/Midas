@@ -3082,7 +3082,7 @@ end
 local function logSortVal(w, fld)
   local e = w.e
   if fld == "kind"  then return e.kind or "" end
-  if fld == "iname" then return (w.nm or ""):lower() end
+  if fld == "iname" then return w.nml or (w.nm or ""):lower() end
   if fld == "count" then return w.cnt or 0 end
   if fld == "unit"  then return w.unit or -1 end
   if fld == "total" then return w.gross or 0 end
@@ -3210,7 +3210,9 @@ function M.BuildTrades(panel)
   end
   logScroll:EnableMouseWheel(true); logScroll:SetScript("OnMouseWheel", logWheel)
   logScroll:SetScript("OnVerticalScroll", function(self, offset)
-    FauxScrollFrame_OnVerticalScroll(self, offset, TRADE_ROWH, st.RefreshLog)
+    -- scroll only refills the visible rows from st.logData; the expensive
+    -- rebuild (fetch + decorate + sort) runs in buildLog on data changes only
+    FauxScrollFrame_OnVerticalScroll(self, offset, TRADE_ROWH, st.FillLog)
   end)
   T.StyleScrollbar("MidasTradeLogScroll")
   local logRows = {}
@@ -3287,7 +3289,8 @@ function M.BuildTrades(panel)
   end
   itemScroll:EnableMouseWheel(true); itemScroll:SetScript("OnMouseWheel", itemWheel)
   itemScroll:SetScript("OnVerticalScroll", function(self, offset)
-    FauxScrollFrame_OnVerticalScroll(self, offset, TRADE_ROWH, st.RefreshItem)
+    -- same split as the History list: scrolling refills from st.itemDisp only
+    FauxScrollFrame_OnVerticalScroll(self, offset, TRADE_ROWH, st.FillItem)
   end)
   T.StyleScrollbar("MidasTradeItemScroll")
   local itemCard = CreateChartCard(itemView, 702, 250, 330)
@@ -3354,7 +3357,11 @@ function M.BuildTrades(panel)
   for r = 1, TRADE_ROWS do mkItemRow(r) end
 
   -- ----- refreshers ---------------------------------------------------------
-  function st.RefreshLog()
+  -- Build (fetch + decorate + sort the whole log) and fill (draw the visible
+  -- rows) are split: OnVerticalScroll used to run the full rebuild on every
+  -- scroll step, which got laggy once the 75-day trade log grew into the
+  -- thousands of entries. Scrolling now only refills.
+  local function buildLog()
     local data = M.TradeLog(M.RealmKey())
     local q = st.search or ""
     -- build display rows: clean name, resolve id, per-unit price + vs-median
@@ -3362,7 +3369,8 @@ function M.BuildTrades(panel)
     local medCache, rows = {}, {}
     for _, e in ipairs(data) do
       local nm = (M.CleanItemName and M.CleanItemName(e.name)) or e.name or (e.id and M.ItemName(tostring(e.id))) or "?"
-      if q == "" or nm:lower():find(q, 1, true) then
+      local nml = nm:lower()
+      if q == "" or nml:find(q, 1, true) then
         local id = e.id or (nm ~= "?" and M.NameToID and M.NameToID(nm)) or nil
         local cnt = e.count
         if (not cnt or cnt == 0) and e.kind == "sold" and M.AuctionSize then cnt = M.AuctionSize(id, e.gross or 0) end
@@ -3375,7 +3383,7 @@ function M.BuildTrades(panel)
           med = mc or nil
         end
         local vsmed = (unit and med and med > 0) and (unit / med - 1) or nil
-        rows[#rows + 1] = { e = e, nm = nm, id = id, cnt = cnt, gross = gross, unit = unit, vsmed = vsmed }
+        rows[#rows + 1] = { e = e, nm = nm, nml = nml, id = id, cnt = cnt, gross = gross, unit = unit, vsmed = vsmed }
       end
     end
     local fld, asc = st.logSort.field, st.logSort.asc
@@ -3392,6 +3400,11 @@ function M.BuildTrades(panel)
     for _, b in ipairs(logHeaders) do
       if b.field == fld then b.tt:SetTextColor(T.Unpack(C.accent)) else b.tt:SetTextColor(T.Unpack(C.muted)) end
     end
+    st.logData = rows
+  end
+
+  function st.FillLog()
+    local rows = st.logData or {}
     local total = #rows
     local vis = availRows(panel, 104, TRADE_ROWH, 10)
     for r = #logRows + 1, vis do mkLogRow(r) end
@@ -3449,7 +3462,11 @@ function M.BuildTrades(panel)
     end
   end
 
-  function st.RefreshItem()
+  function st.RefreshLog()
+    buildLog(); st.FillLog()
+  end
+
+  local function buildItems()
     local stats = M.TradeStats(M.RealmKey())
     local list = {}
     for key, s in pairs(stats) do
@@ -3496,6 +3513,11 @@ function M.BuildTrades(panel)
         end
       end
     end
+    st.itemList, st.itemDisp = list, disp
+  end
+
+  function st.FillItem()
+    local disp, list = st.itemDisp or {}, st.itemList or {}
     local total = #disp
     local vis = availRows(panel, 104, TRADE_ROWH, 10)
     for r = #itemRows + 1, vis do mkItemRow(r) end
@@ -3615,6 +3637,10 @@ function M.BuildTrades(panel)
     elseif not itemCard.shownKey and list[1] and list[1].s.id then
       M.FillChartCard(itemCard, tostring(list[1].s.id))
     end
+  end
+
+  function st.RefreshItem()
+    buildItems(); st.FillItem()
   end
 
   function st.Refresh()
@@ -3826,13 +3852,35 @@ function M.BuildWealth(panel)
     GameTooltip:AddLine(M.ItemName(tostring(e.id)), qc.r, qc.g, qc.b)
     -- \194\187 (Latin-1 raquo): the GameTooltip font has no U+2192 arrow glyph
     addKV("Quantity", string.format("%d \194\187 %d", e.qR, e.qH))
-    addKV("Quantity effect", (e.dStock >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(e.dStock)),
-      C.sub, e.dStock >= 0 and C.green or C.red)
+    -- itemized window: held today - start + sold - bought = Total, line by
+    -- line re-checkable (the Consumed line is PART of Bought, not added again)
+    if (e.qR or 0) > 0 then
+      addKV("Start value", string.format("%d x %s  =  %s", e.qR,
+        M.MoneyPlain(math.floor(e.pR or 0)), M.MoneyPlain(math.floor(e.qR * (e.pR or 0)))), C.sub, C.sub)
+    end
+    if (e.buyQ or 0) > 0 then
+      addKV("Bought", string.format("%d x %s  =  -%s", e.buyQ,
+        M.MoneyPlain(math.floor(e.buyC / e.buyQ)), M.MoneyPlain(e.buyC)), C.sub, C.red)
+    end
+    if (e.sellQ or 0) > 0 then
+      addKV("Sold", string.format("%d  \194\183  +%s net", e.sellQ, M.MoneyPlain(e.sellN or 0)), C.sub, C.green)
+    end
+    if (e.cons or 0) > 0 then
+      addKV("Consumed", string.format("%d x %s  (in Bought)", e.cons,
+        M.MoneyPlain(math.floor(e.consCost / e.cons))), C.muted, C.muted)
+    end
+    if (e.qH or 0) > 0 then
+      addKV("Held today", string.format("%d x %s  =  %s", e.qH,
+        M.MoneyPlain(math.floor(e.pH or 0)), M.MoneyPlain(math.floor(e.qH * (e.pH or 0)))), C.sub, C.sub)
+    end
     addKV("Market effect", (e.dMarket >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(e.dMarket)),
       C.sub, e.dMarket >= 0 and C.green or C.red)
-    if (e.trade or 0) ~= 0 then
-      addKV("Realized trades", (e.trade >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(e.trade)),
-        C.sub, e.trade >= 0 and C.green or C.red)
+    addKV("Total P/L", (e.pnl >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(e.pnl)),
+      C.sub, e.pnl >= 0 and C.green or C.red)
+    if (e.cons or 0) > 0 then
+      local tp = e.pnl + e.consCost
+      addKV("Trading P/L", (tp >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(tp)) .. "  (consumption excluded)",
+        C.sub, tp >= 0 and C.green or C.red)
     end
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine("Click: holding history \194\183 shift: market chart \194\183 alt: post to chat", C.muted[1], C.muted[2], C.muted[3])
@@ -4543,7 +4591,7 @@ function M.BuildWealth(panel)
     STOCK  = "Quantity effect: units gained or lost since the reference day, valued at that day's price - buying, selling, crafting, consuming.",
     MARKET = "Market effect: the price moving under what you hold now - today's valuation vs the reference day's, per unit.",
     TRADES = "Realized gold from this item's AH and vendor trades in the window: sale proceeds after fees, minus what you paid.",
-    TOTAL  = "Quantity effect + market effect: how much this item moved your net worth.",
+    TOTAL  = "Quantity effect + market effect + realized trades: this item's profit or loss since the reference day. An at-market purchase nets out to ~0; a bargain buy shows as a gain.",
   }
   mo.barX = 0
   do
@@ -4768,9 +4816,11 @@ function M.FillMovers(scrollOnly)
   for r = #mo.rows + 1, vis do mo.mkRow(r) end
   FauxScrollFrame_Update(mo.scroll, #list, vis, 18)
   local offset = math.min(FauxScrollFrame_GetOffset(mo.scroll), math.max(0, #list - vis))
-  local maxAbs = 1
+  -- bar scale: the bar draws the TOTAL (pnl) column; the 0.1g floor keeps a
+  -- page of churn rows (pnl ~ 0) from blowing noise bars to full width
+  local maxAbs = 1000
   for _, e in ipairs(list) do
-    local a = math.max(math.abs(e.dTotal), math.abs(e.trade or 0))
+    local a = math.abs(e.pnl)
     if a > maxAbs then maxAbs = a end
   end
   local function money(fs, v)
@@ -4790,12 +4840,12 @@ function M.FillMovers(scrollOnly)
       money(btn.fs[3], e.dStock)
       money(btn.fs[4], e.dMarket)
       money(btn.fs[5], e.trade or 0)
-      money(btn.fs[6], e.dTotal)
+      money(btn.fs[6], e.pnl)
       local tw = btn.track:GetWidth() or 0
       if tw < 20 then tw = 180 end   -- first fill before the layout pass
       local half = math.max(1, math.floor(tw / 2) - 1)
-      local frac = math.min(1, math.abs(e.dTotal) / maxAbs)
-      if e.dTotal >= 0 then
+      local frac = math.min(1, math.abs(e.pnl) / maxAbs)
+      if e.pnl >= 0 then
         btn.barPos:SetWidth(math.max(1, half * frac)); btn.barNeg:SetWidth(1)
       else
         btn.barNeg:SetWidth(math.max(1, half * frac)); btn.barPos:SetWidth(1)
@@ -4812,8 +4862,10 @@ function M.FillMovers(scrollOnly)
     mo.rows[1].fs[1]:SetText("no single item moved more than 0.1g in this window")
     colorize(mo.rows[1].fs[1], C.muted)
   end
-  mo.other:SetText("everything else  (gold, AH discount, items under 0.5g)")
-  local rest = (at.gold or 0) + (at.residual or 0)
+  -- TOTAL rows carry each item's realized trade cash, which also sits inside
+  -- at.gold -- net the trading gold out here or the bridge double-counts it
+  mo.other:SetText("everything else  (non-trading gold, AH discount, items under 0.5g)")
+  local rest = (at.gold or 0) - (at.trading.net or 0) + (at.residual or 0)
   mo.otherVal:SetText(fmtDelta(rest)); colorize(mo.otherVal, deltaColor(rest))
 end
 
@@ -5001,6 +5053,10 @@ function M.FillWorthClass()
   local at2 = w.attrib or (M.WorthAttribution and M.WorthAttribution(nw))
   local pmap = (at2 and M._nwAttrib and M._nwAttrib.p) or nil
   local iqR = at2 and hist and hist[at2.refDay] and hist[at2.refDay].iq or nil
+  -- items over the movers keep-gate reuse the attribution's pnl, so this list
+  -- always agrees with the what-moved TOTAL for the same item
+  local byId = {}
+  if at2 then for _, ae in ipairs(at2.items or {}) do byId[ae.id] = ae end end
   if cv.itHint then
     cv.itHint:SetText("TOP ITEMS \194\183 today \194\183 change"
       .. (at2 and (" since " .. M.DayLabel(at2.refDay)) or ""))
@@ -5019,7 +5075,10 @@ function M.FillWorthClass()
       -- account-wide stock+market effect; the Auctions class is valued with
       -- the sell-chance discount, a price delta would be misleading there
       local dtot
-      if cls ~= "Auctions" and pmap and e.qty and e.qty > 0 then
+      local ae = cls ~= "Auctions" and byId[e.id] or nil
+      if ae then
+        dtot = ae.pnl
+      elseif cls ~= "Auctions" and pmap and e.qty and e.qty > 0 then
         local pR = pmap[e.id]
         if pR then
           local pH = (e.value or 0) / e.qty
@@ -5073,11 +5132,24 @@ function M.FillItemWorth()
       parts[#parts + 1] = string.format("you paid  %s avg  (%d bought)", M.MoneyPlain(paid), units)
     end
   end
-  -- this item's slice of the shared window: market effect on the shown stack
-  -- plus its realized trading -- the same maths as the movers view
+  -- this item's slice of the shared window: prefer the attribution entry (the
+  -- EXACT numbers the movers rank by, incl. consumption and the total), so the
+  -- header and the movers view can never disagree; small items below the
+  -- movers keep-gate fall back to the old inline estimate
   local at2 = w.attrib or (M.WorthAttribution and M.WorthAttribution(w.nw))
+  local ae
+  if at2 and id then
+    for _, x in ipairs(at2.items or {}) do if x.id == id then ae = x; break end end
+  end
   local pR = at2 and M._nwAttrib and M._nwAttrib.p and id and M._nwAttrib.p[id]
-  if at2 and pR and unit > 0 and qty > 0 then
+  if ae then
+    local line = string.format("since %s:  market %s  \194\183  trades %s",
+      M.DayLabel(at2.refDay), fmtDelta(ae.dMarket), fmtDelta(ae.trade))
+    if (ae.cons or 0) > 0 then
+      line = line .. string.format("  \194\183  consumed %d", ae.cons)
+    end
+    parts[#parts + 1] = line .. "  \194\183  total " .. fmtDelta(ae.pnl)
+  elseif at2 and pR and unit > 0 and qty > 0 then
     local dm = qty * (unit - pR)
     local trade = 0
     local realm = M.RealmKey()
@@ -5170,8 +5242,10 @@ function M.RefreshWealth()
   local gains, losses = {}, {}
   if at then
     for _, e in ipairs(at.items) do
-      if e.dTotal > 0 and #gains < 3 then gains[#gains + 1] = e
-      elseif e.dTotal < 0 and #losses < 3 then losses[#losses + 1] = e end
+      -- 0.1g floor: churn rows (kept for their |trade| alone) carry a pnl of a
+      -- few copper, and fmtDelta would head TOP GAINERS with a dash
+      if e.pnl >= 1000 and #gains < 3 then gains[#gains + 1] = e
+      elseif e.pnl <= -1000 and #losses < 3 then losses[#losses + 1] = e end
       if #gains >= 3 and #losses >= 3 then break end
     end
   end
@@ -5182,7 +5256,7 @@ function M.RefreshWealth()
       r.btn.e = e
       if e then
         setItemName(r.name, tostring(e.id))
-        r.val:SetText(fmtDelta(e.dTotal)); colorize(r.val, deltaColor(e.dTotal))
+        r.val:SetText(fmtDelta(e.pnl)); colorize(r.val, deltaColor(e.pnl))
       else
         r.name:SetText(""); r.val:SetText("")
       end
@@ -7199,4 +7273,126 @@ function M.ShowGuide()
   f._list, f._idx = M.GUIDE, 1
   renderNews(f)
   f:Show()
+end
+
+-- ===== Onboarding milestones ================================================
+-- Six one-shot cards keyed to the own-scan-DAY counter (Data.lua bumps
+-- config.scanDays once per day with a stored scan; Core.lua initializes).
+-- Same stacked window as M.NEWS / M.GUIDE, one card at a time, each shown
+-- once: config.obStage = highest card index shown (0 = none, 99 = account
+-- pre-dates the system). When a user blows past several thresholds, only the
+-- HIGHEST due card shows - lower ones drop silently, never queue.
+local OB_STAGES = {
+  { threshold = 0, kicker = "MIDAS \194\183 WELCOME",
+    title = "Welcome - one scan starts everything",
+    text = "Good call installing Midas. Everything here - prices, Fair value, charts, "
+      .. "signals - is built from your own auction house scans, so the first step is "
+      .. "simple: visit the auction house and hit Scan. Milestone tips like this one "
+      .. "appear as your archive grows; the full tour walks every tab in two minutes.",
+    where = "auction house  \226\128\186  Midas Scan",
+    preview = "scan", showLabel = "Full tour",
+    open = function() if M.ShowGuide then M.ShowGuide() end end,
+  },
+  { threshold = 1, kicker = "MIDAS \194\183 MILESTONE \194\183 SCAN DAY 1",
+    title = "Make the watchlist yours",
+    text = "That first scan just priced your whole realm. The Watchlist tab is home "
+      .. "base: it ranks a starter set of ~80 proven traders by Score and shows "
+      .. "Current vs Fair at a glance. Trim it to your market - right-click any item "
+      .. "anywhere in Midas to watch or unwatch it, and pin what you actually trade.",
+    where = "Watchlist tab   \194\183   right-click any item",
+    preview = "watchlist",
+    open = function() M.EnsureUI(); M.frame:Show(); M.SelectTab(TAB.Watchlist) end,
+  },
+  { threshold = 3, kicker = "MIDAS \194\183 MILESTONE \194\183 SCAN DAY 3",
+    title = "Make scanning a habit",
+    text = "Three scan days in - this is where Midas starts earning its keep. Fair, "
+      .. "Score and the movers sharpen with every day you scan: a few days of history "
+      .. "is what separates real bargains from noise. Let Settings > auto-scan carry "
+      .. "the habit - it runs a full scan moments after you open the AH, as often as "
+      .. "the server allows (roughly every 15 minutes).",
+    where = "Settings  \226\128\186  \"Auto-scan when the AH opens\"",
+    preview = "scan",
+    open = function() M.EnsureUI(); M.frame:Show(); M.SelectTab(TAB.Settings) end,
+  },
+  { threshold = 10, kicker = "MIDAS \194\183 MILESTONE \194\183 SCAN DAY 10",
+    title = "You know the highs and lows now",
+    text = "Ten scan days deep - you're doing great, and your charts now show real "
+      .. "highs and lows. Use that feel: refine your watchlist, then give your best "
+      .. "items a below and/or above limit in the Charts tab. Midas rings the "
+      .. "raid-warning bell the moment a scan or synced price reaches your limit - "
+      .. "buying the dip stops being luck.",
+    where = "Charts tab  \226\128\186  ALERT below / above",
+    preview = "alert",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Charts)
+      local key = demoItem()
+      if key then M.SetChartKey(key); M.RefreshCharts() end
+    end,
+  },
+  { threshold = 25, kicker = "MIDAS \194\183 MILESTONE \194\183 SCAN DAY 25",
+    title = "Check the wall, then sell",
+    text = "Twenty-five scan days - time the selling side paid off too. Before you "
+      .. "price anything, read its offer book: every current ask, cheapest first, "
+      .. "with the supply wall you would sit behind. At the auction house the book "
+      .. "docks on automatically while you browse or sell, and the sell helper ranks "
+      .. "everything in your bags by % over Fair - best sale first.",
+    where = "Charts tab  \226\128\186  offer book   \194\183   AH sell tab  \226\128\186  bottom edge",
+    preview = "offerbook",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Charts)
+      local key = demoItem()
+      if key then
+        M.SetChartKey(key); M.RefreshCharts()
+        if M.ShowDepth then M.ShowDepth(key) end
+      end
+    end,
+  },
+  { threshold = 50, kicker = "MIDAS \194\183 MILESTONE \194\183 SCAN DAY 50",
+    title = "Fifty scan days - read your ledger",
+    text = "A real trader checks the books. Collect your auction mail and the Trades "
+      .. "tab writes the ledger itself: net P/L, holdings change, fees - the band "
+      .. "answers the only question that matters: are you actually up? Check it weekly "
+      .. "and double down on what works. Stuck, or curious what others flip? "
+      .. "\"/midas discord\" opens the community.",
+    where = "Trades tab   \194\183   /midas discord",
+    preview = "trades",
+    open = function() M.EnsureUI(); M.frame:Show(); M.SelectTab(TAB.Trades) end,
+  },
+}
+
+-- show one onboarding card (shared frame with news/guide: last caller wins)
+function M.ShowOnboard(idx)
+  local e = OB_STAGES[idx]
+  if not (e and M.db and M.db.config) then return end
+  if InCombatLockdown and InCombatLockdown() then
+    C_Timer.After(10, function() M.ShowOnboard(idx) end)
+    return
+  end
+  -- one-shot: marked before it shows (like newsSeen), and never backwards -
+  -- a combat retry must not undo a higher card shown in the meantime
+  M.db.config.obStage = math.max(M.db.config.obStage or 0, idx)
+  newsFrame = newsFrame or buildNewsFrame()
+  local f = newsFrame
+  f._list, f._idx = { e }, 1
+  renderNews(f)
+  f:Show()
+end
+
+-- Data.lua calls this on each NEW scan day: at most ONE card per call,
+-- always the highest threshold the day counter has reached beyond obStage
+function M.OnboardScan()
+  if not (M.db and M.db.config) then return end
+  local done = M.db.config.obStage or 99
+  if done >= #OB_STAGES then return end
+  local n = M.db.config.scanDays or 0
+  for i = #OB_STAGES, done + 1, -1 do
+    if n >= OB_STAGES[i].threshold then
+      M.ShowOnboard(i)
+      return
+    end
+  end
 end

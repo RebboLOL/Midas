@@ -1,5 +1,12 @@
 # Midas – Changelog
 
+## 1.2.13 – 2026-10-13
+- **Trades tab: smooth scrolling.** Fixed a bug where every scroll step in the History and By-Item lists re-built and re-sorted the whole trade log, which grew laggy with a large history - scrolling now only redraws the visible rows.
+- **Net worth: movers rank by true profit.** Fixed a bug where buying a stack listed it as a top gainer at its full value - the gainers/losers, the what-moved list and its TOTAL column now count the gold you actually paid and earned into each item's total, so an at-market buy nets out to ~0 and the hover shows a Total P/L line.
+- **Onboarding milestones.** New installs now get six short tip cards at the right moments - a welcome at first login, then on your 1st, 3rd, 10th, 25th and 50th scan day pointing at the watchlist, auto-scan, price alerts, the offer book and the trade ledger - each with a Show-me jump, each shown exactly once.
+- **The P/L shows its math.** Hovering a net-worth mover now itemizes the window - start value, bought x avg, sold net, consumed, held today - down to Total and a trading-only P/L, the holding view's header carries the same consumed count and total, and grey dots in the holding chart mark the days units were used up rather than sold.
+- **Classic Anniversary (TBC) supported.** Midas now loads on the TBC anniversary client (2.5.6) - scanner, watchlist, offer book and trade ledger all run on the classic auction house API it already speaks.
+
 ## 1.2.12 – 2026-10-12
 - **Easier to read.** The grey secondary text steps up in brightness across the whole window and the Midas tooltip lines, so labels and helper text no longer sink into the background.
 - **Price alerts: start-page card and a Watchlist view.** The movers card lists this realm's active below/above alerts, and the Watchlist tab's new "price alerts" toggle opens the full list with CURRENT prices - a price turns green or gold once its limit is hit, and a click opens the chart.

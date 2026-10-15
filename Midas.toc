@@ -1,8 +1,8 @@
-## Interface: 11509, 16001
+## Interface: 11509, 16001, 20506
 ## Title: Midas |cffE8B44AAH|r
 ## Notes: AH market analysis: today's Top Picks, opportunity ranking & price charts (built-in full AH scanner)
 ## Author: Rebo
-## Version: 1.2.12
+## Version: 1.2.13
 ## SavedVariables: MidasDB
 ## AddonCompartmentFunc: Midas_OnCompartmentClick
 ## X-Category: Auction/Economy

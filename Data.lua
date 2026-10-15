@@ -65,6 +65,18 @@ function M.CommitScan(acc)
       end
     end
   end
+  -- onboarding milestones count DAYS with at least one own scan - ten scans on
+  -- one day are one step, not ten (UI.lua OB_STAGES). lastIngest still holds
+  -- the PREVIOUS own scan right here, so it hands us the new-day test for
+  -- free. UI.lua loads after Data.lua, hence the runtime guard; the short
+  -- delay lets the scan-stored chat line and the dock re-fill land first.
+  if items > 0 then
+    local prev = M.db.config.lastIngest
+    if not prev or math.floor((prev - M.C.SCAN_DAY_0) / 86400) ~= day then
+      M.db.config.scanDays = (M.db.config.scanDays or 0) + 1
+      if M.OnboardScan then C_Timer.After(0.8, M.OnboardScan) end
+    end
+  end
   M.db.config.lastIngest = now
   M.CommitDepth(acc, now)
   M.DirtyAnalysis()

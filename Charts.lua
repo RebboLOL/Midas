@@ -1201,6 +1201,26 @@ function M.RenderHoldingChart(canvas, key, qty)
       end
     end
   end
+  -- grey consumption dots: units that left the holding WITHOUT a logged sale
+  -- (enchants, crafting, gifts). Between two snapshot-anchored days the stock
+  -- should be prev + buys - sells; whatever the next anchor is short of was
+  -- used up, marked on that anchor day.
+  local consAt = {}
+  do
+    local prevQ, prevDay
+    for i = 1, n do
+      local d = arr[i].day
+      local snapQ = id and hist and hist[d] and hist[d].iq and hist[d].iq[id]
+      if snapQ ~= nil then
+        if prevQ ~= nil then
+          local expect = prevQ
+          for dd = prevDay + 1, d do expect = expect + (delta[dd] or 0) end
+          if snapQ < expect then consAt[d] = expect - snapQ end
+        end
+        prevQ, prevDay = snapQ, d
+      end
+    end
+  end
   -- layout: one plot, price scale on the left, value scale on the right
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   local left, right, top, bottom = 64, 70, 16, 20
@@ -1296,6 +1316,11 @@ function M.RenderHoldingChart(canvas, key, qty)
         reads[#reads + 1] = { kind = "tsell", y = YP((a.s.cost / a.s.qty) / 10000),
           l1 = string.format("Sold x%d  \194\183  %s", a.s.qty, M.MoneyPlain(a.s.cost / a.s.qty)) }
       end
+    end
+    local cq = consAt[p2.day]
+    if cq and cq > 0 then
+      reads[#reads + 1] = { kind = "tcons", y = vy,
+        l1 = string.format("Consumed x%d  \194\183  no sale logged", cq) }
     end
     pts[#pts + 1] = { x = xx, y = vy, day = p2.day, reads = reads }
   end
@@ -1397,6 +1422,19 @@ function M.RenderHoldingChart(canvas, key, qty)
       end
     end
   end
+  -- consumption as grey dots ON the value line (that is where the drop shows),
+  -- same "My trades" toggle as the buy/sell dots
+  local drewCons = false
+  if M.chartTrades ~= false then
+    local cr, cg, cb = TC("muted")
+    for _, p2 in ipairs(arr) do
+      local cq = consAt[p2.day]
+      if cq and cq > 0 then
+        RoundDot(canvas, X(p2.day), YV(p2.v / 10000), dotSize(cq), cr, cg, cb)
+        drewCons = true
+      end
+    end
+  end
   canvas._pts, canvas._plotBot, canvas._plotTop, canvas._plotRight = pts, bottom, bottom + ph, left + pw
   M.SetupHover(canvas)
   -- axes: PRICE scale on the left (gold), VALUE scale on the right (teal-muted)
@@ -1428,7 +1466,13 @@ function M.RenderHoldingChart(canvas, key, qty)
     local f3 = Label(canvas, lx + 10, bottom + ph + 3, "Buys", "LEFT", TC("sub"))
     local lx2 = lx + 10 + (f3:GetStringWidth() or 26) + 14
     RoundDot(canvas, lx2, bottom + ph + 3, 8, rr2, rg2, rb2)
-    Label(canvas, lx2 + 6, bottom + ph + 3, "Sells", "LEFT", TC("sub"))
+    local f4 = Label(canvas, lx2 + 6, bottom + ph + 3, "Sells", "LEFT", TC("sub"))
+    lx = lx2 + 6 + (f4:GetStringWidth() or 28) + 8
+  end
+  if drewCons then
+    local cr, cg, cb = TC("muted")
+    RoundDot(canvas, lx + 6, bottom + ph + 3, 8, cr, cg, cb)
+    Label(canvas, lx + 12, bottom + ph + 3, "Consumed", "LEFT", TC("sub"))
   end
   local labelN = capped and math.min(2, n) or math.min(4, n)
   for k = 0, labelN - 1 do

@@ -600,6 +600,9 @@ end
 --   dStock  = (qH - qR) * pR   -- bought/sold/crafted/consumed
 --   dMarket = qH * (pH - pR)   -- the market moved under what you hold
 --   trade   = realized gold from AH/vendor trades of the item in the window
+--   pnl     = dStock + dMarket + trade  -- true P&L since R (ranks the list)
+--   buyQ/buyC, sellQ/sellN = the window's buys and sells per side
+--   cons/consCost = own consumption: bought, neither resold nor still held
 -- Reference prices are cached per (analysis generation, refDay) -- the only
 -- expensive side (DemandBase/Floor7 per item).
 function M.WorthAttribution(nw, refDayOverride)
@@ -634,8 +637,11 @@ function M.WorthAttribution(nw, refDayOverride)
   end
   local pcache = cache.p
 
-  -- realized trading + quantity deltas over (refDay, today], one log pass
+  -- realized trading + quantity deltas over (refDay, today], one log pass.
+  -- buy/sell quantities and gold are kept per side too: the hover itemizes the
+  -- window (bought x avg, sold net, consumed) so the Total can be re-checked.
   local tradeBy, qDelta = {}, {}
+  local buyQ, buyC, sellQ, sellN = {}, {}, {}, {}
   local soldSum, boughtSum = 0, 0
   for _, e in ipairs((M.db.trade and M.db.trade.log) or {}) do
     if e.realm == realm and e.day and e.day > refDay
@@ -646,12 +652,16 @@ function M.WorthAttribution(nw, refDayOverride)
         if id then
           tradeBy[id] = (tradeBy[id] or 0) + (e.net or 0)
           qDelta[id] = (qDelta[id] or 0) - (e.count or 0)
+          sellQ[id] = (sellQ[id] or 0) + (e.count or 0)
+          sellN[id] = (sellN[id] or 0) + (e.net or 0)
         end
       else
         boughtSum = boughtSum + (e.gross or 0)
         if id then
           tradeBy[id] = (tradeBy[id] or 0) - (e.gross or 0)
           qDelta[id] = (qDelta[id] or 0) + (e.count or 0)
+          buyQ[id] = (buyQ[id] or 0) + (e.count or 0)
+          buyC[id] = (buyC[id] or 0) + (e.gross or 0)
         end
       end
     end
@@ -703,13 +713,24 @@ function M.WorthAttribution(nw, refDayOverride)
     market = market + dMarket
     local dTot = dStock + dMarket
     local trade = tradeBy[id] or 0
-    if math.abs(dTot) >= 1000 or math.abs(trade) >= 1000 then
+    -- true P&L of the position: holdings change PLUS the realized cash of its
+    -- trades. An at-market buy nets ~0 (stack value in, purchase cost out), a
+    -- bargain buy is an immediate gain, consumption stays a loss.
+    local pnl = dTot + trade
+    -- own consumption (the ConsumedCost rule): bought units that neither sold
+    -- on nor sit in the stock were used up - priced at the window's avg buy
+    local bq, sq = buyQ[id] or 0, sellQ[id] or 0
+    local cons = math.min(bq, math.max(0, qR + bq - sq - qH))
+    local consCost = cons > 0 and math.floor(cons * (buyC[id] or 0) / bq) or 0
+    if math.abs(pnl) >= 1000 or math.abs(trade) >= 1000 then
       items[#items + 1] = { id = id, qR = qR, qH = qH, pR = pR, pH = pH,
                             dStock = dStock, dMarket = dMarket,
-                            trade = trade, dTotal = dTot }
+                            trade = trade, dTotal = dTot, pnl = pnl,
+                            buyQ = bq, buyC = buyC[id] or 0, sellQ = sq,
+                            sellN = sellN[id] or 0, cons = cons, consCost = consCost }
     end
   end
-  table.sort(items, function(a, b) return math.abs(a.dTotal) > math.abs(b.dTotal) end)
+  table.sort(items, function(a, b) return math.abs(a.pnl) > math.abs(b.pnl) end)
 
   local dTotal = (nw.total or 0) - (snap.t or 0)
   local gold = (nw.money or 0) - (snap.m or 0)
