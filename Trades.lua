@@ -209,6 +209,13 @@ function M.ScanTradeMail()
             char = char, realm = realm,
           }
           added = added + 1
+          -- this mail proves the listing ended: drop it from the still-cached
+          -- owner list, or the inbox content and the stale auction row would
+          -- both count toward net worth (Inventory.lua owns the cache)
+          if M.AuctionSettled and id
+             and (kind == "sold" or kind == "returned" or kind == "cancelled") then
+            M.AuctionSettled(id, (count and count > 0) and count or 1)
+          end
           -- feed the sell-odds calibration (Fair price v2). A sold outcome only
           -- counts while the listings cache could also have priced an expiry of
           -- this item -- same observability for both outcomes keeps the measured

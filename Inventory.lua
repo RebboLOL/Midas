@@ -66,7 +66,12 @@ end
 local function scanMail(into)
   local n = (GetInboxNumItems and GetInboxNumItems()) or 0
   local maxAtt = ATTACHMENTS_MAX_RECEIVE or 16
+  local gold = 0
   for i = 1, n do
+    -- attached money (auction proceeds, COD payouts): it is real wealth
+    -- sitting in the inbox and must count before it is looted
+    local money = select(5, GetInboxHeaderInfo(i))
+    gold = gold + (money or 0)
     for j = 1, maxAtt do
       local link = GetInboxItemLink and GetInboxItemLink(i, j)
       if link then
@@ -78,7 +83,7 @@ local function scanMail(into)
       end
     end
   end
-  return into
+  return into, gold
 end
 
 -- ===== Per-character cache (bank/mail) ======================================
@@ -116,8 +121,11 @@ end
 
 function M.CacheMail()
   local c = CharCache(); if not c then return end
-  c.mail = scanMail({})
+  c.mail, c.mailGold = scanMail({})
   c.mailTs = time()
+  -- the inbox is the ground truth now: whatever left the owner list is either
+  -- in c.mail / c.mailGold or long gone - the pending bridge has done its job
+  c.pending, c.pendingTs = nil, nil
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- net worth reads this
 end
 
@@ -168,6 +176,44 @@ local function rowTotal(id, amount, count)
   return amount
 end
 
+-- Pending bridge: whatever just LEFT the owner list is now travelling by mail
+-- (sold = gold, expired/cancelled = the item) but is invisible until the
+-- mailbox is opened - without this, net worth dips by exactly that value the
+-- moment the AH refreshes the owner list. Remember the lost quantity with its
+-- proportional ask; CharAssets keeps valuing it like the auction it was, and
+-- M.CacheMail dissolves it once the inbox is the ground truth.
+local function notePending(c, au)
+  local old = c.auctions
+  if not old then return end
+  for id, a in pairs(old) do
+    local nq = (au[id] and au[id].qty) or 0
+    local lost = (a.qty or 0) - nq
+    if lost > 0 and (a.qty or 0) > 0 and (a.gold or 0) > 0 then
+      c.pending = c.pending or {}
+      local p = c.pending[id]
+      if not p then p = { qty = 0, gold = 0 }; c.pending[id] = p end
+      p.qty = p.qty + lost
+      p.gold = p.gold + math.floor(a.gold * lost / a.qty + 0.5)
+      c.pendingTs = time()
+    end
+  end
+end
+
+-- An auction mail just told us a listing ended (sold / returned / cancelled):
+-- take it out of the still-cached owner list, so the mail content and the
+-- stale auction row are never counted twice. The next real owner-list refresh
+-- overwrites the whole cache anyway.
+function M.AuctionSettled(id, count)
+  local c = CharCache(); if not (c and c.auctions) then return end
+  local a = c.auctions[id]; if not a then return end
+  local q = math.min(count or 1, a.qty or 0)
+  if q <= 0 then return end
+  local unit = a.gold / a.qty
+  a.qty = a.qty - q
+  a.gold = math.max(0, a.gold - math.floor(unit * q + 0.5))
+  if a.qty <= 0 then c.auctions[id] = nil end
+end
+
 local function cacheAuctionsModern(c)
   local AH = C_AuctionHouse
   local n = AH.GetNumOwnedAuctions() or 0
@@ -197,6 +243,7 @@ local function cacheAuctionsModern(c)
       end
     end
   end
+  notePending(c, au)
   c.auctions = au
   c.auctionsTs = time()
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- YOUR-ASK clusters + net worth read this
@@ -231,6 +278,7 @@ function M.CacheAuctions()
       end
     end
   end
+  notePending(c, au)
   c.auctions = au
   c.auctionsTs = time()
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- YOUR-ASK clusters + net worth read this

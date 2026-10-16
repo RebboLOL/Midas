@@ -68,7 +68,16 @@ function M.EnsureUI()
   f:SetBackdropColor(C.bg0[1], C.bg0[2], C.bg0[3], 0.97)
   f:SetBackdropBorderColor(T.Unpack(C.borderlt))
   f:SetMovable(true); f:EnableMouse(true); f:RegisterForDrag("LeftButton")
-  f:SetScript("OnDragStart", f.StartMoving); f:SetScript("OnDragStop", f.StopMovingOrSizing)
+  f:SetScript("OnDragStart", f.StartMoving)
+  f:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    -- remember where the window was dropped (top-left in UIParent space, like
+    -- the resize grip); EnsureUI restores it, fresh installs keep CENTER
+    if M.db and M.db.config and self:GetLeft() then
+      M.db.config.uiX = math.floor(self:GetLeft() + 0.5)
+      M.db.config.uiY = math.floor(self:GetTop() + 0.5)
+    end
+  end)
   f:SetClampedToScreen(true); f:SetFrameStrata("MEDIUM"); f:SetToplevel(true); f:Hide()
   tinsert(UISpecialFrames, "MidasFrame") -- ESC closes
 
@@ -79,6 +88,12 @@ function M.EnsureUI()
   if M.db and M.db.config then
     f:SetSize(math.max(980, math.min(1600, M.db.config.uiW or 980)),
               math.max(560, math.min(1000, M.db.config.uiH or 560)))
+    -- restore the last dragged-to spot; SetClampedToScreen pulls a stale
+    -- off-screen position (resolution change) back into view
+    if M.db.config.uiX and M.db.config.uiY then
+      f:ClearAllPoints()
+      f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", M.db.config.uiX, M.db.config.uiY)
+    end
   end
   local grip = CreateFrame("Button", nil, f)
   grip:SetSize(16, 16)
@@ -112,6 +127,12 @@ function M.EnsureUI()
     if M.db and M.db.config then
       M.db.config.uiW = f:GetWidth()
       M.db.config.uiH = f:GetHeight()
+      -- the grip re-anchored the frame to TOPLEFT: persist that spot too, so
+      -- the next session restores exactly this placement
+      if f:GetLeft() then
+        M.db.config.uiX = math.floor(f:GetLeft() + 0.5)
+        M.db.config.uiY = math.floor(f:GetTop() + 0.5)
+      end
     end
     -- charts read their canvas size at render time: redraw everything once
     if M.RerenderCharts then M.RerenderCharts() end
@@ -638,6 +659,31 @@ function M.EnsureScanUI()
   btn:SetPoint("BOTTOMRIGHT", 0, 0)
   btn:SetScript("OnClick", function() M.Scan(true) end)
 
+  -- coin button left of Scan: opens the market window right from the AH
+  -- (CF request spudster90 - discoverable without the minimap or /midas)
+  local open = CreateFrame("Button", nil, f, "BackdropTemplate")
+  open:SetSize(22, 22)
+  open:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", -4, 0)
+  open:SetBackdrop(T.FLAT)
+  open:SetBackdropColor(C.bg1[1], C.bg1[2], C.bg1[3], 0.97)
+  open:SetBackdropBorderColor(T.Unpack(C.border))
+  local coin = open:CreateTexture(nil, "ARTWORK")
+  coin:SetTexture("Interface\\Icons\\INV_Misc_Coin_01")
+  coin:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+  coin:SetPoint("TOPLEFT", 3, -3); coin:SetPoint("BOTTOMRIGHT", -3, 3)
+  open:SetScript("OnClick", function() if M.Toggle then M.Toggle() end end)
+  open:SetScript("OnEnter", function(self)
+    self:SetBackdropBorderColor(T.Unpack(C.accent))
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText("Midas", 1, 1, 1)
+    GameTooltip:AddLine("Open the market window", 0.82, 0.85, 0.92)
+    GameTooltip:Show()
+  end)
+  open:SetScript("OnLeave", function(self)
+    self:SetBackdropBorderColor(T.Unpack(C.border))
+    GameTooltip:Hide()
+  end)
+
   local bar = T.Surface(f, "bg0", "border")
   bar:SetSize(140, 12); bar:SetPoint("BOTTOMRIGHT", btn, "TOPRIGHT", 0, 5)
   bar:SetFrameLevel(f:GetFrameLevel() + 1)
@@ -664,6 +710,14 @@ function M.ShowScanButton()
   end
   w.frame:Show()
   M.ScanUIState(M.scanning == true)
+  -- opt-in (Settings "Open with the auction house"): bring the market window
+  -- up together with the AH; closing is left to the user
+  if M.db and M.db.config and M.db.config.openWithAH
+     and not (M.frame and M.frame:IsShown()) then
+    M.EnsureUI()
+    M.frame:Show()
+    if M.RefreshUI then M.RefreshUI() end
+  end
 end
 
 function M.HideScanButton()
@@ -2004,19 +2058,30 @@ function M.BuildSettings(panel)
   local gsBtn = T.Button(panel, "Get started guide", 150, 22)
   gsBtn:SetPoint("TOPLEFT", 250, -258)
   gsBtn:SetScript("OnClick", function() if M.ShowGuide then M.ShowGuide() end end)
+
+  -- opt-in auto-open with the AH (CF request spudster90); default OFF
+  local owCb = T.Checkbox(panel, "Open with the auction house", function(on)
+    M.db.config.openWithAH = on and true or nil
+  end)
+  owCb:SetPoint("TOPLEFT", 0, -284)
+  s.owCb = owCb
+  if T.HelpTip then
+    T.HelpTip(owCb, "Open with the auction house", {
+      "Opens the Midas window automatically whenever you open the auction house. The coin button next to \"Midas Scan\" opens it on demand either way." })
+  end
   if T.HelpTip then
     T.HelpTip(gsBtn, "Get started guide", {
       "A six-step tour of the Midas workflow: scan, watchlist, fair price, offer book, alerts and your own trades." })
   end
 
   local rl = T.Text(panel, T.SIZE.body, "sub")
-  rl:SetPoint("TOPLEFT", 0, -292); rl:SetText("Chart timeframe")
+  rl:SetPoint("TOPLEFT", 0, -322); rl:SetText("Chart timeframe")
   local rangeSeg = makeRangeSeg(panel)
-  rangeSeg.frame:SetPoint("TOPLEFT", 150, -288)
+  rangeSeg.frame:SetPoint("TOPLEFT", 150, -318)
 
   -- the small preview cards get their own window, independent of the big charts
   local pl = T.Text(panel, T.SIZE.body, "sub")
-  pl:SetPoint("TOPLEFT", 0, -320); pl:SetText("Preview timeframe")
+  pl:SetPoint("TOPLEFT", 0, -350); pl:SetText("Preview timeframe")
   local prevSeg = T.Segment(panel, {
     { key = "7",   label = "1W" },
     { key = "30",  label = "1M" },
@@ -2026,7 +2091,7 @@ function M.BuildSettings(panel)
     M.db.config.previewRange = key
     M.RerenderCharts()
   end)
-  prevSeg.frame:SetPoint("TOPLEFT", 150, -316)
+  prevSeg.frame:SetPoint("TOPLEFT", 150, -346)
   s.prevSeg = prevSeg
   if T.HelpTip then
     T.HelpTip(prevSeg.frame, "Preview timeframe", {
@@ -2036,7 +2101,7 @@ function M.BuildSettings(panel)
 
   -- mini price chart docked to the item tooltip: own timeframe, or off
   local tcl = T.Text(panel, T.SIZE.body, "sub")
-  tcl:SetPoint("TOPLEFT", 0, -348); tcl:SetText("Tooltip chart")
+  tcl:SetPoint("TOPLEFT", 0, -378); tcl:SetText("Tooltip chart")
   local ttSeg = T.Segment(panel, {
     { key = "7",   label = "1W" },
     { key = "30",  label = "1M" },
@@ -2046,7 +2111,7 @@ function M.BuildSettings(panel)
   }, function(key)
     M.db.config.tooltipRange = key
   end)
-  ttSeg.frame:SetPoint("TOPLEFT", 150, -344)
+  ttSeg.frame:SetPoint("TOPLEFT", 150, -374)
   s.ttSeg = ttSeg
   if T.HelpTip then
     T.HelpTip(ttSeg.frame, "Tooltip chart", {
@@ -2054,13 +2119,11 @@ function M.BuildSettings(panel)
       "Off hides the chart. The Midas text lines follow their own \"Item tooltip\" setting above." })
   end
 
-  -- live activity (left column, below GENERAL)
-  local ah = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
-  ah:SetPoint("TOPLEFT", 0, -380); ah:SetText("SYNC \194\183 LIVE ACTIVITY")
-  local log = T.Text(panel, T.SIZE.small, "sub")
-  log:SetPoint("TOPLEFT", 0, -398); log:SetPoint("BOTTOMRIGHT", panel, "BOTTOMLEFT", 430, 0)
-  log:SetJustifyH("LEFT"); log:SetJustifyV("TOP"); log:SetSpacing(4)
-  s.log = log
+  -- ----- SYNC STATUS + LIVE LOG (left column, below the timeframes) --------
+  -- the FAIR PRICE block lives in the right column now, where its demo graph
+  -- gets real height; the status read-out is monitoring and sits fine here
+  local sdiv = T.Divider(panel)
+  sdiv:SetPoint("TOPLEFT", 0, -412); sdiv:SetPoint("TOPRIGHT", panel, "TOPLEFT", 430, -412)
 
   -- ----- COMMUNITY SYNC (right column) -------------------------------------
   local X = 464
@@ -2113,12 +2176,64 @@ function M.BuildSettings(panel)
   local div = T.Divider(panel)
   div:SetPoint("TOPLEFT", X, -190); div:SetPoint("TOPRIGHT", 0, -190)
 
+  -- status + live log in the LEFT column (monitoring, below the timeframes);
+  -- the stats anchor keeps the log below however many import-source lines show
   local sh = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
-  sh:SetPoint("TOPLEFT", X, -202); sh:SetText("STATUS")
+  sh:SetPoint("TOPLEFT", 0, -424); sh:SetText("SYNC \194\183 STATUS")
   local stats = T.Text(panel, T.SIZE.body, "sub")
-  stats:SetPoint("TOPLEFT", X, -222); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
-  stats:SetWidth(480); stats:SetSpacing(5)
+  stats:SetPoint("TOPLEFT", 0, -444); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
+  stats:SetWidth(430); stats:SetSpacing(5)
   s.stats = stats
+  local ah = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
+  ah:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -14); ah:SetText("SYNC \194\183 LIVE ACTIVITY")
+  local log = T.Text(panel, T.SIZE.small, "sub")
+  log:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -32)
+  log:SetPoint("BOTTOMRIGHT", panel, "BOTTOMLEFT", 430, 0)
+  log:SetJustifyH("LEFT"); log:SetJustifyV("TOP"); log:SetSpacing(4)
+  s.log = log
+
+  -- ----- FAIR PRICE (right column, under the sync controls) ----------------
+  -- recency slider: how fast the market base behind Fair forgets old scan
+  -- days. Drag = live demo only; the expensive re-price commits on release.
+  -- The demo card grows to the panel bottom, so the graph gets real height.
+  local fh = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
+  fh:SetPoint("TOPLEFT", X, -202); fh:SetText("FAIR PRICE")
+  local fsub = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
+  fsub:SetPoint("LEFT", fh, "RIGHT", 10, 0)
+  fsub:SetText("how fast Fair follows the market")
+  local flabel = T.Text(panel, T.SIZE.small, "sub")
+  flabel:SetPoint("TOPLEFT", X, -226); flabel:SetText("Recency bias")
+  local fval = T.Text(panel, T.SIZE.small, "accent", T.FONT_SEMI)
+  fval:SetPoint("TOPLEFT", X + 404, -226); fval:SetWidth(76); fval:SetJustifyH("RIGHT")
+  local fbox = T.Surface(panel)
+  fbox:SetPoint("TOPLEFT", X, -262)
+  fbox:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 4)
+  local fdemo = CreateFrame("Frame", nil, fbox)
+  fdemo:SetPoint("TOPLEFT", 8, -8)
+  fdemo:SetPoint("BOTTOMRIGHT", -8, 8)
+  local fsl = T.Slider(panel, 260, 2, 14, function(v, done)
+    fval:SetText("half-life " .. v .. "d")
+    if M.RenderFairBiasDemo then M.RenderFairBiasDemo(fdemo, v) end
+    if done then
+      M.db.config.fairHalflife = (v ~= 7) and v or nil
+      if M.DirtyAnalysis then M.DirtyAnalysis() end
+      if M.RerenderCharts then M.RerenderCharts() end
+      if M.RequestUIRefresh then M.RequestUIRefresh() end
+    end
+  end)
+  fsl:SetPoint("TOPLEFT", X + 130, -224)
+  local fr = T.Text(panel, T.SIZE.tiny, "muted")
+  fr:SetPoint("TOPLEFT", X + 130, -244); fr:SetText("reactive \194\183 2d")
+  local fs2 = T.Text(panel, T.SIZE.tiny, "muted")
+  fs2:SetPoint("TOPLEFT", X + 330, -244); fs2:SetWidth(60); fs2:SetJustifyH("RIGHT")
+  fs2:SetText("steady \194\183 14d")
+  s.fairSl, s.fairVal, s.fairDemo = fsl, fval, fdemo
+  if T.HelpTip then
+    T.HelpTip(fsl, "Fair recency bias", {
+      "How fast the Fair price forgets old scan days: the market base behind Fair weighs each scan day by 0.5^(age/half-life).",
+      "SHORT half-life (2-4 days): Fair chases the latest days - reacts fast, jumpy on thin items. LONG (10-14 days): Fair smooths over the whole two-week window and shrugs off short dips.",
+      "Default 7 days. The graph below shows a market that dropped from 12g to 8g a week before today - drag and watch the base line change character. Changing it re-prices everything (Fair, signals, net-worth valuation); scanned history stays untouched." })
+  end
 
   -- keep it live while the tab is on screen (panels only OnUpdate while shown)
   panel:SetScript("OnUpdate", function(self, el)
@@ -2141,11 +2256,24 @@ function M.RefreshSettings()
   if s.alCb then s.alCb:SetChecked(cfg.alertLines ~= false) end
   if s.sdCb then s.sdCb:SetChecked(cfg.sellDock ~= false) end
   if s.mcCb then s.mcCb:SetChecked(cfg.modClicks ~= false) end
+  if s.owCb then s.owCb:SetChecked(cfg.openWithAH == true) end
   s.cb:SetChecked(cfg.share == true)
   s.trustSeg:Select(cfg.shareTrust == "guild" and "guild" or "all")
   if s.prevSeg then s.prevSeg:Select(cfg.previewRange or "all") end
   if s.ttSeg then s.ttSeg:Select(cfg.tooltipRange or "30") end
   if s.vicinitySeg then s.vicinitySeg:Select(cfg.vicinity or "off") end
+  -- fair recency slider: never fight an active drag (this runs on a 1s ticker);
+  -- redraw the demo when the value or the panel height changed
+  if s.fairSl and not s.fairSl.dragging then
+    local hl = (M.FairHalflife and M.FairHalflife()) or 7
+    s.fairSl:Set(hl)
+    s.fairVal:SetText("half-life " .. hl .. "d")
+    local hh = math.floor((s.fairDemo and s.fairDemo:GetHeight()) or 0)
+    if (s._fairHl ~= hl or s._fairH ~= hh) and M.RenderFairBiasDemo then
+      s._fairHl, s._fairH = hl, hh
+      M.RenderFairBiasDemo(s.fairDemo, hl)
+    end
+  end
   local info = M.CommInfo and M.CommInfo()
   if not info then s.stats:SetText("Comm module not loaded.") return end
   local GRN, RED, WHT, MUT, GOLD, MINT = s.GRN, s.RED, s.WHT, s.MUT, s.GOLD, s.MINT
@@ -5451,7 +5579,7 @@ function M.BuildCharts(panel)
   hoverStrip(-64, 16, "The market numbers", {
     "Current - the cheapest buyout in the newest scan.",
     "Fair - the trimmed, recency-weighted market value (its %-number is the sell chance at that price). 'capped' means your own sales prove buyers pay no more.",
-    "The maths:  B = sum(w\194\183low) / sum(w) over the last 14 daily lows, w = 0.5^(age/7); days with low > 1.5\194\183median are trimmed as no-demand spikes.",
+    "The maths:  B = sum(w\194\183low) / sum(w) over the last 14 daily lows, w = 0.5^(age/half-life) - the half-life is yours to set (Settings > FAIR PRICE, default 7d); days with low > 1.5\194\183median are trimmed as no-demand spikes.",
     "P(sell at r) = sigmoid(a - 3\194\183ln(r/r0)) with r = price/floor7, fitted from your sold/expired record; r* is the r where P = 50%.",
     "Fair = B \194\183 clamp(floor7\194\183r*/B, 1, 1.10) - at most +10% over the base, and never past the prices your sales really cleared at.",
     "Quick-sell - at/just under the current floor: sells near-certainly, with less margin.",

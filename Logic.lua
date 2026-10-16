@@ -158,11 +158,20 @@ function M.Floor7(series, uptoDay)
   return bestL
 end
 
--- Trimmed short-term market base: recency-weighted (half-life 7d) average of the
--- daily lowest buyouts over the last FAIR_BASE_DAYS, EXCLUDING up-outlier days whose
--- low exceeds the window median x FAIR_TRIM. On thin days the "daily low" can be a
--- single overpriced ask that met no demand; those days must not inflate Fair. The
--- median itself always survives the trim, so at least half the window remains.
+-- Trimmed short-term market base: recency-weighted average of the daily lowest
+-- buyouts over the last FAIR_BASE_DAYS, EXCLUDING up-outlier days whose low
+-- exceeds the window median x FAIR_TRIM. On thin days the "daily low" can be a
+-- single overpriced ask that met no demand; those days must not inflate Fair.
+-- The median itself always survives the trim, so at least half the window
+-- remains. The recency HALF-LIFE is user-tunable (Settings > Fair price,
+-- config.fairHalflife, default 7 days): shorter = Fair follows the last days,
+-- longer = it smooths over the whole window.
+function M.FairHalflife()
+  local hl = M.db and M.db.config and tonumber(M.db.config.fairHalflife)
+  if not hl or hl < 2 or hl > 14 then return 7 end
+  return hl
+end
+
 function M.DemandBase(series, uptoDay)
   if not series then return nil end
   local C = M.C
@@ -183,10 +192,11 @@ function M.DemandBase(series, uptoDay)
   if #win < 4 then return M.Floor7(series, last) end
   table.sort(lows)
   local cap = median(lows) * (C.FAIR_TRIM or 1.5)
+  local hl = M.FairHalflife()
   local wsum, vsum = 0, 0
   for i = 1, #win do
     if win[i].low <= cap then
-      local w = 0.5 ^ ((last - win[i].day) / 7)
+      local w = 0.5 ^ ((last - win[i].day) / hl)
       wsum = wsum + w
       vsum = vsum + w * win[i].low
     end

@@ -274,6 +274,69 @@ function T.Input(parent, w, h, placeholder, onChanged)
   return box
 end
 
+-- ---- Horizontal slider (house style) ---------------------------------------
+-- Thin track, accent fill, square knob; INTEGER steps in [minV, maxV].
+-- onChange(value, done) fires per step while dragging (done = false) and once
+-- more on release (done = true) - commit expensive work on done only.
+function T.Slider(parent, width, minV, maxV, onChange)
+  local f = CreateFrame("Frame", nil, parent)
+  f:SetSize(width, 18)
+  f:EnableMouse(true)
+  local track = f:CreateTexture(nil, "BACKGROUND")
+  track:SetColorTexture(u(T.C.border))
+  track:SetPoint("LEFT", 0, 0); track:SetPoint("RIGHT", 0, 0); track:SetHeight(2)
+  -- one faint tick per step, so the scale reads at a glance
+  if maxV - minV <= 24 then
+    for v = minV, maxV do
+      local tick = f:CreateTexture(nil, "BORDER")
+      tick:SetColorTexture(u(T.C.borderlt))
+      tick:SetSize(1, 5)
+      tick:SetPoint("LEFT", (v - minV) / math.max(1, maxV - minV) * (width - 8) + 3.5, 0)
+    end
+  end
+  local fill = f:CreateTexture(nil, "ARTWORK")
+  fill:SetColorTexture(T.C.accent[1], T.C.accent[2], T.C.accent[3], 0.9)
+  fill:SetPoint("LEFT", 0, 0); fill:SetHeight(2); fill:SetWidth(1)
+  local knob = f:CreateTexture(nil, "OVERLAY")
+  knob:SetColorTexture(u(T.C.text))
+  knob:SetSize(8, 14)
+  f.value = minV
+  local function place()
+    local frac = (f.value - minV) / math.max(1, maxV - minV)
+    local x = frac * (width - 8)
+    knob:ClearAllPoints()
+    knob:SetPoint("LEFT", f, "LEFT", x, 0)
+    fill:SetWidth(math.max(1, x + 4))
+  end
+  function f:Set(v, fire)
+    v = math.max(minV, math.min(maxV, math.floor((tonumber(v) or minV) + 0.5)))
+    local changed = v ~= self.value
+    self.value = v
+    place()
+    if fire and changed and onChange then onChange(v, true) end
+  end
+  f:SetScript("OnMouseDown", function(self) self.dragging = true end)
+  f:SetScript("OnUpdate", function(self)
+    if not self.dragging then return end
+    if not IsMouseButtonDown("LeftButton") then
+      self.dragging = false
+      if onChange then onChange(self.value, true) end
+      return
+    end
+    local scale = self:GetEffectiveScale()
+    local cx = GetCursorPosition() / scale - (self:GetLeft() or 0)
+    local frac = math.max(0, math.min(1, cx / width))
+    local v = math.floor(minV + frac * (maxV - minV) + 0.5)
+    if v ~= self.value then
+      self.value = v
+      place()
+      if onChange then onChange(v, false) end
+    end
+  end)
+  place()
+  return f
+end
+
 -- ---- Slim down a FauxScrollFrame scrollbar ---------------------------------
 function T.StyleScrollbar(scrollName)
   local sb = _G[scrollName .. "ScrollBar"]

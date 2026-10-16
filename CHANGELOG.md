@@ -1,5 +1,12 @@
 # Midas – Changelog
 
+## 1.2.14 – 2026-10-16
+- **Fair price: recency is yours to tune.** A new Settings slider sets the half-life of the market base behind Fair (2-14 days, default 7), with a live example graph right below - short chases the latest days, long smooths over the whole two-week window.
+- **Net worth: no more dip while auction mail waits.** Fixed a bug where ended auctions vanished from the total until the mailbox was emptied - their value now bridges into the unread mail, gold attached to mails counts too, and collected mail no longer double-counts against the stale auction list.
+- **Alerts: off-scale limits say so.** Fixed a bug where a price-alert line far outside the chart silently did not appear - the chart now labels it "off scale" at the edge, and money inputs like "7s50" parse as 7s 50c instead of dropping the trailing number.
+- **Tooltip chart: no more crosshair.** The small price chart in the item tooltip no longer reacts to the mouse - it is a picture, not a second chart.
+- **The window remembers its place - and meets you at the AH.** It reopens where you left it (position and size), a new Settings toggle opens it together with the auction house, and a coin button next to "Midas Scan" opens it on demand.
+
 ## 1.2.13 – 2026-10-13
 - **Trades tab: smooth scrolling.** Fixed a bug where every scroll step in the History and By-Item lists re-built and re-sorted the whole trade log, which grew laggy with a large history - scrolling now only redraws the visible rows.
 - **Net worth: movers rank by true profit.** Fixed a bug where buying a stack listed it as a top gainer at its full value - the gainers/losers, the what-moved list and its TOTAL column now count the gold you actually paid and earned into each item's total, so an at-market buy nets out to ~0 and the hover shows a Total P/L line.

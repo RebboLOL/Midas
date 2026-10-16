@@ -254,17 +254,27 @@ function M.CharAssets(ck)
       itemsTotal = itemsTotal + val
     end
   end
+  -- gold attached to unread mail (auction proceeds): real wealth, counted
+  -- until the loot moves it into c.money (both update on the mailbox visit)
+  money = money + (c.mailGold or 0)
   local auctions, auctionsTotal = {}, 0
-  if c.auctions then
-    for id, a in pairs(c.auctions) do
-      local qty, gold = a.qty or 0, a.gold or 0
-      local unit = (qty > 0) and (gold / qty) or gold
-      local val = math.floor(gold * M.SellChance(id, unit))
-      if val > 0 then
-        auctions[#auctions + 1] = { id = id, qty = qty, value = val, ask = gold }
-        auctionsTotal = auctionsTotal + val
-      end
+  local function addAuction(id, a)
+    local qty, gold = a.qty or 0, a.gold or 0
+    local unit = (qty > 0) and (gold / qty) or gold
+    local val = math.floor(gold * M.SellChance(id, unit))
+    if val > 0 then
+      auctions[#auctions + 1] = { id = id, qty = qty, value = val, ask = gold }
+      auctionsTotal = auctionsTotal + val
     end
+  end
+  if c.auctions then
+    for id, a in pairs(c.auctions) do addAuction(id, a) end
+  end
+  -- the pending bridge (Inventory.lua): listings that left the owner list but
+  -- whose mail is still unread keep their auction valuation - no dip between
+  -- the AH refresh and the mailbox visit. 30-day cap = the mail's own lifetime.
+  if c.pending and (not c.pendingTs or (time() - c.pendingTs) < 30 * 86400) then
+    for id, a in pairs(c.pending) do addAuction(id, a) end
   end
   table.sort(items, function(a, b) return a.value > b.value end)
   table.sort(auctions, function(a, b) return a.value > b.value end)

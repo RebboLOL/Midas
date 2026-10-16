@@ -110,6 +110,10 @@ local function chartPanel()
   tt.canvas:SetPoint("TOPLEFT", 6, -20)
   tt.canvas:SetSize(238, 80)
   tt.canvas._compact = true
+  -- no crosshair/read-out on the tooltip chart: SetupHover's OnUpdate keys on
+  -- IsMouseOver() (pure geometry, ignores EnableMouse), so pre-marking the
+  -- canvas as wired is the one switch that really turns it off
+  tt.canvas._hoverWired = true
   tt.canvas:EnableMouse(false)
   GameTooltip:HookScript("OnHide", function() tt:Hide() end)
   return tt
@@ -150,7 +154,7 @@ local function showChart(tooltip, itemID)
     f.head:SetText("MIDAS  \194\183  PRICE  \194\183  " .. (TT_RANGE_LBL[rng] or rng))
     f.canvas._rangeOverride = rng
     M.RenderAllTime(f.canvas, key)
-    f.canvas:EnableMouse(false)   -- SetupHover re-arms the mouse each render
+    f.canvas:EnableMouse(false)   -- belt and braces; _hoverWired skips SetupHover
   end
   f:Show()
 end

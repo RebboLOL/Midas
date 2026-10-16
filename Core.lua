@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.13"
+M.version = "1.2.14"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -125,7 +125,9 @@ function M.GetScanDay()
   return math.floor((time() - M.C.SCAN_DAY_0) / 86400)
 end
 
--- "4g50s" / "4.5" (bare number = gold) / "120s" / "45000c" -> copper, nil on junk
+-- "4g50s" / "4.5" (bare number = gold) / "120s" / "45000c" -> copper, nil on junk.
+-- A trailing number after the last unit means the NEXT SMALLER unit:
+-- "7g50" = 7g 50s, "7s50" = 7s 50c (it used to be swallowed silently).
 function M.ParseMoney(txt)
   if type(txt) ~= "string" then return nil end
   txt = txt:lower():gsub("%s+", ""):gsub(",", ".")
@@ -137,6 +139,12 @@ function M.ParseMoney(txt)
     local plain = tonumber(txt)
     if not plain or plain <= 0 then return nil end
     return math.floor(plain * 10000 + 0.5)
+  end
+  local tail = tonumber(txt:match("[gsc](%d+%.?%d*)$"))
+  if tail then
+    if c then                                   -- nothing smaller than copper
+    elseif s then c = tail
+    elseif g then s = tail end
   end
   local v = math.floor((g or 0) * 10000 + (s or 0) * 100 + (c or 0) + 0.5)
   return v > 0 and v or nil

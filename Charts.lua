@@ -863,7 +863,15 @@ function M.RenderAllTime(canvas, key)
   if alertRec then
     local function alertLine(v, word, cr, cg, cb)
       local g = v / 10000
-      if g < vmin or g > vmax then return end
+      if g < vmin or g > vmax then
+        -- limit outside the scale (the widen rule above left it out): say so
+        -- at the edge instead of silently drawing nothing - a mistyped 7g50
+        -- limit on a 7s item looks exactly like a missing line otherwise
+        local ay = (g > vmax) and (Y(vmax) - 6) or (Y(vmin) + 7)
+        Label(canvas, left + 4, ay,
+          "ALERT " .. word .. "  " .. M.MoneyPlain(v) .. "  \194\183  off scale", "LEFT", cr, cg, cb)
+        return
+      end
       local ay = Y(g)
       DashSeg(canvas, left, ay, left + pw, ay, 1.2, cr, cg, cb, 0.55)
       Label(canvas, left + 4, ay + 7, "ALERT " .. word .. "  " .. M.MoneyPlain(v), "LEFT", cr, cg, cb)
@@ -1520,6 +1528,53 @@ function M.RenderHelpFair(canvas)
   Label(canvas, left - 4, Y(9.5), "9g", "RIGHT", mr, mg, mb)
   Label(canvas, left - 4, Y(12), "12g", "RIGHT", mr, mg, mb)
   Label(canvas, left, bottom - 9, "14 days of scans", "LEFT", TC("muted"))
+end
+
+-- Live Settings demo for the Fair recency slider: three weeks of lively daily
+-- lows around 12g that drop to ~8g a week before the end. The purple line is
+-- the market base COMPUTED PER DAY over its trailing 14-day window with the
+-- chosen half-life - exactly like the Fair line in the real charts: a short
+-- half-life hugs the price down right after the drop, a long one trails it.
+-- Pure function of (canvas size, hl) - cheap to redraw per drag step.
+function M.RenderFairBiasDemo(canvas, hl)
+  ResetPools(canvas)
+  local W, H = canvas:GetWidth(), canvas:GetHeight()
+  if W < 50 or H < 40 then return end   -- at the minimum window the demo zone collapses
+  hl = hl or 7
+  local left, right, top, bottom = 34, 8, 12, 16
+  local pw, ph = W - left - right, H - top - bottom
+  local lows = { 11.6, 12.9, 10.9, 13.1, 11.4, 12.6, 10.8, 13.2, 11.5, 12.8,
+                 11.0, 12.5, 11.3, 9.4, 7.8, 8.9, 7.3, 8.8, 7.5, 8.7, 7.9 }
+  local n = #lows
+  local lo, hi = 6.5, 13.8
+  local function X(i) return left + (i - 1) / (n - 1) * pw end
+  local function Y(g) return bottom + (g - lo) / (hi - lo) * ph end
+  local tr, tg2, tb = TC("teal")
+  local pts = {}
+  for i, g in ipairs(lows) do pts[#pts + 1] = { x = X(i), y = Y(g) } end
+  SmoothLine(canvas, pts, 1.6, tr, tg2, tb, 1, bottom, bottom + ph, 0.5)
+  -- trailing base per day: the real DemandBase weighting (0.5^(age/hl)) over
+  -- the last up-to-14 days known at that day (the trim cannot fire here)
+  local bpts, lastBase = {}, 0
+  for i = 1, n do
+    local wsum, vsum = 0, 0
+    for j = math.max(1, i - 13), i do
+      local w = 0.5 ^ ((i - j) / hl)
+      wsum = wsum + w
+      vsum = vsum + w * lows[j]
+    end
+    lastBase = vsum / wsum
+    bpts[#bpts + 1] = { x = X(i), y = Y(lastBase) }
+  end
+  local pr, pg, pb = TC("purple")
+  SmoothLine(canvas, bpts, 1.4, pr, pg, pb, 0.9, bottom, bottom + ph, 0.5)
+  Label(canvas, X(n) - 4, bpts[n].y + 9,
+    "base " .. M.MoneyPlain(math.floor(lastBase * 10000)), "RIGHT", pr, pg, pb)
+  local mr, mg2, mb = TC("muted")
+  Label(canvas, left - 4, Y(8), "8g", "RIGHT", mr, mg2, mb)
+  Label(canvas, left - 4, Y(12), "12g", "RIGHT", mr, mg2, mb)
+  Label(canvas, left, bottom - 9, "old level ~12g", "LEFT", mr, mg2, mb)
+  Label(canvas, left + pw, bottom - 9, "dropped to ~8g", "RIGHT", mr, mg2, mb)
 end
 
 function M.RenderHelpOdds(canvas)
