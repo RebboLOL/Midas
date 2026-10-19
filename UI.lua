@@ -830,6 +830,12 @@ local function ahBookPanel()
   return ahb
 end
 
+-- The scanned level an own ask belongs to. Own unit prices are rounded
+-- (Inventory.lua), the scan's are floored, so one auction can read 1c apart.
+local function scanLevelAt(byPrice, p)
+  return byPrice[p] or byPrice[p - 1]
+end
+
 local function ahBookFill(id)
   local f = ahb
   local key = tostring(id)
@@ -863,15 +869,25 @@ local function ahBookFill(id)
     if g and g.lbl == lbl then g.qty = g.qty + l.qty; g.cum = l.cum
     else gl[#gl + 1] = { lbl = lbl, price = l.price, qty = l.qty, cum = l.cum } end
   end
-  -- your own asks per displayed price (every character of this realm+faction)
-  local myByLbl, myQty = {}, 0
+  -- your own asks per displayed price (every character of this realm+faction).
+  -- They sit INSIDE a scanned level only at its exact copper price: a 1c
+  -- undercut posted after the scan reads like the level (silver rounding)
+  -- but is supply the scan never saw
+  local lvByPrice = {}
+  for _, l in ipairs(d.levels) do lvByPrice[l.price] = l end
+  local myByLbl, myQty, myNew = {}, 0, 0
   if M.db and M.db.chars then
     for _, ch in pairs(M.db.chars) do
       local a = ch.auctions and ch.auctions[id]
       if a and (not M.CharInScope or M.CharInScope(ch)) then
         myQty = myQty + (a.qty or 0)
         if a.lv then for p, q in pairs(a.lv) do
-          local lbl = M.MoneyPlain(p); myByLbl[lbl] = (myByLbl[lbl] or 0) + q
+          local l = scanLevelAt(lvByPrice, p)
+          local inScan = l and math.min(q, l.qty) or 0
+          if inScan > 0 then
+            local lbl = M.MoneyPlain(l.price); myByLbl[lbl] = (myByLbl[lbl] or 0) + inScan
+          end
+          myNew = myNew + (q - inScan)
         end end
       end
     end
@@ -921,7 +937,9 @@ local function ahBookFill(id)
   if m and m.quick then ft[#ft + 1] = "quick-sell " .. M.MoneyPlain(m.quick) end
   f.foot1:SetText(table.concat(ft, "   \194\183   "))
   if myQty > 0 then
-    f.foot2:SetText("your asks \195\151" .. myQty .. "  (mint share)")
+    local t = "your asks \195\151" .. myQty .. "  (mint share)"
+    if myNew > 0 then t = t .. "  \194\183  \195\151" .. myNew .. " posted after the scan" end
+    f.foot2:SetText(t)
     f.foot2:SetTextColor(mint[1], mint[2], mint[3])
   elseif #gl > n then
     f.foot2:SetText("+" .. (#gl - n) .. " higher prices not shown")
@@ -1374,9 +1392,14 @@ local function setStat(obj, i, label, value, rgb)
   if rgb then colorize(obj.stats[i].val, rgb) else colorize(obj.stats[i].val, C.text) end
 end
 
+-- Re-fills only when the item OR the data generation changed: a scan, sync,
+-- trade mail or the Fair slider bumps M._analysisGen, so the card follows the
+-- table rows next to it instead of keeping the numbers of its first fill.
 function M.FillChartCard(obj, key)
-  if not obj or obj.shownKey == key then return end
-  obj.shownKey = key
+  if not obj then return end
+  local gen = M._analysisGen or 0
+  if obj.shownKey == key and obj.shownGen == gen then return end
+  obj.shownKey, obj.shownGen = key, gen
   if not key then
     obj.title:SetText("No data"); colorize(obj.title, C.sub); obj.cat:SetText("")
     for i = 1, 5 do obj.stats[i].lbl:SetText(""); obj.stats[i].val:SetText("") end
@@ -1399,15 +1422,22 @@ function M.FillChartCard(obj, key)
   obj.cat:SetText(M.ItemCategory(key) .. "   \194\183   " .. m.days .. " days"); colorize(obj.cat, C.sub)
   local sells = m.liqLabel or "?"
   if m.speed then sells = string.format("~%.1f/day \194\183 %s", m.speed, m.liqLabel or "?") end
-  setStat(obj, 1, "Current", M.MoneyPlain(cur))
-  -- Fair carries its calibrated sell chance; capped = even the floor can't hit it
+  local gone = M.NotListed and M.NotListed(m)
+  if gone then
+    setStat(obj, 1, "Last seen", M.MoneyPlain(cur) .. "  \194\183  " .. M.DayLabel(m.lastDay), C.muted)
+  else
+    setStat(obj, 1, "Current", M.MoneyPlain(cur))
+  end
+  -- Fair carries its calibrated sell chance; oversupplied = even the trimmed
+  -- market level stays below the target odds (post less, don't price lower)
   local fairLbl = "Fair"
-  if m.fairCapped then fairLbl = "Fair (capped)"
-  elseif m.oddsAtFair then fairLbl = string.format("Fair (~%.0f%% odds)", m.oddsAtFair * 100) end
+  if m.oddsAtFair then fairLbl = string.format("Fair (~%.0f%% odds)", m.oddsAtFair * 100) end
+  if m.fairCapped then fairLbl = fairLbl .. " \194\183 oversupplied" end
   setStat(obj, 2, fairLbl, M.MoneyPlain(m.fair))
-  local drgb = (delta >= 0.10) and C.green or (delta <= -0.10) and C.red or C.sub
+  local drgb = C[M.DeltaColor and M.DeltaColor(delta) or "sub"] or C.sub
   local vsTxt = string.format("%+.0f%%", delta * 100)
   if m.odds then vsTxt = string.format("%+.0f%%  \194\183  ~%.0f%% odds", delta * 100, m.odds * 100) end
+  if gone then vsTxt, drgb = "not listed in the newest scan", C.muted end
   setStat(obj, 3, "vs fair", vsTxt, drgb)
   setStat(obj, 4, "Sells", sells)
   setStat(obj, 5, "Quick-sell", M.MoneyPlain(m.quick))
@@ -1686,7 +1716,8 @@ function M.RefreshHome()
   local wlist = (M.RankWatch and M.RankWatch()) or {}
   local wBuys, wSells = {}, {}
   for _, e in ipairs(wlist) do
-    if e.m and e.m.delta then
+    -- an item missing from the newest scan has no current price to signal on
+    if e.m and e.m.delta and not (M.NotListed and M.NotListed(e.m)) then
       if e.m.delta < 0 then wBuys[#wBuys + 1] = e
       elseif e.m.delta > 0 then wSells[#wSells + 1] = e end
     end
@@ -1704,7 +1735,7 @@ function M.RefreshHome()
     row[2]:SetText(M.MoneyPlain(e.m.cur)); colorize(row[2], C.text)
     row[3]:SetText(M.MoneyPlain(e.m.fair)); colorize(row[3], C.sub)
     row[4]:SetText(string.format("%+.0f%%", e.m.delta * 100))
-    colorize(row[4], (e.m.delta < 0) and C.green or C.red)
+    colorize(row[4], C[M.DeltaColor and M.DeltaColor(e.m.delta) or "sub"] or C.sub)
     row.btn.key = e.key
   end
   for r = 1, #h.wBuy do
@@ -1727,9 +1758,10 @@ function M.RefreshHome()
     if not seen[id] then seen[id] = true; mtBuys[#mtBuys + 1] = rec end
   end
   if #mtBuys < #h.mtBuy then
-    -- top up with the highest-scoring opportunities that are ALSO under Fair
+    -- top up with the highest-scoring opportunities that are ALSO a buy signal
+    -- on the same scan day (same gate as the picks themselves)
     for _, e in ipairs((M.RankAll and M.RankAll()) or {}) do
-      if e.m and (e.m.delta or 0) < 0 then
+      if e.m and (e.m.delta or 0) <= -M.C.PICK_DELTA and lastPick and e.m.lastDay == lastPick then
         local id = (M.BaseID and M.BaseID(e.key)) or e.key
         if not seen[id] then
           seen[id] = true
@@ -1742,7 +1774,7 @@ function M.RefreshHome()
   local function fillMT(row, rec)
     setItemName(row[1], rec.key)
     row[2]:SetText(string.format("%+.0f%%", rec.delta * 100))
-    colorize(row[2], (rec.delta < 0) and C.green or C.red)
+    colorize(row[2], C[M.DeltaColor and M.DeltaColor(rec.delta) or "sub"] or C.sub)
     row.btn.key = rec.key
   end
   for r = 1, #h.mtBuy do
@@ -2348,6 +2380,7 @@ local COL_HELP = {
 -- Today's recommendation from the latest price vs Fair (Top-Picks logic).
 local function todaySignal(m)
   if not m or not m.delta then return nil end
+  if M.NotListed and M.NotListed(m) then return "NOT LISTED", C.muted end
   if m.delta <= -M.C.PICK_DELTA then return "BUY", C.green
   elseif m.delta >= M.C.PICK_DELTA then return "SELL", C.red end
   return "NEUTRAL", C.sub
@@ -3067,9 +3100,11 @@ local function CreateRankTab(panel, opts)
           else colorize(btn.fs[4], C.text) end
           btn.fs[5]:SetText(M.MoneyPlain(m.fair)); colorize(btn.fs[5], C.sub)
           btn.fs[6]:SetText(string.format("%+.0f%%", m.delta * 100))
-          if m.delta <= -M.C.PICK_DELTA then colorize(btn.fs[6], C.green)
-          elseif m.delta >= M.C.PICK_DELTA then colorize(btn.fs[6], C.red)
-          else colorize(btn.fs[6], C.sub) end
+          if M.NotListed and M.NotListed(m) then
+            colorize(btn.fs[4], C.muted); colorize(btn.fs[6], C.muted)
+          else
+            colorize(btn.fs[6], C[M.DeltaColor and M.DeltaColor(m.delta) or "sub"] or C.sub)
+          end
           btn.fs[7]:SetText(math.floor(m.avgQty + 0.5)); colorize(btn.fs[7], C.sub)
           btn.fs[8]:SetText(m.days)
           if m.days >= 8 then colorize(btn.fs[8], C.green) else btn.fs[8]:SetTextColor(0.90, 0.62, 0.40) end
@@ -3098,8 +3133,8 @@ local function CreateRankTab(panel, opts)
     if total == 0 and emptyMsg then
       M.FillChartCard(card, nil)
       card.title:SetText(emptyMsg); colorize(card.title, C.sub)
-    elseif not card.shownKey then
-      M.FillChartCard(card, sorted[1] and sorted[1].key or nil)
+    else
+      M.FillChartCard(card, card.shownKey or (sorted[1] and sorted[1].key) or nil)
     end
   end
 
@@ -3140,26 +3175,29 @@ local LOG_COLS = {
   { name = "vs Fair", w = 56,  just = "RIGHT", sort = "delta" },
   { name = "Char",   w = 120, just = "LEFT",  sort = "char" },
 }
+-- widths sum to 642 (+4 gap each) so ten columns fit the 686px rows
 local ITEM_COLS = {
-  { name = "Item",      w = 150, just = "LEFT",  sort = "iname" },
-  { name = "Sold",      w = 44,  just = "RIGHT", sort = "sold" },
-  { name = "Ret",       w = 40,  just = "RIGHT", sort = "ret" },
-  { name = "Sell-thru", w = 64,  just = "RIGHT", sort = "rate" },
-  { name = "Rating",    w = 80,  just = "LEFT",  sort = "rate" },
-  { name = "Avg Sell",  w = 74,  just = "RIGHT", sort = "avgsell" },
-  { name = "Avg Buy",   w = 72,  just = "RIGHT", sort = "avgbuy" },
-  { name = "Net",       w = 78,  just = "RIGHT", sort = "net" },
-  { name = "vs Fair",   w = 56,  just = "RIGHT", sort = "delta" },
+  { name = "Item",      w = 126, just = "LEFT",  sort = "iname" },
+  { name = "Sold",      w = 38,  just = "RIGHT", sort = "sold" },
+  { name = "Ret",       w = 36,  just = "RIGHT", sort = "ret" },
+  { name = "Sell-thru", w = 58,  just = "RIGHT", sort = "rate" },
+  { name = "Rating",    w = 70,  just = "LEFT",  sort = "rate" },
+  { name = "Avg Sell",  w = 66,  just = "RIGHT", sort = "avgsell" },
+  { name = "Avg Buy",   w = 62,  just = "RIGHT", sort = "avgbuy" },
+  { name = "Margin",    w = 68,  just = "RIGHT", sort = "margin" },
+  { name = "Net",       w = 70,  just = "RIGHT", sort = "net" },
+  { name = "vs Fair",   w = 48,  just = "RIGHT", sort = "delta" },
 }
 local TRADE_ROWS, TRADE_ROWH = 17, 18
 
 local TRADE_HELP = {
-  sold  = { "Sold auctions", "How many of your auctions of this item SOLD (lifetime)." },
-  ret   = { "Returned auctions", "How many EXPIRED and came back unsold (lifetime)." },
+  sold  = { "Sold auctions", "How many of your auctions of this item SOLD over the last " .. (M.C.SELL_WINDOW or 60) .. " days." },
+  ret   = { "Returned auctions", "How many EXPIRED and came back unsold over the last " .. (M.C.SELL_WINDOW or 60) .. " days." },
   rate  = { "Sell-through & rating", "sold / (sold + returned) over the last " .. (M.C.SELL_WINDOW or 60) .. " days.\n\n|cffE8B44AUnderpriced|r ~all sold -> you could ask more.\n|cff5BD178Well priced|r some sold, some returned.\n|cffF0635AOverpriced|r ~all returned -> lower the price." },
   avgsell = { "Average sale", "Average gold per sold UNIT (total proceeds / units sold) - directly comparable to Avg Buy, Current and Fair." },
-  avgbuy = { "Average buy", "Average unit price YOU paid for this item, from your auction-buy mails. Compare with Avg Sell and Fair to see your real margin." },
-  net   = { "Realized net", "Net gold booked: sale proceeds (after the AH cut) minus what you paid to buy it." },
+  avgbuy = { "Average buy", "Average unit price YOU paid for this item over the last " .. (M.C.SELL_WINDOW or 60) .. " days - auction wins, vendor buys and trade-window buys. Compare with Avg Sell and Fair; Margin does the maths for the units you sold." },
+  margin = { "Realized margin", "What you earned on the units you actually SOLD over the last " .. (M.C.SELL_WINDOW or 60) .. " days: sale proceeds after the AH cut minus your average buy price for those units.\n\nStock you bought but still hold does not count against it. \226\128\147 = no buys on record (crafted, farmed or looted), so there is no cost to compare." },
+  net   = { "Net cash flow", "Gold in minus gold out over the last " .. (M.C.SELL_WINDOW or 60) .. " days: sale proceeds (after the AH cut) minus EVERYTHING you paid for it - including stock you still hold. A fresh restock pushes it below zero; Margin shows what the sales themselves earned." },
   delta = { "% over / under Fair", "Current market price vs its Fair price.\n\n|cff5BD178Below (green)|r cheaper than fair = good to BUY.\n|cffF0635AAbove (red)|r pricier than fair = good to SELL." },
   iname = { "Item", "Click to sort by name (A-Z)." },
   icat  = { "Category", "Click to sort by item class." },
@@ -3169,26 +3207,60 @@ local TRADE_HELP = {
 -- History view had none at all)
 local LOG_HELP = {
   ts    = { "Date", "When the mail was collected. Click to sort (newest first by default)." },
-  kind  = { "Type", "Sold (green) - Bought / Vendor buy (red) - Returned = expired unsold - Cancelled - Outbid." },
+  kind  = { "Type", "Sold (green) - Bought / Vendor buy (red) - Own use (grey) = a vendor buy of something you never sell, not a trading cost - Returned = expired unsold - Cancelled - Outbid.",
+            "Trade sell / Trade buy = the trade window, items one way and gold the other (the gold is split over several items by Fair). Traded away / Received = a swap or gift without a price. Trades with your own characters are transfers and not listed." },
   iname = { "Item", "Click to sort by name (A-Z)." },
   count = { "Quantity", "Units in this transaction." },
   unit  = { "Unit price", "Realized price per single unit." },
   total = { "Total", "Gross gold of the transaction, before the AH cut." },
   net   = { "Net", "After the AH cut: sale proceeds minus fees; buys count negative." },
-  delta = { "vs Fair", "The transaction's unit price vs the item's Fair price - how good the deal was." },
+  delta = { "vs Fair", "The transaction's unit price vs the item's Fair price on that day - how good the deal was." },
   char  = { "Character", "Which of your characters traded. Click to sort." },
 }
 
-local function tradeKindLabel(kind, src)
+local function tradeKindLabel(kind, src, id)
+  if src == "trade" then
+    if kind == "sold"     then return "Trade sell", C.green end
+    if kind == "bought"   then return "Trade buy", C.red end
+    if kind == "given"    then return "Traded away", C.muted end
+    if kind == "received" then return "Received", C.muted end
+  end
   if kind == "sold"      then return "Sold",      C.green end
   if kind == "bought"    then
-    if src == "vendor" then return "Vendor buy", C.red end
+    if src == "vendor" then
+      -- never sold on: bought for your own use, not counted as trading cost
+      if M.IsTradedID and not M.IsTradedID(id) then return "Own use", C.muted end
+      return "Vendor buy", C.red
+    end
     return "Bought", C.red
   end
   if kind == "returned"  then return "Returned",  C.sub end
   if kind == "cancelled" then return "Cancelled", C.muted end
   if kind == "outbid"    then return "Outbid",    C.blue end
   return kind or "?", C.muted
+end
+
+-- Fair on a trade's own day: an August sale measured against today's Fair
+-- flips colour whenever the market moved since. Falls back to today's Fair
+-- when the archive does not reach back to that day.
+local fodCache = { gen = -1, v = {} }
+local function fairOnDay(id, day)
+  if not id then return nil end
+  local gen = M._analysisGen or 0
+  if fodCache.gen ~= gen then fodCache.gen, fodCache.v = gen, {} end
+  local key = tostring(id)
+  local ck = key .. ":" .. tostring(day)
+  local v = fodCache.v[ck]
+  if v == nil then
+    local s = M.GetSeries(key)
+    v = (s and day and M.FairAt and M.FairAt(s, key, day)) or false
+    if not v then
+      local m = s and M.Metrics(s, key)
+      v = (m and m.fair) or false
+    end
+    fodCache.v[ck] = v
+  end
+  return v or nil
 end
 
 local function tradeSortVal(e, fld)
@@ -3200,9 +3272,10 @@ local function tradeSortVal(e, fld)
   if fld == "net"   then return e.s.net or 0 end
   if fld == "avgsell" then
     local u = ((e.s.soldUnits or 0) > 0 and e.s.soldUnits) or e.s.soldStacks
-    return (e.s.soldStacks > 0) and (e.s.gross / u) or -1
+    return (u > 0 and (e.s.gross or 0) > 0) and (e.s.gross / u) or -1
   end
   if fld == "avgbuy" then return e.ab or -1 end
+  if fld == "margin" then return e.margin or -math.huge end
   if fld == "delta" then return (e.m and e.m.delta) or -math.huge end
   return e.s.net or 0
 end
@@ -3260,6 +3333,7 @@ function M.BuildTrades(panel)
     lbl:SetPoint("TOPLEFT", x, -34); lbl:SetWidth(w); lbl:SetText(label)
     local val = T.Text(panel, T.SIZE.h2 + 2, "text", T.FONT_SEMI)
     val:SetPoint("TOPLEFT", x, -47); val:SetWidth(w)
+    val.lbl = lbl
     if tip and T.HelpTip then
       local hb = CreateFrame("Button", nil, panel)
       hb:SetPoint("TOPLEFT", x, -34); hb:SetSize(w, 32)
@@ -3281,7 +3355,7 @@ function M.BuildTrades(panel)
   st.sGross = stat(376, 108, "GROSS SELLS")
   st.sFees  = stat(490, 84,  "AH FEES")
   st.sBuy   = stat(580, 104, "BOUGHT",
-    { "AH and vendor buys over the window.",
+    { "AH and vendor buys over the window. Vendor buys of items you never sell (arrows, drinks) are own use and stay out.",
       "The consumed line under it prices the bought units that were neither resold nor are still in stock - equips you put on, mats you used up. They read as losses in NET P/L and TOTAL; this line says how much of that was own consumption." })
   st.sFlow  = stat(690, 136, "SOLD / RETURNED")
   st.sRate  = stat(832, 112, "SELL-THROUGH")
@@ -3317,7 +3391,7 @@ function M.BuildTrades(panel)
           GameTooltip:SetOwner(b, "ANCHOR_TOP")   -- above the header, clear of the rows
           GameTooltip:SetMinimumWidth(300)
           GameTooltip:SetText(h[1], 1, 1, 1)
-          GameTooltip:AddLine(h[2], 0.82, 0.85, 0.92, true)
+          for i = 2, #h do GameTooltip:AddLine(h[i], 0.82, 0.85, 0.92, true) end
           GameTooltip:Show()
         end
       end)
@@ -3494,22 +3568,23 @@ function M.BuildTrades(panel)
     local q = st.search or ""
     -- build display rows: clean name, resolve id, per-unit price + vs-median
     -- (same logic as the By-Item detail rows, just flat & chronological)
-    local medCache, rows = {}, {}
+    local rows, catCache = {}, {}
     for _, e in ipairs(data) do
       local nm = (M.CleanItemName and M.CleanItemName(e.name)) or e.name or (e.id and M.ItemName(tostring(e.id))) or "?"
       local nml = nm:lower()
-      if q == "" or nml:find(q, 1, true) then
-        local id = e.id or (nm ~= "?" and M.NameToID and M.NameToID(nm)) or nil
+      local id = e.id or (nm ~= "?" and M.NameToID and M.NameToID(nm)) or nil
+      local hit = (q == "") or nml:find(q, 1, true)
+      if not hit and id then
+        local cat = catCache[id]
+        if not cat then cat = (M.ItemCategory(tostring(id)) or ""):lower(); catCache[id] = cat end
+        hit = cat:find(q, 1, true)
+      end
+      if hit then
         local cnt = e.count
         if (not cnt or cnt == 0) and e.kind == "sold" and M.AuctionSize then cnt = M.AuctionSize(id, e.gross or 0) end
         local gross = e.gross or 0
         local unit = (cnt and cnt > 0 and gross > 0) and (gross / cnt) or nil
-        local med
-        if id then
-          local mc = medCache[id]
-          if mc == nil then local m = M.Metrics(M.GetSeries(tostring(id)) or {}, tostring(id)); mc = (m and m.fair) or false; medCache[id] = mc end
-          med = mc or nil
-        end
+        local med = unit and fairOnDay(id, e.day) or nil
         local vsmed = (unit and med and med > 0) and (unit / med - 1) or nil
         rows[#rows + 1] = { e = e, nm = nm, nml = nml, id = id, cnt = cnt, gross = gross, unit = unit, vsmed = vsmed }
       end
@@ -3546,13 +3621,13 @@ function M.BuildTrades(panel)
         btn.zb:SetShown((r % 2) == 0)
         btn.key = w.id and tostring(w.id) or nil
         btn.fs[1]:SetText(date("%b %d  %H:%M", e.ts)); colorize(btn.fs[1], C.sub)
-        local lab, lrgb = tradeKindLabel(e.kind, e.src)
+        local lab, lrgb = tradeKindLabel(e.kind, e.src, e.id or w.id)
         btn.fs[2]:SetText(lab); colorize(btn.fs[2], lrgb)
         btn.fs[3]:SetText(w.nm)
         if w.id then local qc = M.ItemQualityColor(tostring(w.id)); btn.fs[3]:SetTextColor(qc.r, qc.g, qc.b)
         else colorize(btn.fs[3], C.sub) end
         btn.fs[4]:SetText((w.cnt and w.cnt > 0) and tostring(w.cnt) or "\226\128\147"); colorize(btn.fs[4], C.sub)
-        local isRet = (e.kind == "returned" or e.kind == "cancelled")
+        local isRet = (e.kind == "returned" or e.kind == "cancelled" or e.kind == "given" or e.kind == "received")
         if isRet then
           btn.fs[5]:SetText("\226\128\147"); colorize(btn.fs[5], C.muted)
           btn.fs[6]:SetText("\226\128\147"); colorize(btn.fs[6], C.muted)
@@ -3575,7 +3650,9 @@ function M.BuildTrades(panel)
             btn.fs[8]:SetText("\226\128\147"); colorize(btn.fs[8], C.muted)
           end
         end
-        btn.fs[9]:SetText((e.char or ""):gsub("%-.*$", "")); colorize(btn.fs[9], C.muted)
+        local who = (e.char or ""):gsub("%-.*$", "")
+        if e.partner then who = who .. " \226\134\148 " .. e.partner end
+        btn.fs[9]:SetText(who); colorize(btn.fs[9], C.muted)
         btn:Show()
       else
         btn.key = nil; btn:Hide()
@@ -3595,15 +3672,35 @@ function M.BuildTrades(panel)
   end
 
   local function buildItems()
-    local stats = M.TradeStats(M.RealmKey())
+    local realm = M.RealmKey()
+    local stats = M.TradeStats(realm)
+    -- every By-Item column covers the same window as TradeStats: Avg Buy from
+    -- the window's buys too (one log pass), not the whole retained log
+    local cutoff = M.GetScanDay() - (M.C.SELL_WINDOW or 60)
+    local paidBy = {}
+    for _, ev in ipairs(M.TradeLog(realm)) do
+      if ev.kind == "bought" and ev.id and (ev.day or 0) >= cutoff and (ev.gross or 0) > 0 then
+        local pb = paidBy[ev.id]
+        if not pb then pb = { paid = 0, units = 0 }; paidBy[ev.id] = pb end
+        pb.paid = pb.paid + ev.gross
+        pb.units = pb.units + ((ev.count and ev.count > 0) and ev.count or 1)
+      end
+    end
     local list = {}
     for key, s in pairs(stats) do
       -- keyed -> per-item odds refinement + the metrics memo (this loop covers every
       -- traded item in one frame; without the memo it re-prices all of them each refresh)
       local sid = s.id and tostring(s.id)
       local m = sid and M.Metrics(M.GetSeries(sid) or {}, sid) or nil
-      local ab = sid and M.RealizedBuy and (M.RealizedBuy(sid)) or nil
-      list[#list + 1] = { key = key, s = s, m = m, ab = ab, sell = M.Sellability(key) }
+      local pb = s.id and paidBy[tonumber(s.id) or s.id]
+      local ab = (pb and pb.units > 0) and (pb.paid / pb.units) or nil
+      -- realized margin on the SOLD units only: proceeds after the cut minus their
+      -- buy cost. Units bought before the window fall back to the retained log's
+      -- average; no buys at all (crafted / farmed) = no margin to show.
+      local cost = ab or (sid and M.RealizedBuy and (M.RealizedBuy(sid))) or nil
+      local su = ((s.soldUnits or 0) > 0 and s.soldUnits) or s.soldStacks or 0
+      local margin = (cost and su > 0) and ((s.gross or 0) - (s.fees or 0) - cost * su) or nil
+      list[#list + 1] = { key = key, s = s, m = m, ab = ab, margin = margin, sell = M.Sellability(key) }
     end
     local q = st.search
     if q and q ~= "" then
@@ -3637,7 +3734,9 @@ function M.BuildTrades(panel)
         local med = e.m and e.m.fair
         disp[#disp + 1] = { t = "head", e = e }
         for _, ev in ipairs(M.ItemTradeLog(e.key)) do
-          disp[#disp + 1] = { t = "sub", ev = ev, id = e.s.id, med = med }
+          if (ev.day or 0) >= cutoff then
+            disp[#disp + 1] = { t = "sub", ev = ev, id = e.s.id, med = med }
+          end
         end
       end
     end
@@ -3672,18 +3771,22 @@ function M.BuildTrades(panel)
         btn.fs[4]:SetText(e.sell.rate and string.format("%.0f%%", e.sell.rate * 100) or "\226\128\147"); colorize(btn.fs[4], C.text)
         btn.fs[5]:SetText(e.sell.label); colorize(btn.fs[5], e.sell.color)
         local avgUnits = ((s.soldUnits or 0) > 0 and s.soldUnits) or s.soldStacks
-        local avg = (s.soldStacks > 0) and (s.gross / avgUnits) or nil
+        local avg = (avgUnits > 0 and (s.gross or 0) > 0) and (s.gross / avgUnits) or nil
         btn.fs[6]:SetText(avg and M.MoneyPlain(avg) or "\226\128\147"); colorize(btn.fs[6], avg and C.sub or C.muted)
         btn.fs[7]:SetText(e.ab and M.MoneyPlain(e.ab) or "\226\128\147"); colorize(btn.fs[7], e.ab and C.sub or C.muted)
-        local net = s.net or 0
-        btn.fs[8]:SetText((net >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(net))); colorize(btn.fs[8], net >= 0 and C.green or C.red)
-        if e.m then
-          btn.fs[9]:SetText(string.format("%+.0f%%", e.m.delta * 100))
-          if e.m.delta <= -M.C.PICK_DELTA then colorize(btn.fs[9], C.green)
-          elseif e.m.delta >= M.C.PICK_DELTA then colorize(btn.fs[9], C.red)
-          else colorize(btn.fs[9], C.sub) end
+        if e.margin then
+          btn.fs[8]:SetText((e.margin >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(e.margin)))
+          colorize(btn.fs[8], e.margin >= 0 and C.green or C.red)
         else
-          btn.fs[9]:SetText("\226\128\147"); colorize(btn.fs[9], C.muted)
+          btn.fs[8]:SetText("\226\128\147"); colorize(btn.fs[8], C.muted)
+        end
+        local net = s.net or 0
+        btn.fs[9]:SetText((net >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(net))); colorize(btn.fs[9], net >= 0 and C.sub or C.red)
+        if e.m then
+          btn.fs[10]:SetText(string.format("%+.0f%%", e.m.delta * 100))
+          colorize(btn.fs[10], C[M.DeltaColor and M.DeltaColor(e.m.delta) or "sub"] or C.sub)
+        else
+          btn.fs[10]:SetText("\226\128\147"); colorize(btn.fs[10], C.muted)
         end
         btn:Show()
       elseif d and (d.t == "sub" or d.t == "head") then
@@ -3704,13 +3807,13 @@ function M.BuildTrades(panel)
           local ev = d.ev
           btn.zb:SetShown((r % 2) == 0); btn.key = d.id and tostring(d.id) or nil
           btn.sub.date:SetText(date("%b %d  %H:%M", ev.ts)); colorize(btn.sub.date, C.muted)
-          local lab, lrgb = tradeKindLabel(ev.kind, ev.src)
+          local lab, lrgb = tradeKindLabel(ev.kind, ev.src, ev.id or d.id)
           btn.sub.kind:SetText(lab); colorize(btn.sub.kind, lrgb)
           local gross = ev.gross or 0
           local cnt = ev.count
           if (not cnt or cnt == 0) and ev.kind == "sold" and M.AuctionSize then cnt = M.AuctionSize(d.id, gross) end
           btn.sub.qty:SetText((cnt and cnt > 0) and ("x" .. cnt) or "\226\128\147"); colorize(btn.sub.qty, C.sub)
-          local isRet = (ev.kind == "returned" or ev.kind == "cancelled")
+          local isRet = (ev.kind == "returned" or ev.kind == "cancelled" or ev.kind == "given" or ev.kind == "received")
           local unit = (cnt and cnt > 0 and gross > 0) and (gross / cnt) or nil
           if isRet then
             btn.sub.unit:SetText("\226\128\147"); colorize(btn.sub.unit, C.muted)
@@ -3725,8 +3828,9 @@ function M.BuildTrades(panel)
             -- vs median per unit, coloured by what's GOOD for that trade: a sell
             -- above median is green (sold high) / below red; a buy is reversed
             -- (bought below median = green). Within the threshold band = grey.
-            if unit and d.med and d.med > 0 then
-              local dl = unit / d.med - 1
+            local fd = unit and (fairOnDay(d.id, ev.day) or d.med) or nil
+            if unit and fd and fd > 0 then
+              local dl = unit / fd - 1
               btn.sub.vsmed:SetText(string.format("%+.0f%%", dl * 100))
               local good
               if dl >= M.C.PICK_DELTA then good = (ev.kind == "sold")
@@ -3762,8 +3866,8 @@ function M.BuildTrades(panel)
       M.FillChartCard(itemCard, nil)
       itemCard.title:SetText("No item stats yet"); colorize(itemCard.title, C.sub)
       itemCard.cat:SetText("open your mailbox after selling or buying \226\128\148 AH mail is logged automatically")
-    elseif not itemCard.shownKey and list[1] and list[1].s.id then
-      M.FillChartCard(itemCard, tostring(list[1].s.id))
+    elseif itemCard.shownKey or (list[1] and list[1].s.id) then
+      M.FillChartCard(itemCard, itemCard.shownKey or tostring(list[1].s.id))
     end
   end
 
@@ -3772,16 +3876,24 @@ function M.BuildTrades(panel)
   end
 
   function st.Refresh()
-    local sm = M.TradeSummary(M.RealmKey(), M.C.SELL_WINDOW)
-    st.sNet:SetText((sm.net >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(sm.net)))
-    colorize(st.sNet, sm.net >= 0 and C.green or C.red)
     -- holdings: value change of the item stock over the window - today's
     -- holdings value vs the frozen snapshot ~60 days back. The pair NET P/L +
     -- HOLDINGS makes buys stop reading as pure losses (the bought items stand
     -- on the other side). One NetWorth serves holdings + consumed.
     local nw2 = M.NetWorth and M.NetWorth()
-    local hold = nw2 and M.HoldingsDelta and M.HoldingsDelta(nw2, M.C.SELL_WINDOW)
+    local hold, hRef
+    if nw2 and M.HoldingsDelta then hold, hRef = M.HoldingsDelta(nw2, M.C.SELL_WINDOW) end
     local cons = nw2 and M.ConsumedCost and M.ConsumedCost(nw2, M.C.SELL_WINDOW)
+    -- the trade window opens right after the holdings snapshot: a trade on
+    -- the snapshot day is already inside it, so TOTAL = NET + HOLDINGS adds
+    -- the same span on both sides
+    local sm = M.TradeSummary(M.RealmKey(), M.C.SELL_WINDOW, hRef)
+    local span = " \194\183 " .. (sm.days or M.C.SELL_WINDOW) .. "D"
+    st.sNet.lbl:SetText("NET P/L" .. span)
+    st.sHold.lbl:SetText("HOLDINGS" .. span)
+    st.sTotal.lbl:SetText("TOTAL" .. span)
+    st.sNet:SetText((sm.net >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(sm.net)))
+    colorize(st.sNet, sm.net >= 0 and C.green or C.red)
     if st.sCons then
       if cons and cons >= 10000 then
         st.sCons:SetText("\194\187 consumed " .. M.MoneyPlain(cons))
@@ -3888,6 +4000,12 @@ end
 local function deltaColor(v)
   if not v or math.abs(v) < 1000 then return C.muted end
   return (v >= 0) and C.green or C.red
+end
+-- the attribution's sanity band (Wealth.WorthAttribution): a reconstructed
+-- reference price may not leave x10 around today's valuation
+local function bandRef(pR, pH)
+  if pR > pH * 10 then return pH * 10 elseif pR < pH / 10 then return pH / 10 end
+  return pR
 end
 
 function M.NWNavPush(fr)
@@ -4439,7 +4557,7 @@ function M.BuildWealth(panel)
         local pR = pmap and pmap[e.id]
         if pR and e.qty and e.qty > 0 then
           local pH = e.ah and (M.ItemValue and M.ItemValue(e.id) or 0) or (e.value / e.qty)
-          if pH > 0 then dm = e.qty * (pH - pR) end
+          if pH > 0 then dm = e.qty * (pH - bandRef(pR, pH)) end
         end
         btn.fs[7]:SetText(fmtDelta(dm)); colorize(btn.fs[7], deltaColor(dm))
         btn:Show()
@@ -4856,7 +4974,11 @@ function M.FillCharRows(cmpDay)
   for _, info in pairs(nw.chars) do
     if info.seen or info.total > 0 then chars[#chars + 1] = info else hidden = hidden + 1 end
   end
-  table.sort(chars, function(a, b) return a.total > b.total end)
+  -- scrubbed: rank by the value the row shows (that day's), not today's
+  local function shownOf(info)
+    return (snap and snap.chars and snap.chars[info.key]) or info.total
+  end
+  table.sort(chars, function(a, b) return shownOf(a) > shownOf(b) end)
   local vis = w._charVis or 8
   for i = 1, #w.charRows do
     local r = w.charRows[i]
@@ -4868,18 +4990,24 @@ function M.FillCharRows(cmpDay)
         local base = snap and snap.chars and snap.chars[info.key]
         local shown = base or info.total
         r.val:SetText(M.MoneyPlain(shown)); colorize(r.val, C.sub)
-        local dd
+        local dd, isNew
         if cmpDay then
           if base then dd = info.total - base end
         elseif M.CharDeltaSince then
           dd = M.CharDeltaSince(info.key, info.total, refDay)
-          if dd == nil and refDay then
-            dd = M.CharDeltaSince(info.key, info.total)   -- char missing at refDay
-          end
+          -- not in the reference snapshot: the character joined later, so a
+          -- change "since <refDay>" does not exist for it
+          isNew = (dd == nil and refDay ~= nil)
         end
-        if dd and shown and shown ~= 0 and math.abs(dd) >= 1000 then
-          r.chg:SetText(string.format("%+.1f%%  %s", dd / shown * 100, fmtDelta(dd)))
+        -- percent of the value AT the reference, not of today's value
+        local ref = dd and (info.total - dd)
+        if dd and ref and ref > 0 and math.abs(dd) >= 1000 then
+          r.chg:SetText(string.format("%+.1f%%  %s", dd / ref * 100, fmtDelta(dd)))
           colorize(r.chg, deltaColor(dd))
+        elseif dd and math.abs(dd) >= 1000 then
+          r.chg:SetText(fmtDelta(dd)); colorize(r.chg, deltaColor(dd))
+        elseif isNew then
+          r.chg:SetText("new"); colorize(r.chg, C.muted)
         else
           r.chg:SetText("\226\128\147"); colorize(r.chg, C.muted)
         end
@@ -4990,10 +5118,11 @@ function M.FillMovers(scrollOnly)
     mo.rows[1].fs[1]:SetText("no single item moved more than 0.1g in this window")
     colorize(mo.rows[1].fs[1], C.muted)
   end
-  -- TOTAL rows carry each item's realized trade cash, which also sits inside
-  -- at.gold -- net the trading gold out here or the bridge double-counts it
-  mo.other:SetText("everything else  (non-trading gold, AH discount, items under 0.5g)")
-  local rest = (at.gold or 0) - (at.trading.net or 0) + (at.residual or 0)
+  -- at.rest = total change minus every listed row: rows + this line add up
+  -- to the headline exactly (it holds non-trading gold, the AH listing
+  -- discount, rows under 0.1g and trades without an item id)
+  mo.other:SetText("everything else  (non-trading gold, AH discount, small items)")
+  local rest = at.rest or ((at.gold or 0) - (at.trading.net or 0) + (at.residual or 0))
   mo.otherVal:SetText(fmtDelta(rest)); colorize(mo.otherVal, deltaColor(rest))
 end
 
@@ -5208,8 +5337,9 @@ function M.FillWorthClass()
         dtot = ae.pnl
       elseif cls ~= "Auctions" and pmap and e.qty and e.qty > 0 then
         local pR = pmap[e.id]
-        if pR then
-          local pH = (e.value or 0) / e.qty
+        local pH = (e.value or 0) / e.qty
+        if pR and pH > 0 then
+          pR = bandRef(pR, pH)
           local qR = (iqR and iqR[e.id]) or e.qty
           dtot = (e.qty - qR) * pR + e.qty * (pH - pR)
         end
@@ -5345,11 +5475,29 @@ function M.RefreshWealth()
   end
   local tRef = at and at.tRefDay or nil
   local refVal = tRef and hist and hist[tRef] and hist[tRef].t or nil
+  local refLbl = tRef and M.DayLabel(tRef)
+  -- 1W draws the intraday tail: its line starts at the first point of the
+  -- oldest covered day, not at that day's closing snapshot - the headline
+  -- has to start there too to match the chart's endpoints
+  local intraRef = false
+  if refVal and M.ChartRangeDays and M.ChartRangeDays() == 7 and M.NWIntra then
+    local ni = M.NWIntra()
+    for i = 1, #ni do
+      local d = math.floor((ni[i].ts - M.C.SCAN_DAY_0) / 86400)
+      if d == tRef then
+        refVal, intraRef = ni[i].t, true
+        refLbl = refLbl .. " " .. date("%H:%M", ni[i].ts)
+        break
+      elseif d > tRef then
+        break
+      end
+    end
+  end
   if refVal and refVal > 0 then
     -- headline on its own 350px line; the decomposition below it (the movers
     -- headers carry the decomposition's reference day)
     local d = nw.total - refVal
-    w.delta:SetText(string.format("since %s   %s%s%s  (%+.1f%%)|r", M.DayLabel(tRef),
+    w.delta:SetText(string.format("since %s   %s%s%s  (%+.1f%%)|r", refLbl,
       (d >= 0) and GRN or RED, (d >= 0) and "+" or "-", M.MoneyPlain(math.abs(d)), d / refVal * 100))
     colorize(w.delta, C.sub)
     local sub = MUT .. "mkt|r " .. pmC(at.market)
@@ -5357,6 +5505,12 @@ function M.RefreshWealth()
       .. MUT .. "   gold|r " .. pmC(at.gold)
     if math.abs(at.residual or 0) >= 1000 and math.abs(at.residual) >= math.abs(d) * 0.05 then
       sub = sub .. MUT .. "   other|r " .. pmC(at.residual)
+    end
+    -- per-item quantities exist only in younger snapshots: when the timeframe
+    -- reaches further back, the split is measured from a later day - say so,
+    -- or the parts don't add up to the headline above
+    if at.refDay and (at.refDay ~= tRef or intraRef) then
+      sub = MUT .. "since " .. M.DayLabel(at.refDay) .. ":|r  " .. sub
     end
     w.deltaSub:SetText(sub)
     colorize(w.deltaSub, C.sub)
@@ -5578,8 +5732,8 @@ function M.BuildCharts(panel)
     "The full method with a worked example is in the Help tab." }, -150)
   hoverStrip(-64, 16, "The market numbers", {
     "Current - the cheapest buyout in the newest scan.",
-    "Fair - the trimmed, recency-weighted market value (its %-number is the sell chance at that price). 'capped' means your own sales prove buyers pay no more.",
-    "The maths:  B = sum(w\194\183low) / sum(w) over the last 14 daily lows, w = 0.5^(age/half-life) - the half-life is yours to set (Settings > FAIR PRICE, default 7d); days with low > 1.5\194\183median are trimmed as no-demand spikes.",
+    "Fair - the trimmed, recency-weighted market value (its %-number is the sell chance at that price). 'oversupplied' means even that level misses the target sell chance - post fewer, not cheaper.",
+    "The maths:  B = sum(w\194\183low) / sum(w) over the last 14 daily lows, w = 0.5^(age/half-life) - the half-life is yours to set (Settings > FAIR PRICE, default 7d); days with low > 1.5\194\183median are trimmed as no-demand spikes, and one-scan dips under median/1.5 that were gone by the day's last scan.",
     "P(sell at r) = sigmoid(a - 3\194\183ln(r/r0)) with r = price/floor7, fitted from your sold/expired record; r* is the r where P = 50%.",
     "Fair = B \194\183 clamp(floor7\194\183r*/B, 1, 1.10) - at most +10% over the base, and never past the prices your sales really cleared at.",
     "Quick-sell - at/just under the current floor: sells near-certainly, with less margin.",
@@ -5649,7 +5803,7 @@ function M.BuildCharts(panel)
       local oddsTxt = m.odds and string.format("~%.0f%%", m.odds * 100) or "n/a"
       wy.sub:SetText(string.format(
         "Base = trimmed average of the last 14 daily lows: %s.   Lift from real sales: x%.2f%s  \226\134\146  Fair %s.       Current %s = %+.0f%% vs Fair  \226\134\146  %s odds that ONE 48h auction sells.",
-        M.MoneyPlain(m.base), m.fair / m.base, m.fairCapped and " (capped by your clearing prices)" or "",
+        M.MoneyPlain(m.base), m.fair / m.base, m.fairCapped and " (oversupplied: even this level misses the target odds)" or "",
         M.MoneyPlain(m.fair), M.MoneyPlain(m.cur), m.delta * 100, oddsTxt))
     else
       wy.sub:SetText("Not enough price data yet.")
@@ -6052,11 +6206,14 @@ function M.BuildCharts(panel)
     local LW, LH = lad:GetWidth() or 560, lad:GetHeight() or 360
     local W = math.max(80, LW - BX - (RC[1][2] + RC[1][3]) - 48)
     local maxCum = math.max(1, gl[n].cum)
-    -- supply quantiles over the listed units (price where 25% / 50% are reached)
+    -- supply quantiles over ALL listed units (price where 25% / 50% are
+    -- reached); the stored ladder holds only the cheapest levels, so a
+    -- quantile beyond it stays unmarked instead of landing on its last row
+    local allU = math.max(d.units or 0, d.listed or 0)
     local q25, q50
     for _, l in ipairs(lv) do
-      if not q25 and l.cum >= d.units * 0.25 then q25 = l.price end
-      if not q50 and l.cum >= d.units * 0.50 then q50 = l.price end
+      if not q25 and l.cum >= allU * 0.25 then q25 = l.price end
+      if not q50 and l.cum >= allU * 0.50 then q50 = l.price end
     end
     -- price markers, gated by the same header toggles as the charts
     -- (Fair / Floor MA / My trades); quick-sell always
@@ -6074,11 +6231,23 @@ function M.BuildCharts(panel)
       end
     end
     local myAsk = (myQty > 0) and (myGold / myQty) or nil
-    -- own units per DISPLAYED price (same label grouping as the ladder), so a
-    -- level's bar can split into the others' share and yours
+    -- own units INSIDE a scanned level (its exact copper price) vs units the
+    -- scan never saw (posted after it - typically a 1c undercut that reads
+    -- like the level after silver rounding): the latter extend the supply
+    local lvByPrice = {}
+    for _, l in ipairs(lv) do lvByPrice[l.price] = l end
+    local myIn, myOut = {}, {}
+    for p, q in pairs(myLv) do
+      local l = scanLevelAt(lvByPrice, p)
+      local inScan = l and math.min(q, l.qty) or 0
+      if inScan > 0 then myIn[l.price] = (myIn[l.price] or 0) + inScan end
+      if q > inScan then myOut[p] = (myOut[p] or 0) + (q - inScan) end
+    end
+    -- in-scan units per DISPLAYED price (same label grouping as the ladder),
+    -- so a level's bar can split into the others' share and yours
     local myByLbl = {}
     if M.chartTrades ~= false then
-      for p, q in pairs(myLv) do
+      for p, q in pairs(myIn) do
         local l = M.MoneyPlain(p)
         myByLbl[l] = (myByLbl[l] or 0) + q
       end
@@ -6097,12 +6266,16 @@ function M.BuildCharts(panel)
     -- data yet -> fall back to that average until the AH is opened again
     if M.chartTrades ~= false then
       local cl = {}
-      for p, q in pairs(myLv) do cl[#cl + 1] = { p = p, q = q } end
+      for p, q in pairs(myOut) do cl[#cl + 1] = { p = p, q = q, ext = true } end
+      for p, q in pairs(myIn) do cl[#cl + 1] = { p = p, q = q } end
       table.sort(cl, function(x, y) return x.q > y.q end)
       while #cl > 4 do table.remove(cl) end
       if #cl > 0 then
+        -- q = units that EXTEND the supply (not in the scan); own = already
+        -- inside a scanned level (drawn in that row when it is on the ladder)
         for _, e in ipairs(cl) do
-          marks[#marks + 1] = { p = e.p, lbl = "YOUR ASK \195\151" .. e.q, rgb = C.mint or C.accent, q = e.q }
+          marks[#marks + 1] = { p = e.p, lbl = "YOUR ASK \195\151" .. e.q, rgb = C.mint or C.accent,
+                                q = e.ext and e.q or nil, own = not e.ext }
         end
       elseif myAsk then
         marks[#marks + 1] = { p = myAsk, lbl = "YOUR ASK", rgb = C.mint or C.accent }
@@ -6133,10 +6306,13 @@ function M.BuildCharts(panel)
     -- clusters whose price fell off the ladder keep the classic marker line
     local visLbl = {}
     for i = 1, n do visLbl[gl[i].lbl] = true end
-    local function keepMk(mk) return not (mk.q and visLbl[M.MoneyPlain(mk.p)]) end
+    local function keepMk(mk) return not (mk.own and visLbl[M.MoneyPlain(mk.p)]) end
+    -- a marker whose price reads like a grouped row ("4g 75s" spans 4g75s00c
+    -- ..99c) goes ABOVE that row: its total counts only the copper levels up
+    -- to its own price, so below the row it would read smaller than the row
     local seq, pi = {}, 1
     for i = 1, n do
-      while mks[pi] and mks[pi].p < gl[i].price do
+      while mks[pi] and (mks[pi].p < gl[i].price or M.MoneyPlain(mks[pi].p) == gl[i].lbl) do
         if keepMk(mks[pi]) then seq[#seq + 1] = { mk = mks[pi] } end
         pi = pi + 1
       end
@@ -6184,8 +6360,8 @@ function M.BuildCharts(panel)
         -- the quantile tags skip rows that carry the YOUR-ASK decor (line and
         -- label live in the same gap); the next plain row still reads ">= 25%"
         if own == 0 then
-          if not mark25 and e.cum >= d.units * 0.25 then row.mark:SetText("25%"); mark25 = true end
-          if not mark50 and e.cum >= d.units * 0.50 then
+          if not mark25 and e.cum >= allU * 0.25 then row.mark:SetText("25%"); mark25 = true end
+          if not mark50 and e.cum >= allU * 0.50 then
             row.mark:SetText(row.mark:GetText() == "25%" and "25/50" or "50%"); mark50 = true
           end
         end
@@ -6516,7 +6692,7 @@ function M.BuildHelp(panel)
     { "Sell-through", "sold / (sold + returned) of your auctions." },
     { "Avg buy / sell", "your real average unit prices, from AH mail." },
     { "Net", "sale proceeds after the AH cut, minus your buys." },
-    { "Fair (capped)", "buyers provably pay no more \226\128\148 the lift stops there." },
+    { "Fair \194\183 oversupplied", "even the trimmed market level misses the target sell chance \226\128\148 post fewer, not cheaper." },
     { "Score", "margin x liquidity x confidence \226\128\148 the opportunity ranking on the Start page." },
     { "vs Fair", "current price vs Fair; the BUY/SELL signal fires at +/-15%." },
   }
@@ -6651,23 +6827,29 @@ function M.RefreshCharts()
       M.chartTitleBtn:Show()
     end
     M.chartMeta:SetText(m and string.format("%s  \194\183  avg qty %d  \194\183  %d days",
-      M.ItemCategory(key) or "", m.avgQty, m.days) or (M.ItemCategory(key) or ""))
+      M.ItemCategory(key) or "", math.floor(m.avgQty + 0.5), m.days) or (M.ItemCategory(key) or ""))
     -- 1) the SIGNAL: what to do, how far from Fair, how likely it sells
     if m then
       local word, col
-      if m.delta <= -M.C.PICK_DELTA then word, col = "BUY", GRN
+      local gone = M.NotListed and M.NotListed(m)
+      if gone then word, col = "NOT LISTED", MUT
+      elseif m.delta <= -M.C.PICK_DELTA then word, col = "BUY", GRN
       elseif m.delta >= M.C.PICK_DELTA then word, col = "SELL", RED
       else word, col = "NEUTRAL", SUBC end
       local sig = col .. word .. string.format("  %+.0f%%|r " .. MUT .. "vs Fair|r", m.delta * 100)
-      if m.odds then sig = sig .. MUT .. string.format("    \194\183    ~%.0f%% odds at this price", m.odds * 100) .. "|r" end
+      if gone then
+        sig = col .. word .. "|r" .. MUT .. "   in the newest scan  \194\183  last seen " .. M.DayLabel(m.lastDay) .. "|r"
+      elseif m.odds then
+        sig = sig .. MUT .. string.format("    \194\183    ~%.0f%% odds at this price", m.odds * 100) .. "|r"
+      end
       M.chartSignal:SetText(sig)
       -- 2) the market in one calm line (labels muted, values plain)
       local fairTxt = M.MoneyPlain(m.fair)
-      if m.fairCapped then fairTxt = fairTxt .. MUT .. " capped|r"
-      elseif m.oddsAtFair then fairTxt = fairTxt .. MUT .. string.format(" ~%.0f%%|r", m.oddsAtFair * 100) end
+      if m.oddsAtFair then fairTxt = fairTxt .. MUT .. string.format(" ~%.0f%%|r", m.oddsAtFair * 100) end
+      if m.fairCapped then fairTxt = fairTxt .. MUT .. " oversupplied|r" end
       local sellsTxt = m.speed and string.format("~%.1f/day \194\183 %s", m.speed, m.liqLabel or "?") or (m.liqLabel or "?")
       M.chartLine1:SetText(
-        MUT .. "Current|r  " .. M.MoneyPlain(m.cur) ..
+        MUT .. (gone and "Last seen|r  " or "Current|r  ") .. M.MoneyPlain(m.cur) ..
         MUT .. "      Fair|r  " .. fairTxt ..
         MUT .. "      Quick-sell|r  " .. M.MoneyPlain(m.quick) ..
         MUT .. "      Sells|r  " .. sellsTxt)
@@ -6906,6 +7088,20 @@ M.NEWS = {
       M.EnsureUI()
       M.frame:Show()
       M.SelectTab(TAB.Watchlist)
+    end,
+  },
+  {
+    id = "tradewin-1.2.15", version = "1.2.15", title = "Trade window + realized margin",
+    text = "Sales and buys through the player trade window now land in your trade ledger as Trade "
+      .. "sell / Trade buy - several items share the gold by Fair, and trades with your own characters "
+      .. "stay out. The By Item table gained a Margin column: what the units you sold really earned "
+      .. "after the AH cut and your buy price, so a fresh restock no longer reads as a loss.",
+    where = "Trades tab  \226\128\186  By Item  \226\128\186  Margin   \194\183   History  \226\128\186  Trade sell / buy",
+    preview = "trades",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Trades)
     end,
   },
 }

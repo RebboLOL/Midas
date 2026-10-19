@@ -62,7 +62,11 @@ local ASSET = {
 function M.AssetClass(id)
   local base = (M.BaseID and M.BaseID(id)) or tonumber(id)
   if not base then return "Other" end
-  local classID = select(12, M.GetItemInfo(base))
+  -- GetItemInfoInstant answers from the client's static item table, so the
+  -- class never depends on whether this session has loaded the item yet
+  local instant = (C_Item and C_Item.GetItemInfoInstant) or _G.GetItemInfoInstant
+  local classID = instant and select(6, instant(base))
+  if not classID then classID = select(12, M.GetItemInfo(base)) end
   if not classID then
     if C_Item and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(base) end
     return "Other"
@@ -219,10 +223,16 @@ function M.MergeForkedChars()
             local fv = s.chars[fk]
             if fv ~= nil then
               s.t = math.max(0, (s.t or 0) - fv)
-              if type(s.c) == "table" and type(s.cc) == "table" and type(s.cc[fk]) == "table" then
-                for cls, v in pairs(s.cc[fk]) do
+              local fcc = type(s.cc) == "table" and type(s.cc[fk]) == "table" and s.cc[fk] or nil
+              if fcc and type(s.c) == "table" then
+                for cls, v in pairs(fcc) do
                   if s.c[cls] then s.c[cls] = math.max(0, s.c[cls] - v) end
                 end
+              end
+              -- the per-item quantities (iq) carry no per-character split and
+              -- stay as recorded; the gold total can be corrected exactly
+              if fcc and type(s.m) == "number" and fcc.Money then
+                s.m = math.max(0, s.m - fcc.Money)
               end
             end
             s.chars[fk] = sv
@@ -350,6 +360,10 @@ function M.NetWorth()
   }
 end
 
+-- snapshot gate for the per-item quantities (iq): at most IQ_MAX holdings,
+-- each worth at least IQ_GATE copper. WorthAttribution relies on both.
+local IQ_MAX, IQ_GATE = 200, 5000
+
 -- Store today's snapshot (one bucket per day, latest computation wins).
 -- Refresh the CURRENT character's bags + money first, so the live character is
 -- always accurate (other characters are as fresh as you last played them).
@@ -371,10 +385,10 @@ function M.RecordNetWorth()
   do
     local ids = {}
     for id, val in pairs(nw.itemVal or {}) do
-      if val >= 5000 then ids[#ids + 1] = id end
+      if val >= IQ_GATE then ids[#ids + 1] = id end
     end
     table.sort(ids, function(a, b) return (nw.itemVal[a] or 0) > (nw.itemVal[b] or 0) end)
-    for i = 1, math.min(#ids, 200) do iq[ids[i]] = nw.itemQty[ids[i]] end
+    for i = 1, math.min(#ids, IQ_MAX) do iq[ids[i]] = nw.itemQty[ids[i]] end
   end
   hist[M.GetScanDay()] = { t = nw.total, m = nw.money, c = nw.classes,
                                     chars = pc, cc = pcc, iq = iq,
@@ -477,21 +491,6 @@ function M.AttribRefDay(kind)
   return inWin or before
 end
 
--- One-day fair at a historic day: the same clamp maths as FairSeries
--- (Logic.lua), evaluated for a single day -- keeps the reconstruction in the
--- same valuation family as today's net worth without O(days^2) work.
-local function fairAt(series, key, day)
-  local m = M.Metrics(series, key)
-  if not (m and m.rstar) then return nil end
-  local b = M.DemandBase and M.DemandBase(series, day)
-  local f7 = M.Floor7 and M.Floor7(series, day)
-  if not (b and b > 0 and f7 and f7 > 0) then return nil end
-  local liftMax = (M.C and M.C.FAIR_LIFT_MAX) or 1.10
-  local adj = (f7 * m.rstar) / b
-  if adj < 1 then adj = 1 elseif adj > liftMax then adj = liftMax end
-  return b * adj
-end
-
 -- Value change of everything you HOLD (items only, gold excluded) over the
 -- last `win` days: today's holdings value minus the snapshot's, both from the
 -- frozen daily snapshots (no price reconstruction involved). Falls back to
@@ -537,7 +536,10 @@ function M.ConsumedCost(nw, win)
   local buyQ, buyC, sellQ = {}, {}, {}
   for _, e in ipairs(M.db.trade.log or {}) do
     if e.realm == realm and e.day and e.day > refDay and e.id then
-      if e.kind == "bought" then
+      -- a vendor purchase of an item you never sell is supply for your own
+      -- use, not a trading cost
+      local ownUse = e.src == "vendor" and M.IsTradedID and not M.IsTradedID(e.id)
+      if e.kind == "bought" and not ownUse then
         buyQ[e.id] = (buyQ[e.id] or 0) + (e.count or 0)
         buyC[e.id] = (buyC[e.id] or 0) + (e.gross or 0)
       elseif e.kind == "sold" then
@@ -567,7 +569,8 @@ function M.BandDebug()
   if not nw then M.Print("band: no net worth") return end
   local win = (M.C and M.C.SELL_WINDOW) or 60
   local function pm(v) return ((v or 0) >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(v or 0)) end
-  local hd, hrd = M.HoldingsDelta and M.HoldingsDelta(nw, win)
+  -- direct call: an `x and f()` chain would truncate the (delta, refDay) pair
+  local hd, hrd = M.HoldingsDelta(nw, win)
   if hd then
     M.Print(string.format("band: holdings %s since day %s (%s)  itemsNow %s",
       pm(hd), tostring(hrd), M.DayLabel(hrd),
@@ -654,6 +657,11 @@ function M.WorthAttribution(nw, refDayOverride)
   local buyQ, buyC, sellQ, sellN = {}, {}, {}, {}
   local soldSum, boughtSum = 0, 0
   for _, e in ipairs((M.db.trade and M.db.trade.log) or {}) do
+    -- a trade-window swap or gift moves units without gold: quantity only
+    if e.realm == realm and e.day and e.day > refDay and e.id
+       and (e.kind == "given" or e.kind == "received") then
+      qDelta[e.id] = (qDelta[e.id] or 0) + ((e.kind == "received") and 1 or -1) * (e.count or 0)
+    end
     if e.realm == realm and e.day and e.day > refDay
        and (e.kind == "sold" or e.kind == "bought") then
       local id = e.id or (M.NameToID and e.name and M.NameToID(e.name)) or nil
@@ -678,37 +686,35 @@ function M.WorthAttribution(nw, refDayOverride)
   end
 
   -- union of ids: reference holdings + today's holdings (sold-out items with
-  -- qH = 0 must appear as losers)
-  local ids = {}
-  for id in pairs(snap.iq or {}) do ids[id] = true end
+  -- qH = 0 must appear as losers) + everything traded in the window (bought
+  -- and used up, or farmed and sold, without ever showing in a snapshot)
+  local ids, iqN = {}, 0
+  for id in pairs(snap.iq or {}) do ids[id] = true; iqN = iqN + 1 end
   for id in pairs(nw.itemQty or {}) do ids[id] = true end
+  for id in pairs(tradeBy) do ids[id] = true end
+  -- a snapshot below its size cap holds EVERY item worth the gate: an item
+  -- missing from it was worth less than the gate at R
+  local iqComplete = iqN < IQ_MAX
 
   local items, market, stock = {}, 0, 0
   for id in pairs(ids) do
     local key = tostring(id)
     local qH = (nw.itemQty and nw.itemQty[id]) or 0
-    local pH
-    if qH > 0 and nw.itemVal and nw.itemVal[id] then
-      pH = nw.itemVal[id] / qH                    -- exactly today's valuation
-    else
-      pH = (M.ItemValue and M.ItemValue(id)) or 0
-    end
-    local qR = snap.iq and snap.iq[id]
-    if qR == nil then
-      -- below the 0.5g snapshot gate at R: reconstruct from trades, else
-      -- assume unchanged (farming/crafting stays in the residual, honestly)
-      local d = qDelta[id]
-      qR = d and math.max(0, qH - d) or qH
+    -- per-unit Fair, also for units listed on the AH: their sell-chance
+    -- discount is a valuation choice, not a market move (it stays in the residual)
+    local pH = (M.ItemValue and M.ItemValue(id)) or 0
+    if pH <= 0 and qH > 0 and nw.itemVal and nw.itemVal[id] then
+      pH = nw.itemVal[id] / qH
     end
     local pR = pcache[id]
     if pR == nil then
       local series = M.GetSeries and M.GetSeries(key)
-      pR = (series and fairAt(series, key, refDay)) or false
+      pR = (series and M.FairAt and M.FairAt(series, key, refDay)) or false
       pcache[id] = pR
     end
     if not pR or pR <= 0 then pR = pH end         -- vendor/no data: quantity effect only
     -- reconstruction sanity: a junk scan history (vendor ammo listed at gold
-    -- prices) can hand fairAt a reference price hundreds of times today's
+    -- prices) can hand FairAt a reference price hundreds of times today's
     -- valuation and blow the split up by thousands of gold. With no valuation
     -- today the position cannot carry a market/quantity split at all (the
     -- difference stays in the residual, honestly unexplained); otherwise the
@@ -717,6 +723,19 @@ function M.WorthAttribution(nw, refDayOverride)
     if not pH or pH <= 0 then pR, pH = 0, 0
     elseif pR > pH * 10 then pR = pH * 10
     elseif pR < pH / 10 then pR = pH / 10 end
+    local qR = snap.iq and snap.iq[id]
+    if qR == nil then
+      -- not in the snapshot: reconstruct from trades, else assume unchanged
+      local d = qDelta[id]
+      qR = d and math.max(0, qH - d) or qH
+      -- a complete snapshot proves the stack was worth less than the gate,
+      -- so farmed/crafted units count as stock gained instead of a phantom
+      -- start holding
+      if iqComplete and pR > 0 then
+        local cap = math.floor((IQ_GATE - 1) / pR)
+        if qR > cap then qR = cap end
+      end
+    end
     local dStock = (qH - qR) * pR
     local dMarket = qH * (pH - pR)
     stock = stock + dStock
@@ -744,11 +763,16 @@ function M.WorthAttribution(nw, refDayOverride)
 
   local dTotal = (nw.total or 0) - (snap.t or 0)
   local gold = (nw.money or 0) - (snap.m or 0)
+  -- rest: exactly what the listed rows leave unexplained (non-trading gold,
+  -- unnamed trades, the AH discount, rows under the keep-gate)
+  local listed = 0
+  for _, e in ipairs(items) do listed = listed + e.pnl end
   return {
     refDay = refDay,
     tRefDay = M.AttribRefDay("t") or refDay,
     dTotal = dTotal, market = market, stock = stock, gold = gold,
     residual = dTotal - market - stock - gold,
+    rest = dTotal - listed,
     trading = { sold = soldSum, bought = boughtSum, net = soldSum - boughtSum },
     items = items,
   }

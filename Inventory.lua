@@ -119,13 +119,25 @@ function M.CacheBank()
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- net worth reads this
 end
 
+-- Classic holds sale proceeds for an hour before the mail goes out (plus a
+-- little clock slack): a listing that left the owner list longer ago than this
+-- has its mail in the inbox by now.
+local SALE_MAIL_DELAY = 3600 + 120
+
 function M.CacheMail()
   local c = CharCache(); if not c then return end
   c.mail, c.mailGold = scanMail({})
   c.mailTs = time()
-  -- the inbox is the ground truth now: whatever left the owner list is either
-  -- in c.mail / c.mailGold or long gone - the pending bridge has done its job
-  c.pending, c.pendingTs = nil, nil
+  -- the inbox is the ground truth for pending entries older than the sale-mail
+  -- delay; younger ones may still be in transit and stay until their mail
+  -- resolves them (M.AuctionSettled)
+  if c.pending then
+    local now = time()
+    for id, p in pairs(c.pending) do
+      if now - (p.ts or c.pendingTs or 0) >= SALE_MAIL_DELAY then c.pending[id] = nil end
+    end
+    if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
+  end
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- net worth reads this
 end
 
@@ -180,8 +192,9 @@ end
 -- (sold = gold, expired/cancelled = the item) but is invisible until the
 -- mailbox is opened - without this, net worth dips by exactly that value the
 -- moment the AH refreshes the owner list. Remember the lost quantity with its
--- proportional ask; CharAssets keeps valuing it like the auction it was, and
--- M.CacheMail dissolves it once the inbox is the ground truth.
+-- proportional ask; CharAssets keeps valuing it like the auction it was, until
+-- its mail resolves it (M.AuctionSettled) or the inbox is the ground truth
+-- (M.CacheMail).
 local function notePending(c, au)
   local old = c.auctions
   if not old then return end
@@ -194,19 +207,32 @@ local function notePending(c, au)
       if not p then p = { qty = 0, gold = 0 }; c.pending[id] = p end
       p.qty = p.qty + lost
       p.gold = p.gold + math.floor(a.gold * lost / a.qty + 0.5)
-      c.pendingTs = time()
+      p.ts = time()
+      c.pendingTs = p.ts
     end
   end
 end
 
 -- An auction mail just told us a listing ended (sold / returned / cancelled):
--- take it out of the still-cached owner list, so the mail content and the
--- stale auction row are never counted twice. The next real owner-list refresh
--- overwrites the whole cache anyway.
+-- take it out of the pending bridge and the still-cached owner list, so the
+-- mail content and the old auction value are never counted twice. The next
+-- real owner-list refresh overwrites the whole auction cache anyway.
 function M.AuctionSettled(id, count)
-  local c = CharCache(); if not (c and c.auctions) then return end
-  local a = c.auctions[id]; if not a then return end
-  local q = math.min(count or 1, a.qty or 0)
+  local c = CharCache(); if not c then return end
+  local q = count or 1
+  -- pending units left the owner list first, so the mail settles them first
+  local p = c.pending and c.pending[id]
+  if p and (p.qty or 0) > 0 and q > 0 then
+    local take = math.min(q, p.qty)
+    local punit = (p.gold or 0) / p.qty
+    p.qty = p.qty - take
+    p.gold = math.max(0, (p.gold or 0) - math.floor(punit * take + 0.5))
+    if p.qty <= 0 then c.pending[id] = nil end
+    if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
+    q = q - take
+  end
+  local a = c.auctions and c.auctions[id]; if not a then return end
+  q = math.min(q, a.qty or 0)
   if q <= 0 then return end
   local unit = a.gold / a.qty
   a.qty = a.qty - q
@@ -352,9 +378,17 @@ local function debounce(key, fn, delay)
   C_Timer.After(delay or 0.3, function() pending[key] = nil; fn() end)
 end
 
+-- bank contents are only readable while the bank is open: a debounced scan
+-- that lands after closing would read it as empty and wipe the cache
+local bankOpen = false
+local function cacheBankIfOpen()
+  if bankOpen then M.CacheBank() end
+end
+
 local ev = CreateFrame("Frame")
-for _, e in ipairs({ "BANKFRAME_OPENED", "PLAYERBANKSLOTS_CHANGED", "MAIL_SHOW", "MAIL_INBOX_UPDATE",
-                     "BAG_UPDATE_DELAYED", "PLAYER_MONEY", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }) do
+for _, e in ipairs({ "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "MAIL_SHOW",
+                     "MAIL_INBOX_UPDATE", "BAG_UPDATE_DELAYED", "PLAYER_MONEY", "PLAYER_ENTERING_WORLD",
+                     "PLAYER_LOGOUT" }) do
   M.SafeRegister(ev, e)
 end
 if M.MODERN_AH then
@@ -364,8 +398,13 @@ else
   M.SafeRegister(ev, "AUCTION_OWNED_LIST_UPDATE")
 end
 ev:SetScript("OnEvent", function(_, event)
-  if event == "BANKFRAME_OPENED" or event == "PLAYERBANKSLOTS_CHANGED" then
-    debounce("bank", M.CacheBank, 0.3)
+  if event == "BANKFRAME_OPENED" then
+    bankOpen = true
+    debounce("bank", cacheBankIfOpen, 0.3)
+  elseif event == "BANKFRAME_CLOSED" then
+    bankOpen = false
+  elseif event == "PLAYERBANKSLOTS_CHANGED" then
+    debounce("bank", cacheBankIfOpen, 0.3)
   elseif event == "MAIL_SHOW" then
     if CheckInbox then CheckInbox() end
     debounce("mail", M.CacheMail, 0.5)
@@ -382,6 +421,8 @@ ev:SetScript("OnEvent", function(_, event)
     end)
   elseif event == "BAG_UPDATE_DELAYED" then
     debounce("bags", M.CacheBags, 0.5)
+    -- bank bags only report BAG_UPDATE, never PLAYERBANKSLOTS_CHANGED
+    if bankOpen then debounce("bank", cacheBankIfOpen, 0.3) end
   elseif event == "PLAYER_MONEY" then
     debounce("money", M.CacheMoney, 0.2)
   elseif event == "PLAYER_ENTERING_WORLD" then

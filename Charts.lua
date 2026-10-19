@@ -195,9 +195,11 @@ end
 
 -- Subtle volume bars: quantity per price point along the bottom of the plot.
 -- Drawn on BACKGROUND so the price line always stays on top. Muted grey, very faint.
-local function VolumeBars(canvas, bars, bottom, ph, bw)
-  local qmax = 0
-  for i = 1, #bars do local q = bars[i].q or 0; if q > qmax then qmax = q end end
+local function VolumeBars(canvas, bars, bottom, ph, bw, qmax)
+  if not qmax then
+    qmax = 0
+    for i = 1, #bars do local q = bars[i].q or 0; if q > qmax then qmax = q end end
+  end
   if qmax <= 0 then return end
   local volH = ph * 0.40                 -- tallest bar uses ~40% of the plot height
   local r, g, b = TC("sub")              -- dezentes grau-blau aus dem Theme
@@ -492,6 +494,36 @@ local function dayStep(pw, dSpan)
   return pw / dSpan, pw, false
 end
 
+-- A flat or near-flat range still gets a readable scale: at least +-5% of the
+-- price (one `unit` minimum), centred on the data. A fixed step would blow
+-- copper noise up to full height on one item and dwarf a 7s price on another.
+local function minSpan(lo, hi, unit)
+  local need = math.max(hi * 0.10, unit)
+  if hi - lo >= need then return lo, hi end
+  local mid = (lo + hi) / 2
+  return mid - need / 2, mid + need / 2
+end
+
+-- Floor MA shared by the market and the holding chart: a trailing simple MA of
+-- the daily lows over `period` calendar days (capped at 20, shrinking on short
+-- spans so it still shows). It starts once a full window of history exists.
+-- Returns ma[i] (copper) for the indices of arr that have one.
+local function FloorMA(arr, dSpan)
+  local period = math.min(20, math.max(4, math.floor(dSpan / 3)))
+  local ma, dMin = {}, arr[1] and arr[1].day
+  for i = 1, #arr do
+    if arr[i].day - dMin >= period - 1 then
+      local s, c = 0, 0
+      for j = i, 1, -1 do
+        if arr[i].day - arr[j].day >= period then break end
+        s = s + arr[j].low; c = c + 1
+      end
+      if c > 0 then ma[i] = s / c end
+    end
+  end
+  return ma
+end
+
 -- ===== All-time line (Scalable style: thin teal line over the full history) ==
 function M.RenderAllTime(canvas, key)
   ResetPools(canvas)
@@ -499,7 +531,7 @@ function M.RenderAllTime(canvas, key)
   local series = M.GetSeries(key)
   if not series then return end
   local arr = {}
-  for day, v in pairs(series) do arr[#arr + 1] = { day = day, low = v.low, qty = v.qty or 0 } end
+  for day, v in pairs(series) do arr[#arr + 1] = { day = day, low = v.low, cur = v.cur, qty = v.qty or 0 } end
   table.sort(arr, function(a, b) return a.day < b.day end)
   -- big charts follow the global timeframe, preview cards their own setting;
   -- a canvas can pin its own range ("7"/"30"/"90"/"all" - the tooltip chart)
@@ -536,9 +568,15 @@ function M.RenderAllTime(canvas, key)
     end
   end
 
+  -- the newest day's point is the CURRENT price (that day's latest scan, the
+  -- number the headers show); older days plot their daily low. A 1W intraday
+  -- day already ends on its own last scan.
+  for i = 1, n do arr[i].px = arr[i].low end
+  if arr[n].cur and not (lastOf and lastOf[arr[n].day]) then arr[n].px = arr[n].cur end
+
   local vmin, vmax = math.huge, -math.huge
   for _, p in ipairs(arr) do
-    local g = p.low / 10000
+    local g = p.px / 10000
     if g < vmin then vmin = g end
     if g > vmax then vmax = g end
   end
@@ -549,36 +587,36 @@ function M.RenderAllTime(canvas, key)
       if g > vmax then vmax = g end
     end
   end
-  -- your trade dots draw at their realized UNIT price. Sells usually clear
-  -- ABOVE the daily low the line is built from -- without widening the scale
-  -- they would clamp to the plot edge at a visually wrong height. But only a
-  -- trade NEAR the data widens it (within 30% outside its range, the alert-limit rule):
-  -- one far-off bargain flip would squash the price line flat and pile the
-  -- edge labels into each other -- such a trade stays off the scale and draws
-  -- no dot below. Big chart only (previews show no dots, tighter scale).
+  -- overlays NEAR the data (within 30% outside its range) are pulled into the
+  -- scale so they draw at their true height; a far-off value stays out -- one
+  -- bargain flip or a mistyped limit would squash the price line flat and pile
+  -- the edge labels into each other
+  local lo0, hi0 = vmin, vmax
+  local function widen(g)
+    if g >= lo0 * 0.7 and g <= hi0 * 1.3 then
+      if g < vmin then vmin = g end
+      if g > vmax then vmax = g end
+    end
+  end
+  -- your trade dots draw at their realized UNIT price; sells usually clear
+  -- ABOVE the daily low the line is built from. Big chart only (previews show
+  -- no dots, tighter scale).
   if M.chartTrades ~= false and not canvas._compact and M.db and M.db.trade and M.db.trade.log then
     local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
     if id then
       local realm = M.RealmKey()
       local d0, d1 = arr[1].day, arr[n].day
-      local lo, hi = vmin, vmax          -- freeze the data range before widening
       for _, e in ipairs(M.db.trade.log) do
         if e.id == id and e.realm == realm and (e.kind == "sold" or e.kind == "bought")
            and (e.gross or 0) > 0 and e.day and e.day >= d0 and e.day <= d1 then
           local cnt = (e.count and e.count > 0) and e.count or 1
-          local g = (e.gross / cnt) / 10000
-          if g >= lo * 0.7 and g <= hi * 1.3 then
-            if g < vmin then vmin = g end
-            if g > vmax then vmax = g end
-          end
+          widen((e.gross / cnt) / 10000)
         end
       end
     end
   end
-  -- price-alert limits (Settings "Alert lines in charts"): a limit NEAR the
-  -- data (within 30% outside its range) is pulled into the scale so its line
-  -- shows; a far-off limit stays out so it cannot crush the chart. Big chart
-  -- only -- previews and the tooltip chart stay clean.
+  -- price-alert limits (Settings "Alert lines in charts"). Big chart only --
+  -- previews and the tooltip chart stay clean.
   local alertRec
   if not canvas._compact and not canvas._rangeOverride
      and M.db and M.db.config and M.db.config.alertLines ~= false and M.db.alerts then
@@ -586,17 +624,22 @@ function M.RenderAllTime(canvas, key)
     local a = ar and ar[tostring(key)]
     if a and (a.below or a.above) then
       alertRec = a
-      local lo, hi = vmin, vmax          -- freeze the data range before widening
-      for _, v in ipairs({ a.below, a.above }) do
-        local g = v / 10000
-        if g >= lo * 0.7 and g <= hi * 1.3 then
-          if g < vmin then vmin = g end
-          if g > vmax then vmax = g end
-        end
-      end
+      if a.below then widen(a.below / 10000) end
+      if a.above then widen(a.above / 10000) end
     end
   end
-  if vmax <= vmin then vmax = vmin + 1 end
+  -- Fair-price TRAILING series (sell-odds ratio applied to the trailing 7-day
+  -- floor, so it drifts with the market level). The "Fair" toggle skips the
+  -- series here, which drops the line, its read-outs and its label below.
+  local fairByDay = {}
+  if M.chartFair ~= false and M.FairSeries then
+    for _, e in ipairs(M.FairSeries(series, key)) do fairByDay[e.day] = e.fair end
+    for i = 1, n do
+      local fv = fairByDay[arr[i].day]
+      if fv then widen(fv / 10000) end
+    end
+  end
+  vmin, vmax = minSpan(vmin, vmax, 0.0001)
   local pad = (vmax - vmin) * 0.15
   vmin, vmax = math.max(0, vmin - pad), vmax + pad
 
@@ -617,61 +660,47 @@ function M.RenderAllTime(canvas, key)
   dayW, pw, capped = dayStep(pw, dSpan)
   local function X(day) return left + (day - tMin) * dayW end
   local function Y(g) return bottom + (g - vmin) / (vmax - vmin) * ph end
+  local function inScale(g) return g >= vmin and g <= vmax end
+  local function clampY(g) local y = Y(g); if y < bottom then y = bottom elseif y > bottom + ph then y = bottom + ph end return y end
+
+  -- one x and one quantity per day, shared by its bar, line point, Fair/MA
+  -- vertices and read-outs: a 1W day covered by intraday scans sits at its
+  -- LAST scan with that scan's quantity (the daily row would sit at midnight
+  -- with the daily MIN and the day's peak supply)
+  local dayX, dayQ = {}, {}
+  for i = 1, n do
+    local lp = lastOf and lastOf[arr[i].day]
+    dayX[i] = lp and X(lp.t) or X(arr[i].day)
+    dayQ[i] = lp and (lp.qty or 0) or (arr[i].qty or 0)
+  end
+  local qmax, volH = 0, ph * 0.40
+  for i = 1, n do if dayQ[i] > qmax then qmax = dayQ[i] end end
+  if ipts then for _, e in ipairs(ipts) do if (e.qty or 0) > qmax then qmax = e.qty end end end
+  local function qtyY(q) return (qmax > 0) and (bottom + volH * (q / qmax)) or bottom end
 
   -- subtle volume bars (quantity per day) at each day's real time position
   local bars = {}
-  for i = 1, n do
-    local bx = X(arr[i].day)
-    if bx < left then bx = left end
-    bars[i] = { x = bx, q = arr[i].qty }
-  end
-  VolumeBars(canvas, bars, bottom, ph, capped and 18 or math.max(1.5, math.min(10, dayW)))
-
-  -- Fair-price TRAILING series (sell-odds ratio applied to the trailing 7-day
-  -- floor, so it drifts with the market level) + quantity-bar scaling; on hover.
-  local fairByDay = {}
-  -- "Fair" toggle: skipping the series here also drops the fair line, its hover
-  -- read-outs and the right-edge label further down (they all key off this table)
-  if M.chartFair ~= false and M.FairSeries then
-    for _, e in ipairs(M.FairSeries(series, key)) do fairByDay[e.day] = e.fair end
-  end
-  local function clampY(g) local y = Y(g); if y < bottom then y = bottom elseif y > bottom + ph then y = bottom + ph end return y end
-  local qmax, volH = 0, ph * 0.40
-  for i = 1, n do local q = arr[i].qty or 0; if q > qmax then qmax = q end end
+  for i = 1, n do bars[i] = { x = dayX[i], q = dayQ[i] } end
+  VolumeBars(canvas, bars, bottom, ph, capped and 18 or math.max(1.5, math.min(10, dayW)), qmax)
 
   -- hover points = the real scan days, each carrying price + fair + qty read-outs
   local pts = {}
   for i = 1, n do
-    local priceY = Y(arr[i].low / 10000)
+    local d = arr[i].day
+    local lp = lastOf and lastOf[d]
+    local price = lp and lp.low or arr[i].px
+    local priceY = Y(price / 10000)
+    local when = lp and ("  " .. date("%H:%M", lp.ts)) or ""
     local reads = { { kind = "price", y = priceY,
-      l1 = M.DayLabel(arr[i].day) .. "  \194\183  " .. M.MoneyPlain(arr[i].low) } }
-    local fv = fairByDay[arr[i].day]
-    if fv then reads[#reads + 1] = { kind = "fair", y = clampY(fv / 10000), l1 = "Fair  " .. M.MoneyPlain(fv) } end
-    local q = arr[i].qty or 0
-    local qy = (qmax > 0) and (bottom + volH * (q / qmax)) or bottom
-    reads[#reads + 1] = { kind = "qty", y = qy, l1 = "Qty  " .. math.floor(q + 0.5) }
-    pts[i] = { x = X(arr[i].day), y = priceY, reads = reads }
-  end
-
-  -- days covered by intraday scans: move the day's point to the LAST scan of
-  -- the day (the daily row would sit at midnight showing the daily MIN)
-  if ipts then
-    for i = 1, n do
-      local lp = lastOf[arr[i].day]
-      if lp then
-        local py = Y(lp.low / 10000)
-        pts[i].x, pts[i].y = X(lp.t), py
-        for _, rd in ipairs(pts[i].reads) do
-          if rd.kind == "price" then
-            rd.y = py
-            rd.l1 = M.DayLabel(arr[i].day) .. "  " .. date("%H:%M", lp.ts) .. "  \194\183  " .. M.MoneyPlain(lp.low)
-          elseif rd.kind == "qty" then
-            rd.y = (qmax > 0) and (bottom + volH * ((lp.qty or 0) / qmax)) or bottom
-            rd.l1 = "Qty  " .. math.floor((lp.qty or 0) + 0.5)
-          end
-        end
-      end
+      l1 = M.DayLabel(d) .. when .. "  \194\183  " .. M.MoneyPlain(price) } }
+    local fv = fairByDay[d]
+    if fv then
+      local fGold = fv / 10000
+      reads[#reads + 1] = { kind = "fair", y = clampY(fGold),
+        l1 = "Fair  " .. M.MoneyPlain(fv) .. (inScale(fGold) and "" or "  \194\183  off scale") }
     end
+    reads[#reads + 1] = { kind = "qty", y = qtyY(dayQ[i]), l1 = "Qty  " .. math.floor(dayQ[i] + 0.5) }
+    pts[i] = { x = dayX[i], y = priceY, reads = reads }
   end
 
   -- One smooth line through all points; segments that bridge missing days are
@@ -679,8 +708,8 @@ function M.RenderAllTime(canvas, key)
   local lr, lg, lb = TC("teal")
   for i = 1, n do pts[i].dash = (i > 1) and ((arr[i].day - arr[i - 1].day) > 1) or false end
   if ipts then
-    -- line through the day points (already moved to each day's last scan where
-    -- covered) plus every earlier scan of each day
+    -- line through the day points (already at each covered day's last scan)
+    -- plus every earlier scan of each day
     local linePts = {}
     for i = 1, n do linePts[#linePts + 1] = { x = pts[i].x, y = pts[i].y, day = arr[i].day } end
     for _, e in ipairs(ipts) do
@@ -697,11 +726,23 @@ function M.RenderAllTime(canvas, key)
     SmoothLine(canvas, pts, 1.6, lr, lg, lb, 1, bottom, bottom + ph, 0.5)
   end
 
-  -- fair-price line: the trailing recency-weighted value, so it moves over time
+  -- fair-price line: the trailing recency-weighted value, so it moves over
+  -- time. Off-scale days break the line instead of pinning it to an edge,
+  -- where it would read as a price it never had.
   do
-    local fpts = {}
-    for i = 1, n do local fv = fairByDay[arr[i].day]; if fv then fpts[#fpts + 1] = { x = X(arr[i].day), y = clampY(fv / 10000) } end end
-    if #fpts >= 2 then local fr, fg, fb = TC("purple"); SmoothLine(canvas, fpts, 1.3, fr, fg, fb, 0.6, bottom, bottom + ph, 0.6) end
+    local fr, fg, fb = TC("purple")
+    local run = {}
+    local function flush()
+      if #run >= 2 then SmoothLine(canvas, run, 1.3, fr, fg, fb, 0.6, bottom, bottom + ph, 0.6) end
+      run = {}
+    end
+    for i = 1, n do
+      local fv = fairByDay[arr[i].day]
+      if fv then
+        if inScale(fv / 10000) then run[#run + 1] = { x = pts[i].x, y = Y(fv / 10000) } else flush() end
+      end
+    end
+    flush()
   end
 
   -- YOUR trades as dots ("My trades" toggle): each buy (GREEN, your entry) and
@@ -712,6 +753,7 @@ function M.RenderAllTime(canvas, key)
   -- legend appears while dots are shown. Big chart only; previews stay clean.
   -- The Y scale is stretched above to include trade prices; clampY stays as a
   -- safety net only.
+  local legend = false
   if M.chartTrades ~= false and not canvas._compact and M.db and M.db.trade then
     local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
     if id then
@@ -735,7 +777,7 @@ function M.RenderAllTime(canvas, key)
           -- to the plot edge it would read as a price it never had -- the day's
           -- hover read-out below still carries the numbers
           local g = (e.gross / cnt) / 10000
-          if g >= vmin and g <= vmax then
+          if inScale(g) then
             marks[#marks + 1] = { x = X(tx), y = clampY(g),
                                   cnt = cnt, buy = (e.kind == "bought") }
             if cnt > maxCnt then maxCnt = cnt end
@@ -789,39 +831,29 @@ function M.RenderAllTime(canvas, key)
           local lx2 = left + 12 + (f1:GetStringWidth() or 26) + 14
           RoundDot(canvas, lx2, ly, 8, rr, rg, rb)
           Label(canvas, lx2 + 6, ly, "Sells", "LEFT", TC("sub"))
+          legend = true
         end
       end
     end
   end
 
-  -- optional moving-average overlay (broker style): a trailing simple MA that
-  -- only starts once a full window of history exists -- so it begins ~period days
-  -- IN from the left (not at day 1) and then runs all the way to the current day.
-  -- The window is capped at 20 days but shrinks on short histories so it still shows.
-  -- Drawn with the same monotone curve as the price line (no x-overshoot).
+  -- optional moving-average overlay (broker style), drawn with the same
+  -- monotone curve as the price line (no x-overshoot)
+  local maLabelY
   if M.chartMA then
-    local period = math.min(20, math.max(4, math.floor(dSpan / 3)))
+    local ma = FloorMA(arr, dSpan)
     local mapts = {}
     for i = 1, n do
-      if arr[i].day - dMin >= period then            -- warm-up: skip the first `period` days
-        local s, c = 0, 0
-        for j = i, 1, -1 do
-          if arr[i].day - arr[j].day > period then break end
-          s = s + arr[j].low; c = c + 1
-        end
-        if c > 0 then
-          local ma = s / c
-          local maY = Y(ma / 10000)
-          mapts[#mapts + 1] = { x = X(arr[i].day), y = maY }
-          if pts[i] then pts[i].reads[#pts[i].reads + 1] = { kind = "ma", y = maY, l1 = "Floor MA  " .. M.MoneyPlain(ma) } end
-        end
+      if ma[i] then
+        local maY = Y(ma[i] / 10000)
+        mapts[#mapts + 1] = { x = pts[i].x, y = maY }
+        pts[i].reads[#pts[i].reads + 1] = { kind = "ma", y = maY, l1 = "Floor MA  " .. M.MoneyPlain(ma[i]) }
       end
     end
     if #mapts >= 2 then
       local ar, ag, ab = TC("blue")   -- cool blue: gold is reserved for the price line
       SmoothLine(canvas, mapts, 1.4, ar, ag, ab, 0.5, bottom, bottom + ph, 0.5)
-      local myL = mapts[#mapts].y
-      if math.abs(myL - pts[n].y) > 11 then Label(canvas, left + pw + 8, myL, "Floor MA", "LEFT", ar, ag, ab) end
+      maLabelY = mapts[#mapts].y
     end
   end
 
@@ -833,8 +865,7 @@ function M.RenderAllTime(canvas, key)
         local py = Y(e.low / 10000)
         local reads = { { kind = "price", y = py,
           l1 = M.DayLabel(e.day) .. "  " .. date("%H:%M", e.ts) .. "  \194\183  " .. M.MoneyPlain(e.low) } }
-        local qy = (qmax > 0) and (bottom + volH * ((e.qty or 0) / qmax)) or bottom
-        reads[#reads + 1] = { kind = "qty", y = qy, l1 = "Qty  " .. math.floor((e.qty or 0) + 0.5) }
+        reads[#reads + 1] = { kind = "qty", y = qtyY(e.qty or 0), l1 = "Qty  " .. math.floor((e.qty or 0) + 0.5) }
         pts[#pts + 1] = { x = X(e.t), y = py, day = e.day, reads = reads }
       end
     end
@@ -843,38 +874,71 @@ function M.RenderAllTime(canvas, key)
   canvas._pts, canvas._plotBot, canvas._plotTop, canvas._plotRight = pts, bottom, bottom + ph, left + pw
   M.SetupHover(canvas)
 
-  -- value bounds (right) + current value at the line end (Midas gold)
+  -- right edge: current value at the line end (Midas gold), the scale bounds
+  -- and the Fair / Floor MA line labels, each at least 11px from the others; a
+  -- line label may shift a few px off its line end to find room
   local yCur = pts[n].y
   local mr, mg, mb = TC("muted")
-  if math.abs(yCur - (bottom + ph)) > 11 then Label(canvas, left + pw + 8, bottom + ph, M.MoneyPlain(vmax * 10000), "LEFT", mr, mg, mb) end
-  if math.abs(yCur - bottom) > 11 then Label(canvas, left + pw + 8, bottom, M.MoneyPlain(vmin * 10000), "LEFT", mr, mg, mb) end
   Dot(canvas, pts[n].x, yCur, 4, lr, lg, lb)
-  local curLow = (lastOf and lastOf[arr[n].day]) and lastOf[arr[n].day].low or arr[n].low
-  Label(canvas, left + pw + 8, yCur, M.MoneyPlain(curLow), "LEFT", lr, lg, lb)
+  local curPx = (lastOf and lastOf[arr[n].day]) and lastOf[arr[n].day].low or arr[n].px
+  Label(canvas, left + pw + 8, yCur, M.MoneyPlain(curPx), "LEFT", lr, lg, lb)
+  local taken = { yCur }
+  local function sideLabel(y, txt, r, g, b, shifts)
+    for _, dy in ipairs(shifts or { 0 }) do
+      local yy = y + dy
+      local free = yy >= bottom - 2 and yy <= bottom + ph + 2
+      for _, t in ipairs(taken) do if math.abs(t - yy) < 11 then free = false; break end end
+      if free then
+        taken[#taken + 1] = yy
+        Label(canvas, left + pw + 8, yy, txt, "LEFT", r, g, b)
+        return
+      end
+    end
+  end
+  local NUDGE = { 0, 6, -6, 11, -11, 16, -16 }
+  sideLabel(bottom + ph, M.MoneyPlain(vmax * 10000), mr, mg, mb)
+  sideLabel(bottom, M.MoneyPlain(vmin * 10000), mr, mg, mb)
   local fLast = fairByDay[arr[n].day]
-  if fLast then
-    local fy = clampY(fLast / 10000)
-    if math.abs(fy - yCur) > 11 then local fr, fg, fb = TC("purple"); Label(canvas, left + pw + 8, fy, "Fair", "LEFT", fr, fg, fb) end
+  local fOff = fLast and not inScale(fLast / 10000)
+  if fLast and not fOff then
+    local fr, fg, fb = TC("purple")
+    sideLabel(Y(fLast / 10000), "Fair", fr, fg, fb, NUDGE)
+  end
+  if maLabelY then
+    local ar, ag, ab = TC("blue")
+    sideLabel(maLabelY, "Floor MA", ar, ag, ab, NUDGE)
+  end
+
+  -- off-scale notes stack inward from the plot edges (the top stack starts
+  -- under the Buys/Sells legend)
+  local noteTop, noteBot = bottom + ph - (legend and 10 or 6), bottom + 7
+  local function edgeNote(txt, above, r, g, b)
+    local y
+    if above then y = noteTop; noteTop = noteTop - 11 else y = noteBot; noteBot = noteBot + 11 end
+    Label(canvas, left + 4, y, txt, "LEFT", r, g, b)
+  end
+  if fOff and not canvas._compact then
+    local fr, fg, fb = TC("purple")
+    edgeNote("Fair  " .. M.MoneyPlain(fLast) .. "  \194\183  off scale", fLast / 10000 > vmax, fr, fg, fb)
   end
 
   -- price-alert limit lines: dashed horizontals at the below (green, the buy
   -- side) and above (gold, the sell side) limits, labelled at the left end.
-  -- A limit the scale block above left out (too far off) is skipped here too.
   if alertRec then
     local function alertLine(v, word, cr, cg, cb)
       local g = v / 10000
-      if g < vmin or g > vmax then
+      if not inScale(g) then
         -- limit outside the scale (the widen rule above left it out): say so
         -- at the edge instead of silently drawing nothing - a mistyped 7g50
         -- limit on a 7s item looks exactly like a missing line otherwise
-        local ay = (g > vmax) and (Y(vmax) - 6) or (Y(vmin) + 7)
-        Label(canvas, left + 4, ay,
-          "ALERT " .. word .. "  " .. M.MoneyPlain(v) .. "  \194\183  off scale", "LEFT", cr, cg, cb)
+        edgeNote("ALERT " .. word .. "  " .. M.MoneyPlain(v) .. "  \194\183  off scale", g > vmax, cr, cg, cb)
         return
       end
       local ay = Y(g)
       DashSeg(canvas, left, ay, left + pw, ay, 1.2, cr, cg, cb, 0.55)
-      Label(canvas, left + 4, ay + 7, "ALERT " .. word .. "  " .. M.MoneyPlain(v), "LEFT", cr, cg, cb)
+      -- the text sits above its line, below it right under the plot ceiling
+      local ty = (ay + 14 > bottom + ph) and (ay - 7) or (ay + 7)
+      Label(canvas, left + 4, ty, "ALERT " .. word .. "  " .. M.MoneyPlain(v), "LEFT", cr, cg, cb)
     end
     if alertRec.below then local r2, g2, b2 = TC("green"); alertLine(alertRec.below, "below", r2, g2, b2) end
     if alertRec.above then local r2, g2, b2 = TC("accent"); alertLine(alertRec.above, "above", r2, g2, b2) end
@@ -1005,7 +1069,7 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
       if g > vmax then vmax = g end
     end
   end
-  if vmax <= vmin then vmax = vmin + 1 end
+  vmin, vmax = minSpan(vmin, vmax, 0.0001)
   local pad = (vmax - vmin) * 0.12
   vmin, vmax = math.max(0, vmin - pad), vmax + pad
   local W, H = canvas:GetWidth(), canvas:GetHeight()
@@ -1098,7 +1162,7 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
       .. (p2.ts and ("  " .. date("%H:%M", p2.ts)) or "")
       .. "  \194\183  " .. M.MoneyPlain(p2.v)
     pts[#pts + 1] = { x = X(p2.t or p2.day), y = Y(p2.v / 10000), day = p2.day, label = lab }
-    pts[#pts].dash = (i > 1) and ((p2.day - plotArr[i - 1].day) > 2) or false
+    pts[#pts].dash = (i > 1) and ((p2.day - plotArr[i - 1].day) > 1) or false
   end
   local lr, lg, lb = TC(clsName and (M.CLASS_COLOR[clsName] or "teal") or "teal")
   SmoothLine(canvas, pts, 1.8, lr, lg, lb, 1, bottom, bottom + ph, 0.5)
@@ -1110,22 +1174,22 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
   if math.abs(yCur - bottom) > 11 then Label(canvas, left + pw + 8, bottom, M.MoneyPlain(vmin * 10000), "LEFT", mr, mg, mb) end
   Dot(canvas, pts[pn].x, yCur, 4, lr, lg, lb)
   Label(canvas, left + pw + 8, yCur, M.MoneyPlain(plotArr[pn].v), "LEFT", lr, lg, lb)
-  local labelN = capped and math.min(2, pn) or math.min(4, pn)
-  local seenLbl = {}
+  -- date labels evenly spaced by TIME on whole days, like the market chart
+  local dMin, dMax = plotArr[1].day, plotArr[pn].day
+  local ldSpan = dMax - dMin
+  local labelN = (dMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
   for k = 0, labelN - 1 do
-    local i = 1 + math.floor((pn - 1) * k / math.max(labelN - 1, 1) + 0.5)
-    local txt = M.DayLabel(plotArr[i].day)
-    if not seenLbl[txt] then
-      seenLbl[txt] = true
-      local anchor = (k == 0) and "LEFT" or ((k == labelN - 1) and (capped and "LEFT" or "RIGHT") or "CENTER")
-      Label(canvas, X(plotArr[i].t or plotArr[i].day), bottom - 12, txt, anchor, TC("muted"))
-    end
+    local day = (labelN <= 1) and dMin or (dMin + math.floor(ldSpan * k / (labelN - 1) + 0.5))
+    local anchor = (k == 0) and "LEFT" or ((k == labelN - 1) and (capped and "LEFT" or "RIGHT") or "CENTER")
+    local lx = X(day)
+    if lx < left then lx = left end
+    Label(canvas, lx, bottom - 12, M.DayLabel(day), anchor, TC("muted"))
   end
 end
 
 -- ===== Holding history (one item you own): dual-scale combined chart ========
 -- ONE plot, two y scales: the item's market PRICE on the LEFT scale (gold line)
--- and the VALUE of your holding (that day's quantity x price) on the RIGHT
+-- and the VALUE of your holding (that day's quantity x Fair) on the RIGHT
 -- scale (teal line), overlaid. Your per-day quantity shows as faint bars along
 -- the bottom and your buys/sells as green/red dots at their realized prices
 -- (size scales with the traded amount).
@@ -1170,8 +1234,8 @@ function M.RenderHoldingChart(canvas, key, qty)
     local realm = M.RealmKey()
     for _, e in ipairs(M.db.trade.log) do
       if e.id == id and e.realm == realm and e.day and (e.count or 0) > 0 then
-        if e.kind == "bought" then delta[e.day] = (delta[e.day] or 0) + e.count
-        elseif e.kind == "sold" then delta[e.day] = (delta[e.day] or 0) - e.count end
+        if e.kind == "bought" or e.kind == "received" then delta[e.day] = (delta[e.day] or 0) + e.count
+        elseif e.kind == "sold" or e.kind == "given" then delta[e.day] = (delta[e.day] or 0) - e.count end
         if (e.kind == "bought" or e.kind == "sold") and (e.gross or 0) > 0 then
           local a = tagg[e.day]; if not a then a = {}; tagg[e.day] = a end
           local k = (e.kind == "bought") and "b" or "s"
@@ -1180,6 +1244,20 @@ function M.RenderHoldingChart(canvas, key, qty)
           t.cost = t.cost + e.gross
         end
       end
+    end
+  end
+  -- unit value per day, the way net worth values the item today: that day's
+  -- Fair (the trailing series ends exactly on today's Fair), or the flat
+  -- vendor value net worth falls back to for untrusted vendor items
+  local fairSeries = M.FairSeries and M.FairSeries(series, key) or {}
+  local unitOf = {}
+  do
+    local unitNow = M.ItemValue and M.ItemValue(key)
+    local mNow = M.Metrics(series, key)
+    if not unitNow or (mNow and mNow.fair and math.abs(unitNow - mNow.fair) < 0.5) then
+      for _, e in ipairs(fairSeries) do unitOf[e.day] = e.fair end
+    elseif unitNow > 0 then
+      for i = 1, n do unitOf[arr[i].day] = unitNow end
     end
   end
   -- per-day quantity, carried backwards across EVERY calendar day: a recorded
@@ -1192,7 +1270,8 @@ function M.RenderHoldingChart(canvas, key, qty)
       if snapQ ~= nil then q = snapQ end
       if q < 0 then q = 0 end
       arr[i].q = q
-      arr[i].v = arr[i].low * q
+      arr[i].unit = unitOf[d] or arr[i].low
+      arr[i].v = arr[i].unit * q
       -- step back to the previous SCAN day, undoing trades on every calendar
       -- day in between (d down to prevDay+1)
       local stopDay = (i > 1) and (arr[i - 1].day + 1) or d
@@ -1251,21 +1330,27 @@ function M.RenderHoldingChart(canvas, key, qty)
     if (p2.q or 0) > qMax then qMax = p2.q end
   end
   local pLo, pHi = pMin, pMax      -- freeze the data range before widening
+  -- same 30% rule as the market chart: a far-off trade or Fair must not squash the scale
+  local function widen(ug)
+    if ug >= pLo * 0.7 and ug <= pHi * 1.3 then
+      if ug < pMin then pMin = ug end
+      if ug > pMax then pMax = ug end
+    end
+  end
   for _, a in pairs(tagg) do     -- keep NEARBY trade prices inside the left scale
     for _, k in ipairs({ "b", "s" }) do
       local t = a[k]
-      if t and t.qty > 0 then
-        local ug = (t.cost / t.qty) / 10000
-        -- same 30% rule as the market chart: a far-off trade must not squash the scale
-        if ug >= pLo * 0.7 and ug <= pHi * 1.3 then
-          if ug < pMin then pMin = ug end
-          if ug > pMax then pMax = ug end
-        end
-      end
+      if t and t.qty > 0 then widen((t.cost / t.qty) / 10000) end
     end
   end
-  if pMax <= pMin then pMax = pMin + 1 end
-  if vMax <= vMin then vMax = vMin + 1 end
+  local showFair = M.chartFair ~= false
+  if showFair then
+    for _, e in ipairs(fairSeries) do
+      if e.day >= dMin and e.day <= dMax then widen(e.fair / 10000) end
+    end
+  end
+  pMin, pMax = minSpan(pMin, pMax, 0.0001)
+  vMin, vMax = minSpan(vMin, vMax, 0.0001)
   local pPad = (pMax - pMin) * 0.12
   local vPad = (vMax - vMin) * 0.12
   pMin, pMax = math.max(0, pMin - pPad), pMax + pPad
@@ -1310,7 +1395,7 @@ function M.RenderHoldingChart(canvas, key, qty)
     vpts[#vpts + 1] = { x = xx, y = vy, dash = gap and p2.qChangedInGap or false }
     local reads = {
       { kind = "price", y = vy, l1 = M.DayLabel(p2.day) .. "  \194\183  " .. M.MoneyPlain(p2.v),
-        l2 = "x" .. (p2.q or 0) .. "  @  " .. M.MoneyPlain(p2.low) },
+        l2 = "x" .. (p2.q or 0) .. "  @  " .. M.MoneyPlain(p2.unit) },
       { kind = "hprice", y = py, l1 = "Price  " .. M.MoneyPlain(p2.low) },
       { kind = "qty", y = bottom + ph * 0.25 * ((p2.q or 0) / math.max(qMax, 1)), l1 = "Qty  x" .. (p2.q or 0) },
     }
@@ -1361,38 +1446,34 @@ function M.RenderHoldingChart(canvas, key, qty)
   -- Floor MA / Fair overlays on the LEFT price scale -- the same three toggles
   -- work here exactly like in the market chart
   if M.chartMA then
+    local ma = FloorMA(arr, dSpan)
     local mapts = {}
     for i = 1, n do
-      local sum, cnt = 0, 0
-      for j = i, 1, -1 do
-        if arr[i].day - arr[j].day > 20 then break end
-        sum = sum + arr[j].low
-        cnt = cnt + 1
-      end
-      if cnt >= 2 then mapts[#mapts + 1] = { x = X(arr[i].day), y = YP((sum / cnt) / 10000) } end
+      if ma[i] then mapts[#mapts + 1] = { x = X(arr[i].day), y = YP(ma[i] / 10000) } end
     end
     if #mapts >= 2 then
       local r2, g2, b2 = TC("blue")   -- cool blue: gold is reserved for the price line
       SmoothLine(canvas, mapts, 1.3, r2, g2, b2, 0.5, pZ0, pZ1, 0.4)
     end
   end
-  if M.chartFair ~= false and M.FairSeries then
+  if showFair then
     -- FairSeries covers the item's WHOLE history: keep only the days this
     -- chart shows (the timeframe trims arr, X() would go negative before it
-    -- and draw the line out of the canvas), and clamp into the price zone
-    -- (fair can sit above the day-low scale, same guard as the market chart)
-    local fpts = {}
-    for _, e in ipairs(M.FairSeries(series, key)) do
+    -- and draw the line out of the canvas); off-scale days break the line
+    -- instead of pinning it to the zone edge
+    local r2, g2, b2 = TC("purple")
+    local run = {}
+    local function flush()
+      if #run >= 2 then SmoothLine(canvas, run, 1.3, r2, g2, b2, 0.6, pZ0, pZ1, 0.6) end
+      run = {}
+    end
+    for _, e in ipairs(fairSeries) do
       if e.day >= dMin and e.day <= dMax then
-        local y = YP(e.fair / 10000)
-        if y < pZ0 then y = pZ0 elseif y > pZ1 then y = pZ1 end
-        fpts[#fpts + 1] = { x = X(e.day), y = y }
+        local g = e.fair / 10000
+        if g >= pMin and g <= pMax then run[#run + 1] = { x = X(e.day), y = YP(g) } else flush() end
       end
     end
-    if #fpts >= 2 then
-      local r2, g2, b2 = TC("purple")
-      SmoothLine(canvas, fpts, 1.3, r2, g2, b2, 0.6, pZ0, pZ1, 0.6)
-    end
+    flush()
   end
   -- your trades as dots at their realized unit price (left scale), size by amount
   local maxTQ = 0
@@ -1500,33 +1581,57 @@ function M.RenderHelpFair(canvas)
   local pw, ph = W - left - right, H - top - bottom
   -- 14 example daily lows in gold; day 5 is a 30g no-demand spike (trimmed)
   local lows = { 10, 11, 9.5, 10.5, 30, 10, 11, 12, 10.5, 11, 11.5, 10.5, 11, 11.5 }
-  local spike = 5
+  local nl = #lows
+  -- base exactly as DemandBase builds it: days above median x FAIR_TRIM drop
+  -- out, the rest weigh 0.5^(age / the Fair half-life set in Settings)
+  local sorted = {}
+  for i, g in ipairs(lows) do sorted[i] = g end
+  table.sort(sorted)
+  local med = (nl % 2 == 1) and sorted[(nl + 1) / 2] or (sorted[nl / 2] + sorted[nl / 2 + 1]) / 2
+  local cap = med * (M.C.FAIR_TRIM or 1.5)
+  local hl = M.FairHalflife and M.FairHalflife() or 7
+  local wsum, vsum = 0, 0
+  for i, g in ipairs(lows) do
+    if g <= cap then
+      local w = 0.5 ^ ((nl - i) / hl)
+      wsum = wsum + w; vsum = vsum + w * g
+    end
+  end
+  local base = vsum / wsum
+  -- the example's sales lift Fair to 11g (the odds example below uses the same
+  -- 11g); Fair never sits under the base
+  local fair = math.max(11, base)
   local lo, hi = 9, 13.5                      -- y-scale ignores the spike
-  local function X(i) return left + (i - 1) / 13 * pw end
+  local function X(i) return left + (i - 1) / (nl - 1) * pw end
   local function Y(g)
     local y = bottom + (g - lo) / (hi - lo) * ph
     if y > bottom + ph then y = bottom + ph end
     return y
   end
   local tr, tg, tb = TC("teal")
-  local pts = {}
+  local rr, rg, rb = TC("blue")
+  local pts, gap = {}, false
   for i, g in ipairs(lows) do
-    if i ~= spike then pts[#pts + 1] = { x = X(i), y = Y(g), dash = (i == spike + 1) } end
+    if g <= cap then
+      pts[#pts + 1] = { x = X(i), y = Y(g), dash = gap }
+      gap = false
+    else
+      -- a trimmed day: cool blue dot pinned to the top edge (gold = prices, red = sells)
+      RoundDot(canvas, X(i), bottom + ph - 2, 7, rr, rg, rb, 0.9)
+      Label(canvas, X(i) + 6, bottom + ph - 2, "trimmed (no demand)", "LEFT", rr, rg, rb)
+      gap = true
+    end
   end
   SmoothLine(canvas, pts, 1.6, tr, tg, tb, 1, bottom, bottom + ph, 0.5)
-  -- the trimmed spike: cool blue dot pinned to the top edge (gold = prices, red = sells)
-  local rr, rg, rb = TC("blue")
-  RoundDot(canvas, X(spike), bottom + ph - 2, 7, rr, rg, rb, 0.9)
-  Label(canvas, X(spike) + 6, bottom + ph - 2, "trimmed (no demand)", "LEFT", rr, rg, rb)
   -- base and Fair reference lines
   local mr, mg, mb = TC("muted")
-  DashSeg(canvas, left, Y(10.6), left + pw, Y(10.6), 1, mr, mg, mb, 0.7)
-  Label(canvas, left + 2, Y(10.6) - 7, "base 10g60s (trimmed, recent days weigh more)", "LEFT", mr, mg, mb)
+  DashSeg(canvas, left, Y(base), left + pw, Y(base), 1, mr, mg, mb, 0.7)
+  Label(canvas, left + 2, Y(base) - 7, "base " .. M.MoneyPlain(base * 10000) .. " (trimmed, recent days weigh more)", "LEFT", mr, mg, mb)
   local pr, pg, pb = TC("purple")
-  DashSeg(canvas, left, Y(11.1), left + pw, Y(11.1), 1, pr, pg, pb, 0.9)
-  Label(canvas, left + pw - 2, Y(11.1) + 8, "Fair ~11g (lifted, capped by your sales)", "RIGHT", pr, pg, pb)
-  Label(canvas, left - 4, Y(9.5), "9g", "RIGHT", mr, mg, mb)
-  Label(canvas, left - 4, Y(12), "12g", "RIGHT", mr, mg, mb)
+  DashSeg(canvas, left, Y(fair), left + pw, Y(fair), 1, pr, pg, pb, 0.9)
+  Label(canvas, left + pw - 2, Y(fair) + 8, "Fair " .. M.MoneyPlain(fair * 10000)
+    .. ((fair > base) and " (lifted, capped by your sales)" or " (no lift)"), "RIGHT", pr, pg, pb)
+  for _, g in ipairs({ 10, 12 }) do Label(canvas, left - 4, Y(g), g .. "g", "RIGHT", mr, mg, mb) end
   Label(canvas, left, bottom - 9, "14 days of scans", "LEFT", TC("muted"))
 end
 
@@ -1638,21 +1743,16 @@ function M.RenderWhyFair(canvas, key)
   table.sort(arr, function(x, y) return x.day < y.day end)
   local n = #arr
   local from = math.max(1, n - 20)
-  -- the same trim rule as DemandBase: within the last FAIR_BASE_DAYS, a day
-  -- whose low exceeds the window median x FAIR_TRIM carried no demand
-  local span = M.C.FAIR_BASE_DAYS or 14
-  local lastDay = m.lastDay or arr[n].day
-  local win = {}
-  for i = from, n do
-    if lastDay - arr[i].day < span then win[#win + 1] = arr[i].low end
-  end
-  table.sort(win)
-  local med = win[math.max(1, math.floor((#win + 1) / 2))] or m.base
-  local cap = med * (M.C.FAIR_TRIM or 1.5)
+  -- the base window exactly as DemandBase trims it: a day above the window
+  -- median x FAIR_TRIM carried no demand, a one-scan dip below median /
+  -- FAIR_TRIM that the market already left again is dropped too
+  local dw, hiCap, loCap = M.DemandWindow(series, m.lastDay or arr[n].day)
+  local trimDay = {}
+  if dw then for _, e in ipairs(dw) do if not e.keep then trimDay[e.day] = true end end end
   local lo, hi = math.huge, 0
   for i = from, n do
     local l = arr[i].low
-    if l <= cap then
+    if not trimDay[arr[i].day] then
       if l < lo then lo = l end
       if l > hi then hi = l end
     end
@@ -1692,12 +1792,13 @@ function M.RenderWhyFair(canvas, key)
   local hpts = {}
   for i = from, n do
     local e = arr[i]
-    local isTrim = (lastDay - e.day < span) and e.low > cap
     local reads
-    if isTrim then
+    if trimDay[e.day] then
       trimmed = trimmed + 1
-      RoundDot(canvas, X(i), bottom + ph - 2, 6, ar, ag, ab, 0.9)
-      reads = { { kind = "ma", y = bottom + ph - 2,
+      -- spikes pin to the top edge, dips to the bottom edge
+      local ty = (e.low > hiCap) and (bottom + ph - 2) or (bottom + 2)
+      RoundDot(canvas, X(i), ty, 6, ar, ag, ab, 0.9)
+      reads = { { kind = "ma", y = ty,
         l1 = M.DayLabel(e.day) .. "  trimmed  \194\183  " .. M.MoneyPlain(e.low) } }
     else
       kept[#kept + 1] = { x = X(i), y = Y(e.low) }
@@ -1714,9 +1815,16 @@ function M.RenderWhyFair(canvas, key)
     hpts[#hpts + 1] = { x = X(i), y = reads[1].y, day = e.day, reads = reads }
   end
   if #kept >= 2 then SmoothLine(canvas, kept, 1.5, tr, tg, tb, 1, bottom, bottom + ph, 0.5) end
+  -- the trim caps: a day outside them is a blue dot instead of the line
+  if hiCap then
+    for _, c in ipairs({ hiCap, loCap }) do
+      if c > lo and c < hi then DashSeg(canvas, left, Y(c), left + pw, Y(c), 1, ar, ag, ab, 0.45) end
+    end
+  end
   if trimmed > 0 then
     Label(canvas, left + pw - 2, bottom + ph - 2,
-      trimmed .. " day(s) trimmed \226\128\148 no demand", "RIGHT", ar, ag, ab)
+      string.format("%d day(s) trimmed \226\128\148 outside %s \226\128\147 %s", trimmed,
+        M.MoneyPlain(loCap), M.MoneyPlain(hiCap)), "RIGHT", ar, ag, ab)
   end
   local mr, mg, mb = TC("muted")
   DashSeg(canvas, left, Y(m.base), left + pw, Y(m.base), 1, mr, mg, mb, 0.7)
@@ -1826,10 +1934,7 @@ function M.RenderWhyOdds(canvas, key)
   RoundDot(canvas, X(m.fair), Y(odds(m.fair)), 8, gr, gg, gb)
   Label(canvas, X(m.fair) + 6, Y(odds(m.fair)) + 9,
     string.format("Fair %s \194\183 ~%.0f%%", M.MoneyPlain(m.fair), odds(m.fair) * 100), "LEFT", gr, gg, gb)
-  local cr, cg, cb
-  if m.delta >= (M.C.PICK_DELTA or 0.15) then cr, cg, cb = TC("red")
-  elseif m.delta <= -(M.C.PICK_DELTA or 0.15) then cr, cg, cb = TC("green")
-  else cr, cg, cb = TC("sub") end
+  local cr, cg, cb = TC(M.DeltaColor(m.delta))
   local curOdds = m.odds or odds(cur)
   RoundDot(canvas, X(cur), Y(odds(cur)), 8, cr, cg, cb)
   local anch = (X(cur) > left + pw * 0.6) and "RIGHT" or "LEFT"
@@ -1895,7 +2000,7 @@ function M.RenderWorthSpark(canvas)
     if arr[i].v < vmin then vmin = arr[i].v end
     if arr[i].v > vmax then vmax = arr[i].v end
   end
-  if vmax <= vmin then vmax = vmin + 1 end
+  vmin, vmax = minSpan(vmin, vmax, 1)
   local pad = (vmax - vmin) * 0.15
   vmin = math.max(0, vmin - pad); vmax = vmax + pad
   local left, right, top, bottom = 4, 4, 10, 6

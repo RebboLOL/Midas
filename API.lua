@@ -239,7 +239,9 @@ function API.GetTradeStats(item)
     soldListings = soldListings or 0, soldPerDay = soldPerDay or 0,
   }
   if M.Sellability then
-    local ok, s = pcall(M.Sellability, key)
+    -- the rating is keyed by item name, not by archive key
+    local tk = M.TradeKeyForID and M.TradeKeyForID(key)
+    local ok, s = pcall(M.Sellability, tk or key)
     if ok and s then out.sellability, out.sellRate = s.label, s.rate end
   end
   return out

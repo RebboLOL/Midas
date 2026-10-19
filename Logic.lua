@@ -130,7 +130,7 @@ local function liqLabelOf(avgQty)
   else return "Illiquid" end
 end
 
--- 7-day floor: median of the daily lowest buyouts over the last 7 scan days ending
+-- 7-day floor: median of the daily lowest buyouts over the 7 calendar days ending
 -- at uptoDay (default: the item's newest day). Falls back to a 14-day window, then
 -- to the last known low. The reference every ask is compared against.
 function M.Floor7(series, uptoDay)
@@ -159,11 +159,10 @@ function M.Floor7(series, uptoDay)
 end
 
 -- Trimmed short-term market base: recency-weighted average of the daily lowest
--- buyouts over the last FAIR_BASE_DAYS, EXCLUDING up-outlier days whose low
--- exceeds the window median x FAIR_TRIM. On thin days the "daily low" can be a
--- single overpriced ask that met no demand; those days must not inflate Fair.
--- The median itself always survives the trim, so at least half the window
--- remains. The recency HALF-LIFE is user-tunable (Settings > Fair price,
+-- buyouts over the last FAIR_BASE_DAYS, EXCLUDING the days M.DemandWindow drops:
+-- up-outliers above the window median x FAIR_TRIM (on thin days the "daily low"
+-- can be a single overpriced ask that met no demand) and one-scan dips below
+-- median / FAIR_TRIM. The recency HALF-LIFE is user-tunable (Settings > Fair price,
 -- config.fairHalflife, default 7 days): shorter = Fair follows the last days,
 -- longer = it smooths over the whole window.
 function M.FairHalflife()
@@ -172,15 +171,24 @@ function M.FairHalflife()
   return hl
 end
 
-function M.DemandBase(series, uptoDay)
+local function newestDay(series, uptoDay)
+  if uptoDay then return uptoDay end
+  local last = -1
+  for d in pairs(series) do if d > last then last = d end end
+  return last
+end
+
+-- The FAIR_BASE_DAYS window behind DemandBase, ascending by day: { day, low, keep }.
+-- keep = false for a no-demand spike (low > median x FAIR_TRIM) and for a one-scan
+-- dip (low < median / FAIR_TRIM while the day's last scan was back above that
+-- line): the daily low is the MIN over every scan and peer of the day, so one
+-- sniped lowball would otherwise define it. A day whose last scan stayed low is a
+-- real drop and is kept. nil with fewer than 4 days (DemandBase uses Floor7 then).
+function M.DemandWindow(series, uptoDay)
   if not series then return nil end
   local C = M.C
-  local last = uptoDay
-  if not last then
-    last = -1
-    for d in pairs(series) do if d > last then last = d end end
-  end
-  if not last or last < 0 then return nil end
+  local last = newestDay(series, uptoDay)
+  if last < 0 then return nil end
   local span = C.FAIR_BASE_DAYS or 14
   local win, lows = {}, {}
   for d, v in pairs(series) do
@@ -189,29 +197,38 @@ function M.DemandBase(series, uptoDay)
       lows[#lows + 1] = v.low
     end
   end
-  if #win < 4 then return M.Floor7(series, last) end
+  if #win < 4 then return nil end
   table.sort(lows)
-  local cap = median(lows) * (C.FAIR_TRIM or 1.5)
+  table.sort(win, function(a, b) return a.day < b.day end)
+  local med = median(lows)
+  local trim = C.FAIR_TRIM or 1.5
+  local hiCap, loCap = med * trim, med / trim
+  for i = 1, #win do
+    local e = win[i]
+    local cur = series[e.day].cur
+    e.keep = e.low <= hiCap and not (e.low < loCap and cur and cur >= loCap)
+  end
+  return win, hiCap, loCap
+end
+
+function M.DemandBase(series, uptoDay)
+  if not series then return nil end
+  local last = newestDay(series, uptoDay)
+  if last < 0 then return nil end
+  local win = M.DemandWindow(series, last)
+  if not win then return M.Floor7(series, last) end
   local hl = M.FairHalflife()
   local wsum, vsum = 0, 0
   for i = 1, #win do
-    if win[i].low <= cap then
-      local w = 0.5 ^ ((last - win[i].day) / hl)
+    local e = win[i]
+    if e.keep then
+      local w = 0.5 ^ ((last - e.day) / hl)
       wsum = wsum + w
-      vsum = vsum + w * win[i].low
+      vsum = vsum + w * e.low
     end
   end
   if wsum <= 0 then return M.Floor7(series, last) end
   return vsum / wsum
-end
-
--- Liquidity class of a series (same thresholds as Metrics' label)
-function M.LiqClass(series)
-  local days, qtySum = 0, 0
-  for _, v in pairs(series) do
-    if v.low then days = days + 1; qtySum = qtySum + (v.qty or 0) end
-  end
-  return liqLabelOf(days > 0 and qtySum / days or 0)
 end
 
 -- Merged class anchor: shipped market prior + the user's own logged outcomes
@@ -240,25 +257,38 @@ local function classAnchor(class)
   return a
 end
 
--- Cheap pre-scan: day count, newest day and average market qty in ONE pass, with no
--- sorting and no pow(). The whole-archive sweeps (RankAll/TopPicks) use it to skip the
--- expensive full Metrics for items that can't pass their day/qty gate anyway. Without
--- this, every refresh sorts and recency-weights every item in the archive -- on a large
--- database that trips WoW's "script ran too long" watchdog (Logic.lua Metrics). The
--- returned days/lastDay/avgQty are computed exactly as in M.Metrics, so gating on them
--- yields an identical result set.
+-- Price percentiles, average quantity and the liquidity class describe the market of
+-- the last STATS_DAYS before the item's newest day; `days` stays the all-time count.
+local STATS_DAYS = 60
+
+-- Cheap pre-scan: all-time day count, newest day and the STATS_DAYS average market
+-- qty, with no sorting and no pow(). The whole-archive sweeps (RankAll/TopPicks) use
+-- it to skip the expensive full Metrics for items that can't pass their day/qty gate
+-- anyway. Without this, every refresh sorts and recency-weights every item in the
+-- archive -- on a large database that trips WoW's "script ran too long" watchdog
+-- (Logic.lua Metrics). M.Metrics takes days/lastDay/avgQty from here, so gating on
+-- them yields an identical result set.
 local function quickScan(series)
-  local days, qtySum, lastDay = 0, 0, -1
+  local days, lastDay = 0, -1
   for day, v in pairs(series) do
     if v.low then
       days = days + 1
-      qtySum = qtySum + (v.qty or 0)
       if day > lastDay then lastDay = day end
     end
   end
-  return days, lastDay, (days > 0 and qtySum / days or 0)
+  local n, qtySum, from = 0, 0, lastDay - STATS_DAYS
+  for day, v in pairs(series) do
+    if v.low and day > from then n = n + 1; qtySum = qtySum + (v.qty or 0) end
+  end
+  return days, lastDay, (n > 0 and qtySum / n or 0)
 end
 M.QuickScan = quickScan
+
+-- Liquidity class of a series (the same label as Metrics')
+function M.LiqClass(series)
+  local _, _, avgQty = quickScan(series)
+  return liqLabelOf(avgQty)
+end
 
 -- series = {day = {low,qty}}, key = item key (optional, enables the per-item
 -- refinement) -> metrics (prices in copper).
@@ -294,27 +324,20 @@ function M.Metrics(series, key)
       return hit
     end
   end
-  local obs, days, qtySum, lastDay = {}, 0, 0, -1
-  for day, v in pairs(series) do
-    if v.low then
-      days = days + 1
-      obs[#obs + 1] = { day = day, low = v.low }
-      qtySum = qtySum + (v.qty or 0)
-      if day > lastDay then lastDay = day end
-    end
-  end
+  local days, lastDay, avgQty = quickScan(series)
   if days == 0 then
     if memo then memo.items[key] = false end
     return nil
   end
-  local lows = {}
-  for i = 1, #obs do lows[i] = obs[i].low end
+  local lows, from = {}, lastDay - STATS_DAYS
+  for day, v in pairs(series) do
+    if v.low and day > from then lows[#lows + 1] = v.low end
+  end
   table.sort(lows)
   local C = M.C
   local buy  = percentile(lows, 0.25)
   local sell = percentile(lows, 0.75)
   local med  = median(lows)
-  local avgQty = qtySum / days
   local margin = buy > 0 and (sell / buy - 1) or 0
   local liq  = math.min(1, avgQty / C.QTY_REF)
   local conf = math.max(0, math.min(1, (days - 3) / (C.DAYS_REF - 3)))
@@ -367,7 +390,7 @@ function M.Metrics(series, key)
   if base and base > 0 and floor7 and floor7 > 0 then
     local adj = (floor7 * rstar) / base   -- odds-optimal price as a multiple of the base
     fairCapped = adj < 1                  -- odds below target even at the trimmed level
-    fair = base * clampNum(adj, 1, C.FAIR_LIFT_MAX or 1.20)
+    fair = base * clampNum(adj, 1, C.FAIR_LIFT_MAX or 1.10)
   end
   if not (fair and fair > 0) then fair = med end
 
@@ -399,27 +422,47 @@ end
 -- evaluated per day. The line hugs the spike-cleaned market level historically
 -- instead of carrying today's lift back through the whole history (which painted a
 -- constant offset above the market). The newest point matches Metrics' fair.
+local function fairOnDay(series, day, rstar)
+  local b = M.DemandBase(series, day)
+  local f7 = M.Floor7(series, day)
+  if not (b and b > 0 and f7 and f7 > 0) then return nil end
+  return b * clampNum((f7 * rstar) / b, 1, M.C.FAIR_LIFT_MAX or 1.10)
+end
+
 -- Only called for the one charted item.
 function M.FairSeries(series, key)
   local out = {}
   if not series then return out end
   local m = M.Metrics(series, key)
   if not (m and m.rstar and m.fair and m.fair > 0) then return out end
-  local C = M.C
-  local liftMax = C.FAIR_LIFT_MAX or 1.10
   local days = {}
   for d, v in pairs(series) do if v.low then days[#days + 1] = d end end
   table.sort(days)
   for i = 1, #days do
-    local b = M.DemandBase(series, days[i])
-    local f7 = M.Floor7(series, days[i])
-    if b and b > 0 and f7 and f7 > 0 then
-      local adj = (f7 * m.rstar) / b
-      if adj < 1 then adj = 1 elseif adj > liftMax then adj = liftMax end
-      out[#out + 1] = { day = days[i], fair = b * adj }
-    end
+    local f = fairOnDay(series, days[i], m.rstar)
+    if f then out[#out + 1] = { day = days[i], fair = f } end
   end
   return out
+end
+
+-- One point of FairSeries: Fair as it stood on a historic day. nil when not computable.
+function M.FairAt(series, key, day)
+  local m = series and day and M.Metrics(series, key)
+  if not (m and m.rstar) then return nil end
+  return fairOnDay(series, day, m.rstar)
+end
+
+-- Theme color key for a vs-Fair delta: below Fair = buy, above Fair = sell.
+function M.DeltaColor(delta)
+  local t = M.C.PICK_DELTA or 0.15
+  if delta and delta <= -t then return "green" end
+  if delta and delta >= t then return "red" end
+  return "sub"
+end
+
+-- The item is missing from the newest scan day: its Current is a last-seen price.
+function M.NotListed(m)
+  return (m and m.lastDay and m.lastDay < M.LastScanDay()) and true or false
 end
 
 -- Newest days first: list {day, low, qty}, optionally capped at n
@@ -492,7 +535,7 @@ local function runAnalysis()
       if days > 0 then
         if not m then
           local le = series[lastDay]
-          m = { cur = le and (le.cur or le.low), days = days, avgQty = avgQty }
+          m = { cur = le and (le.cur or le.low), days = days, avgQty = avgQty, lastDay = lastDay }
         end
         all[#all + 1] = { key = key, m = m }
       end

@@ -1,5 +1,17 @@
 # Midas – Changelog
 
+## 1.2.15 – 2026-10-19
+- **Sells per day tells the truth.** Fixed a bug where "Sells ~N/day" divided by the days between your first and last sale - one busy day no longer reads as dozens of sales a day, the rate now spreads over the whole 60-day window.
+- **Charts end at the current price.** Fixed a bug where the newest point and its gold label showed the day's lowest scan instead of the current price - and Fair lines, above-only alert limits and flat or one-day prices now always sit on an honest scale with labels that no longer overlap.
+- **One color rule for "vs Fair".** Fixed a bug where the item card and the item tooltip colored the gap to Fair the opposite way to the tables - green now means below Fair and red above Fair everywhere.
+- **Offer book: fresh undercuts counted right.** Fixed a bug where a 1c undercut posted after the scan took over the competitor's row - your new units now extend the supply and every running total below them.
+- **Net worth adds up.** Fixed a bug where items were filed under "Other" while the item cache was still loading - and the headline, the character percentages and the what-moved list, now including items bought and used up in the window, all add up to the same total.
+- **Trades: realized margin per item.** The By Item table now shows what the units you sold actually earned after the AH cut and their buy price, so a fresh restock no longer makes a good flip look like a loss in Net.
+- **Trades tab: one window for every number.** Sold, returned, net, average buy and the header totals now cover the same days, trades are dated by the day their mail arrived and judged against that day's Fair, and duplicate mails, outbid refunds and own-use vendor buys no longer skew the ledger.
+- **Fresher, fairer numbers.** Item cards now follow every scan instead of keeping their first numbers, items missing from the newest scan say "not listed" instead of showing stale signals, and a cheap listing that was gone by the day's last scan no longer drags Fair down.
+- **Trade window counts too.** Sales and purchases through the player trade window now land in the trade ledger as Trade sell / Trade buy - the gold is split over several items by Fair, swaps and gifts are listed without a price, and trades with your own characters stay out as transfers.
+- **Sync: no lost messages.** Fixed a bug where some sync requests and replies to other Midas users were never sent - shared scans and backfills now always go out.
+
 ## 1.2.14 – 2026-10-16
 - **Fair price: recency is yours to tune.** A new Settings slider sets the half-life of the market base behind Fair (2-14 days, default 7), with a live example graph right below - short chases the latest days, long smooths over the whole two-week window.
 - **Net worth: no more dip while auction mail waits.** Fixed a bug where ended auctions vanished from the total until the mailbox was emptied - their value now bridges into the unread mail, gold attached to mails counts too, and collected mail no longer double-counts against the stale auction list.

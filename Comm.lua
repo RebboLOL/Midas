@@ -81,7 +81,10 @@ end
 -- and because of (2) our sustained public-channel rate stays well under the limit
 -- even though a Success return only means "queued client-side" (server may still
 -- throttle). Together these make the visible "messages limited" error impossible.
-local queue, qHead, budget, nextSend = {}, 1, 0, 0
+-- Eigener Ende-Zähler qTail: "#queue" ist undefiniert, sobald der Anfang auf nil
+-- gesetzt ist - neue Nachrichten landeten sonst in schon abgearbeiteten Fächern
+-- unter qHead und wurden nie gesendet.
+local queue, qHead, qTail, budget, nextSend = {}, 1, 0, 0, 0
 local msgTokens   = 0            -- locally mirrored per-prefix message allowance
 local commBackoff = 0            -- current backoff seconds (0 = none)
 local MSG_BURST, MSG_REGEN      = 8, 0.9   -- < Blizzard's 10 burst / +1/s (headroom)
@@ -102,7 +105,7 @@ pump:SetScript("OnUpdate", function(self, elapsed)
   local now = GetTime()
   if now < nextSend then return end             -- min spacing AND active backoff
   local item = queue[qHead]
-  if not item then queue, qHead = {}, 1; self:Hide(); return end
+  if not item then queue, qHead, qTail = {}, 1, 0; self:Hide(); return end
   local cost = #item.text + 16
   if budget < cost or msgTokens < 1 then return end
   if item.chan == "GUILD" and not IsInGuild() then queue[qHead] = nil; qHead = qHead + 1; return end
@@ -139,7 +142,8 @@ local function Enqueue(chan, text, target)
     elseif v == "yell" then chan = "YELL"
     else return end
   end
-  queue[#queue + 1] = { chan = chan, text = text, target = target }
+  qTail = qTail + 1
+  queue[qTail] = { chan = chan, text = text, target = target }
   pump:Show()
 end
 
@@ -208,6 +212,8 @@ local function DecodeRows(str, sTs)
     local dId, low, qty = dec36(f[1]), dec36(f[2]), dec36(f[3])
     if not (dId and low and qty) then return nil end
     local id = prev + dId; prev = id
+    -- 0c = a sub-copper unit price (ammo) from peers before the 1c floor
+    if low == 0 then low = 1 end
     if id <= 0 or id > 16777215 or low <= 0 or low > 5e8 or qty > 1e5 then return nil end
     local r = { id = id, low = low, qty = qty }
     if sTs then
@@ -453,7 +459,7 @@ end
 
 function M.CommSync()
   SendManifest(true)
-  M.Print("sync: manifest sent (last " .. M.C.SYNC_DAYS .. " days), queue " .. (#queue - qHead + 1) .. " msgs.")
+  M.Print("sync: manifest sent (last " .. M.C.SYNC_DAYS .. " days), queue " .. (qTail - qHead + 1) .. " msgs.")
 end
 
 function M.CommStatus()
@@ -463,7 +469,7 @@ function M.CommStatus()
   M.Print(string.format("share %s  trust %s  |  rx %d rows/%d msgs  tx %d rows/%d msgs  |  peers(10m) %d  queue %d",
     cfg.share and "ON" or "OFF", cfg.shareTrust or "all",
     M.commStats.rxRows, M.commStats.rxMsgs, M.commStats.txRows, M.commStats.txMsgs,
-    np, #queue - qHead + 1))
+    np, qTail - qHead + 1))
   M.Print(string.format("  scope %s  hash %s  guild:%s  |  vicinity %s (AH %s)  throttled %d",
     commScope(), RealmHash(), tostring(IsInGuild()),
     string.upper(cfg.vicinity or "off"), M.AHOpen and "open" or "closed", M.commStats.txThrottled or 0))
@@ -489,7 +495,7 @@ function M.CommInfo()
     txRows = M.commStats.txRows, txMsgs = M.commStats.txMsgs,
     txThrottled = M.commStats.txThrottled or 0,
     vicinity = cfg.vicinity or "off", ahOpen = M.AHOpen == true,
-    peerCount = cnt, peers = names, queue = #queue - qHead + 1, log = log,
+    peerCount = cnt, peers = names, queue = qTail - qHead + 1, log = log,
   }
 end
 

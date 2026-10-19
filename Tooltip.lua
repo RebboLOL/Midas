@@ -31,14 +31,33 @@ local function annotate(tooltip, itemID)
   if hasMidas(tooltip) then return end
 
   local cur = m.cur
+  local notListed = M.NotListed(m)
+  -- units in the AH at the newest scan: the daily row keeps the day's PEAK, so
+  -- prefer the last own scan when it is from that day; nothing is listed when
+  -- the newest scan did not see the item
   local curQty = (series[m.lastDay] and series[m.lastDay].qty) or 0
+  local ist = M.db.intra and M.db.intra[M.RealmKey()]
+  local st = ist and ist[tostring(itemID)]
+  local lp = st and st[#st]
+  if lp and math.floor((lp.ts - M.C.SCAN_DAY_0) / 86400) == m.lastDay then curQty = lp.qty or 0 end
+  if notListed then curQty = 0 end
   local avgQty = math.floor(m.avgQty + 0.5)
-  -- color by price level: >=10% ABOVE fair = green (good to sell), <=10% below = red
+  -- the signal colors like everywhere else (under Fair = buy green, over Fair =
+  -- sell red); a price last seen days ago carries no signal at all
   local delta = m.delta
-  local sig, r, g, b
-  if delta >= 0.10 then sig = string.format("+%.0f%% above fair", delta * 100); r, g, b = 0.36, 0.82, 0.47
-  elseif delta <= -0.10 then sig = string.format("%.0f%% below fair", delta * 100); r, g, b = 0.94, 0.39, 0.35
-  else sig = string.format("%+.0f%% ~ fair", delta * 100); r, g, b = 0.78, 0.80, 0.85 end
+  local pick = M.C.PICK_DELTA or 0.15
+  local sig
+  if delta >= pick then sig = string.format("+%.0f%% above fair", delta * 100)
+  elseif delta <= -pick then sig = string.format("%.0f%% below fair", delta * 100)
+  else sig = string.format("%+.0f%% ~ fair", delta * 100) end
+  local sc = M.Theme and M.Theme.C[notListed and "sub" or M.DeltaColor(delta)]
+  local r, g, b = 0.78, 0.80, 0.85
+  if sc then r, g, b = sc[1], sc[2], sc[3] end
+  local curTxt = "Current  " .. M.MoneyPlain(cur)
+  if notListed then
+    sig = "last seen " .. M.DayLabel(m.lastDay)
+    curTxt = "Not listed  \194\183  last " .. M.MoneyPlain(cur)
+  end
   local liqTxt = m.liqLabel or ""
   if m.speed then liqTxt = string.format("~%.1f/day \194\183 %s", m.speed, m.liqLabel or "") end
   -- Fair carries its meaning: the sell chance it is calibrated to (lower if capped)
@@ -47,7 +66,7 @@ local function annotate(tooltip, itemID)
 
   tooltip:AddLine(" ")
   tooltip:AddDoubleLine("|cffE8B44AMidas|r", sig, 0.91, 0.70, 0.29, r, g, b)
-  tooltip:AddDoubleLine("Current  " .. M.MoneyPlain(cur), fairTxt, r, g, b, 0.78, 0.76, 0.70)
+  tooltip:AddDoubleLine(curTxt, fairTxt, r, g, b, 0.78, 0.76, 0.70)
   if mode == "reduced" then tooltip:Show(); return end
   tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyPlain(m.quick), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
@@ -61,7 +80,7 @@ local function annotate(tooltip, itemID)
     tooltip:AddDoubleLine("Up to +10%:  " .. near, "Listed:  " .. (dp.listed or dp.units), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   end
   -- sell chance of a 48h listing at the CURRENT price (the transparency line)
-  if m.odds then
+  if m.odds and not notListed then
     local o = m.odds
     local or_, og, ob
     if o >= 0.60 then or_, og, ob = 0.36, 0.82, 0.47
@@ -147,8 +166,10 @@ local function showChart(tooltip, itemID)
   else
     f:SetPoint("TOPLEFT", tooltip, "BOTTOMLEFT", 0, -2)
   end
-  -- re-render only when the item, the timeframe or the data generation changed
-  local gen = (M.db.config and M.db.config.lastIngest) or 0
+  -- re-render only when the item, the timeframe, the data generation (own
+  -- scans, sync merges, trades) or what the chart draws changed
+  local gen = table.concat({ M._analysisGen or 0, tostring(M.chartFair ~= false), tostring(M.chartMA and true or false),
+    M.FairHalflife and M.FairHalflife() or 7 }, ":")
   if f._key ~= key or f._rng ~= rng or f._gen ~= gen then
     f._key, f._rng, f._gen = key, rng, gen
     f.head:SetText("MIDAS  \194\183  PRICE  \194\183  " .. (TT_RANGE_LBL[rng] or rng))

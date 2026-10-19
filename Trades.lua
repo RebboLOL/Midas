@@ -1,7 +1,8 @@
--- Midas – Trades: mail-based trading history (buys / sells / returns) and a
--- "sellability" rating per item, derived purely from the auction-house mail you
--- receive. No network or posting hooks: the mailbox is the only reliable source
--- of *realized* trades, and it is persisted in SavedVariables.
+-- Midas – Trades: trading history (buys / sells / returns) and a "sellability"
+-- rating per item. Auction trades come from the auction-house mail you receive
+-- (the mailbox is the only reliable source of *realized* auctions); vendor buys
+-- and the player trade window are booked once they completed. Persisted in
+-- SavedVariables.
 --
 --   sold mail      -> your auction sold     (money in mail, no attachment)
 --   expired mail   -> auction came back     (item attached, no money)
@@ -21,6 +22,7 @@ local function tradeDB()
   local t = M.db.trade
   t.log = t.log or {}
   t.seen = t.seen or {}
+  t.mail = t.mail or {}
   t.nameIndex = t.nameIndex or {}
   return t
 end
@@ -28,6 +30,23 @@ end
 local function charKey()
   return (M.CharKey and M.CharKey())
     or (UnitName("player") or "?") .. "-" .. (GetRealmName() or "?")
+end
+
+-- Everything derived from the log. The windowed aggregates also go stale when
+-- the scan day rolls over, not only when the log changes.
+local function dropCaches()
+  M._tradeStats, M._realizedCache, M._outcomeById, M._boughtCache = nil, nil, nil, nil
+  M._tradeIdx = nil
+end
+
+local function syncDay()
+  local d = M.GetScanDay()
+  if M._tradeDay == d then return end
+  local rolled = M._tradeDay ~= nil
+  M._tradeDay = d
+  dropCaches()
+  -- deferred: this runs inside Metrics via RealizedSell/OutcomeCounts
+  if rolled and M.DirtyAnalysis then C_Timer.After(0, M.DirtyAnalysis) end
 end
 
 -- Strip the trailing "(N)" stack size the AH puts in mail subjects, so a name is
@@ -104,18 +123,95 @@ local function estListPrice(t, id, count)
   return units[math.floor((#units + 1) / 2)]
 end
 
+-- ===== Mail identity ========================================================
+-- A mail carries no id we can read. Per character it is identified by kind,
+-- item, money (bought: the invoice price) and its expiry; identical mails are
+-- matched one-to-one. AH mails live 30 days, so the expiry also dates the trade.
+local MAIL_LIFE  = 30 * 86400
+local MAIL_TOL   = 30    -- s: the same mail's expiry estimate wobbles by a few seconds between passes
+local LEGACY_TOL = 300   -- s: t.seen expiries were taken from a stale daysLeft, so they run late
+
+-- daysLeft only moves when the server resends the inbox, so "now + daysLeft"
+-- creeps forward with the clock in between. Each daysLeft value is anchored to
+-- the moment it was first read, which keeps one expiry per mail across passes.
+local dlAnchor = {}
+
+local function mailKey(kind, name, id, money, gross)
+  local who = (name and name ~= "" and name:lower()) or id or "?"
+  return kind .. "|" .. who .. "|" .. money .. "|" .. ((kind == "bought") and gross or 0)
+end
+
+-- nearest unclaimed stored expiry within MAIL_TOL
+local function takeSlot(slots, claimed, expiry)
+  local best, bestD
+  for j = 1, #slots do
+    if not claimed[j] then
+      local d = math.abs(slots[j] - expiry)
+      if d <= MAIL_TOL and (not bestD or d < bestD) then best, bestD = j, d end
+    end
+  end
+  return best
+end
+
+-- t.seen holds "kind|id-or-name|money|hour#n" -> expiry, without the character.
+-- Mails logged under that scheme must not be logged again; each entry is used
+-- up by at most one mail and then dropped.
+local function legacyIndex(t)
+  if not next(t.seen) then return nil end
+  local idx = {}
+  for h, exp in pairs(t.seen) do
+    local base = h:match("^(.*)|%-?%d+#%d+$")
+    if base then
+      local arr = idx[base]; if not arr then arr = {}; idx[base] = arr end
+      arr[#arr + 1] = { h = h, exp = exp }
+    end
+  end
+  return idx
+end
+
+local function takeLegacy(t, idx, base, expiry)
+  local arr = idx[base]
+  if not arr then return false end
+  local best, bestD
+  for j, o in ipairs(arr) do
+    local d = o.exp - expiry
+    if d >= -MAIL_TOL and d <= LEGACY_TOL and (not bestD or math.abs(d) < bestD) then
+      best, bestD = j, math.abs(d)
+    end
+  end
+  if not best then return false end
+  t.seen[arr[best].h] = nil
+  table.remove(arr, best)
+  return true
+end
+
 -- ===== Scan the inbox and append new trade events ===========================
 function M.ScanTradeMail()
   local t = tradeDB(); if not t then return end
-  local n = (GetInboxNumItems and GetInboxNumItems()) or 0
+  local n, onServer = 0, nil
+  if GetInboxNumItems then n, onServer = GetInboxNumItems() end
+  n = n or 0
+  -- an empty list is also what the client reports before the inbox has loaded,
+  -- so it proves nothing about collected mail
   if n == 0 then return end
   local now, day = time(), M.GetScanDay()
   local realm, char = M.RealmKey(), charKey()
   local added = 0
-  local occ = {}   -- counts identical mails within one pass so each gets its own key
+  local store = t.mail[char]
+  if not store then store = {}; t.mail[char] = store end
+  local claimed = {}        -- key -> { [slot] = true }: stored mails present in this pass
+  local complete = (onServer == nil) or n >= onServer   -- the inbox shows at most 50 mails
+  local legacy = legacyIndex(t)
+  t.mailSince = t.mailSince or now
+  local anchors = {}
 
   for i = 1, n do
     local _, _, _, subject, money, _, daysLeft = GetInboxHeaderInfo(i)
+    local at = now
+    if daysLeft then
+      at = dlAnchor[daysLeft] or now
+      anchors[daysLeft] = at
+    end
     local kind, capName = classify(subject)
     if kind then
       money = money or 0
@@ -181,6 +277,7 @@ function M.ScanTradeMail()
       -- store a phantom 0c entry (a later inbox update catches the complete one)
       local incomplete = ((kind == "sold" or kind == "outbid") and money <= 0)
                       or (kind == "bought" and (gross or 0) <= 0)
+      if incomplete then complete = false end   -- unmatched stored mails may be this one
       if incomplete and not M._mailRescan then
         -- a won mail's price lives only in its invoice, which the server loads
         -- lazily -- if the player loots the mail before another inbox pass runs,
@@ -190,19 +287,33 @@ function M.ScanTradeMail()
         C_Timer.After(2, function() M._mailRescan = nil; M.ScanTradeMail() end)
       end
       if not incomplete then
-        -- dedup: a mail stays in the inbox until collected, so key on a stable
-        -- expiry hour bucket (absolute expiry time does not drift across refreshes).
-        -- Several identical mails (e.g. 5 stacks of the same item expiring together)
-        -- share that bucket, so append a per-pass occurrence index -> each distinct,
-        -- yet stable across re-opens. This was dropping returns as false "duplicates".
-        local expiry = math.floor(now + (daysLeft or 0) * 86400)
-        local base = kind .. "|" .. (id or name or "?") .. "|" .. money .. "|" .. math.floor(expiry / 3600)
-        occ[base] = (occ[base] or 0) + 1
-        local hash = base .. "#" .. occ[base]
-        if not t.seen[hash] then
-          t.seen[hash] = expiry
+        -- a mail stays in the inbox until collected: log it the first time only
+        local expiry = math.floor(at + (daysLeft or 0) * 86400)
+        local key = mailKey(kind, name, id, money, gross)
+        local slots = store[key]; if not slots then slots = {}; store[key] = slots end
+        local cl = claimed[key]; if not cl then cl = {}; claimed[key] = cl end
+        local slot = takeSlot(slots, cl, expiry)
+        local fresh = not slot
+        if fresh then
+          slots[#slots + 1] = expiry
+          cl[#slots] = true
+          if legacy and expiry - MAIL_LIFE <= t.mailSince + MAIL_TOL then
+            local tail = "|" .. money
+            fresh = not ((id and takeLegacy(t, legacy, kind .. "|" .. id .. tail, expiry))
+                      or (name and takeLegacy(t, legacy, kind .. "|" .. name .. tail, expiry))
+                      or ((not id and not name) and takeLegacy(t, legacy, kind .. "|?" .. tail, expiry)))
+          end
+        else
+          cl[slot] = true
+        end
+        if fresh then
+          -- the trade happened when the mail arrived, not when it was collected
+          local tday = day
+          if daysLeft and daysLeft > 0 and daysLeft <= 30 then
+            tday = math.floor((expiry - MAIL_LIFE - M.C.SCAN_DAY_0) / 86400)
+          end
           t.log[#t.log + 1] = {
-            ts = now, day = day, kind = kind,
+            ts = now, day = tday, kind = kind,
             id = id, name = name, count = count,
             gross = gross, fee = fee, net = net,
             listPrice = listPrice,
@@ -229,7 +340,7 @@ function M.ScanTradeMail()
           if M.CurveNote and id and calPrice and calPrice > 0 then
             local cnt = (count and count > 0) and count or 1
             local s = M.GetSeries(tostring(id))
-            local f7 = s and M.Floor7 and M.Floor7(s, day)
+            local f7 = s and M.Floor7 and M.Floor7(s, tday)
             if f7 and f7 > 0 then
               M.CurveNote(M.LiqClass(s), (calPrice / cnt) / f7, kind == "sold")
             end
@@ -237,6 +348,27 @@ function M.ScanTradeMail()
         end
       end
     end
+  end
+  dlAnchor = anchors
+
+  -- a complete pass saw every mail of this character: stored mails it did not
+  -- see were collected, and an identical mail arriving later is a new one
+  if complete then
+    for key, slots in pairs(store) do
+      local cl = claimed[key]
+      local keep = {}
+      if cl then
+        for j = 1, #slots do if cl[j] then keep[#keep + 1] = slots[j] end end
+      end
+      store[key] = (#keep > 0) and keep or nil
+    end
+  end
+  for ck, st in pairs(t.mail) do
+    for key, slots in pairs(st) do
+      for j = #slots, 1, -1 do if slots[j] < now then table.remove(slots, j) end end
+      if #slots == 0 then st[key] = nil end
+    end
+    if next(st) == nil then t.mail[ck] = nil end
   end
 
   -- prune dedup memory + trim the log by AGE, not by a fixed entry count: the
@@ -258,10 +390,7 @@ function M.ScanTradeMail()
   while #t.log > max do table.remove(t.log, 1) end
 
   if added > 0 then
-    M._tradeStats = nil
-    M._realizedCache = nil
-    M._outcomeById = nil
-    M._boughtCache = nil
+    dropCaches()
     if M.DirtyAnalysis then M.DirtyAnalysis() end   -- fair depends on trade outcomes now
     if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
   end
@@ -298,11 +427,37 @@ end
 -- Reverse item-name -> id from the market archive. "Sold" mails carry no
 -- attachment (so no id); without this they'd never link to market data, leaving
 -- the vs-median column and the price chart empty. Built lazily, cached per session.
-local nameToId
+local nameToId, bySuffix
+local noSuffix = {}
+
+-- Random-suffix gear ("Revenant Boots of the Bear") is archived as
+-- "gr:<id>:of the Bear", never under its full name: split at each " of " and
+-- accept the base id only when exactly that archive key exists.
+local function suffixedID(name)
+  local unsure = false
+  local from = 1
+  while true do
+    local s = name:find(" of ", from, true)
+    if not s then break end
+    local base = name:sub(1, s - 1):lower()
+    for _, id in ipairs(bySuffix[name:sub(s + 1)] or {}) do
+      local nm = M.GetItemInfo(id)
+      if nm then
+        if nm:lower() == base then return id end
+      else
+        unsure = true
+      end
+    end
+    from = s + 1
+  end
+  if not unsure then noSuffix[name] = true end
+  return nil
+end
+
 function M.NameToID(name)
   if not name or name == "" then return nil end
   if not nameToId then
-    nameToId = {}
+    nameToId, bySuffix = {}, {}
     for key in pairs(M.IterItems()) do
       local id = tonumber(key)
       if id then
@@ -310,10 +465,21 @@ function M.NameToID(name)
         if nm and not nm:find("^Item #") and not nm:find("^#") and not nm:find("^Pet ") then
           nameToId[nm:lower()] = id
         end
+      elseif type(key) == "string" then
+        local gid, suffix = key:match("^gr:(%d+):(.+)$")
+        if gid and not suffix:find("^%d+$") then
+          local arr = bySuffix[suffix]; if not arr then arr = {}; bySuffix[suffix] = arr end
+          arr[#arr + 1] = tonumber(gid)
+        end
       end
     end
   end
-  return nameToId[name:lower()]
+  local lname = name:lower()
+  local id = nameToId[lname]
+  if id or noSuffix[name] or not name:find(" of ", 1, true) then return id end
+  id = suffixedID(name)
+  if id then nameToId[lname] = id end
+  return id
 end
 
 -- ===== Own-auction stack sizes (to recover sell unit prices) =================
@@ -415,7 +581,7 @@ function M.SeedCurve()
   if not t0 then return 0 end
   local n = 0
   for _, e in ipairs(t.log) do
-    if e.realm == realm and e.id and (e.day or 0) >= t0
+    if e.realm == realm and e.id and (e.day or 0) >= t0 and e.src ~= "trade"
        and (e.kind == "sold" or (e.kind == "returned" and (e.listPrice or 0) > 0)) then
       local cnt = (e.count and e.count > 0) and e.count or 1
       local unit = ((e.kind == "sold") and (e.gross or 0) or e.listPrice) / cnt
@@ -436,6 +602,7 @@ function M.OutcomeCounts(key, realm)
   realm = realm or M.RealmKey()
   local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
   if not id then return 0, 0 end
+  syncDay()
   M._outcomeById = M._outcomeById or {}
   local cache = M._outcomeById[realm]
   if not cache then
@@ -444,7 +611,9 @@ function M.OutcomeCounts(key, realm)
     if t then
       local cutoff = M.GetScanDay() - (M.C.SELL_WINDOW or 60)
       for _, e in ipairs(t.log) do
-        if e.realm == realm and e.id and (e.day or 0) >= cutoff then
+        -- auction outcomes only: a trade-window sale says nothing about how
+        -- an ask fares at the AH
+        if e.realm == realm and e.id and (e.day or 0) >= cutoff and e.src ~= "trade" then
           if e.kind == "sold" or e.kind == "returned" then
             local r = cache[e.id]
             if not r then r = { s = 0, n = 0 }; cache[e.id] = r end
@@ -467,6 +636,7 @@ function M.RealizedBuy(key, realm)
   realm = realm or M.RealmKey()
   local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
   if not id then return nil, 0 end
+  syncDay()
   M._boughtCache = M._boughtCache or {}
   local cache = M._boughtCache[realm]
   if not cache then
@@ -492,9 +662,10 @@ end
 
 -- ===== Realized sale price per item (the Fair-price anchor) ==================
 -- Median of your realized sale UNIT prices (gross/count) within SELL_WINDOW for an
--- item id, plus sale count, your sales/day and the median RATIO of each sale vs the
--- 7-day floor on its sale day (what this item really clears at, price-level-free --
--- the reality brake for the Fair lift). Cached per realm; invalidated with
+-- item id, plus sale count, your sales (auctions) per day over the part of the
+-- window the log actually covers, and the median RATIO of each sale vs the 7-day
+-- floor on its sale day (what this item really clears at, price-level-free -- the
+-- reality brake for the Fair lift). Cached per realm; invalidated with
 -- _tradeStats whenever the log changes.
 local function medianOf(arr)
   local n = #arr; if n == 0 then return nil end
@@ -507,33 +678,34 @@ function M.RealizedSell(key, realm)
   realm = realm or M.RealmKey()
   local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
   if not id then return nil, 0, 0 end
+  syncDay()
   M._realizedCache = M._realizedCache or {}
   local cache = M._realizedCache[realm]
   if not cache then
     cache = {}
     local t = tradeDB()
     if t then
-      local cutoff = M.GetScanDay() - (M.C.SELL_WINDOW or 60)
-      local tmp = {}
+      local today = M.GetScanDay()
+      local cutoff = today - (M.C.SELL_WINDOW or 60)
+      local tmp, oldest = {}, nil
       for _, e in ipairs(t.log) do
-        if e.kind == "sold" and e.realm == realm and e.id and (e.day or 0) >= cutoff then
+        if e.realm == realm and e.day and (not oldest or e.day < oldest) then oldest = e.day end
+        if e.kind == "sold" and e.src ~= "trade" and e.realm == realm and e.id and (e.day or 0) >= cutoff then
           local cnt = (e.count and e.count > 0) and e.count or 1
           local unit = (e.gross or 0) / cnt
           if unit > 0 then
             local r = tmp[e.id]
-            if not r then r = { units = {}, ratios = {}, minD = e.day, maxD = e.day }; tmp[e.id] = r end
+            if not r then r = { units = {}, ratios = {} }; tmp[e.id] = r end
             r.units[#r.units + 1] = unit
             local s = M.GetSeries and M.GetSeries(tostring(e.id), realm)
             local f7 = s and M.Floor7 and M.Floor7(s, e.day)
             if f7 and f7 > 0 then r.ratios[#r.ratios + 1] = unit / f7 end
-            if e.day < r.minD then r.minD = e.day end
-            if e.day > r.maxD then r.maxD = e.day end
           end
         end
       end
+      local observed = math.max(1, today - math.max(cutoff, oldest or cutoff) + 1)
       for iid, r in pairs(tmp) do
-        local span = math.max(1, (r.maxD - r.minD) + 1)
-        cache[iid] = { med = medianOf(r.units), n = #r.units, perDay = #r.units / span,
+        cache[iid] = { med = medianOf(r.units), n = #r.units, perDay = #r.units / observed,
                        rmed = medianOf(r.ratios) }
       end
     end
@@ -578,16 +750,66 @@ function M.RepairTrades()
   end
   if touched > 0 then
     t.log = kept
-    M._tradeStats = nil; M._realizedCache = nil; M._outcomeById = nil; M._boughtCache = nil
+    dropCaches()
     if M.DirtyAnalysis then M.DirtyAnalysis() end
   end
   return touched
 end
 
+-- ===== Traded items =========================================================
+-- Per realm: which ids you ever SOLD (anything you only buy at a vendor is own
+-- use, not trading stock) and the By-Item key of each id.
+local function tradeIndex(realm)
+  syncDay()
+  M._tradeIdx = M._tradeIdx or {}
+  local x = M._tradeIdx[realm]
+  if x then return x end
+  x = { sold = {}, key = {} }
+  local t = tradeDB()
+  if t then
+    for i = #t.log, 1, -1 do
+      local e = t.log[i]
+      if e.realm == realm and (e.id or e.name) then
+        local id = e.id or (e.name and (t.nameIndex[e.name:lower()] or M.NameToID(e.name)))
+        if id then
+          if e.kind == "sold" then x.sold[id] = true end
+          if x.key[id] == nil then x.key[id] = tradeKey(e) end
+        end
+      end
+    end
+  end
+  M._tradeIdx[realm] = x
+  return x
+end
+
+local function asID(id)
+  if id == nil then return nil end
+  return (M.BaseID and M.BaseID(id)) or tonumber(id)
+end
+
+function M.IsTradedID(id, realm)
+  local n = asID(id)
+  return n ~= nil and tradeIndex(realm or M.RealmKey()).sold[n] == true
+end
+
+function M.TradeKeyForID(id, realm)
+  local n = asID(id)
+  return n and tradeIndex(realm or M.RealmKey()).key[n] or nil
+end
+
+-- a vendor purchase of something you never sell: consumption, not a trade
+local function ownUse(e, realm)
+  return e.kind == "bought" and e.src == "vendor"
+     and not (e.id and tradeIndex(realm).sold[e.id])
+end
+
 -- ===== Per-item aggregate (cached, rebuilt from the log) ====================
--- Lifetime counts for display + a windowed count used for the sellability rating.
+-- Everything over SELL_WINDOW, so every column of an item row covers the same
+-- days as its sellability rating. Own-use vendor buys are not trades and an
+-- outbid mail only returns your own bid, so neither touches net.
 function M.TradeStats(realm)
   realm = realm or M.RealmKey()
+  syncDay()
   M._tradeStats = M._tradeStats or {}
   if M._tradeStats[realm] then return M._tradeStats[realm] end
 
@@ -596,7 +818,8 @@ function M.TradeStats(realm)
   if t then
     local cutoff = M.GetScanDay() - (M.C.SELL_WINDOW or 60)
     for _, e in ipairs(t.log) do
-      if e.realm == realm and (e.id or e.name) then
+      if e.realm == realm and (e.id or e.name) and (e.day or 0) >= cutoff and not ownUse(e, realm)
+         and e.kind ~= "given" and e.kind ~= "received" then
         local key = tradeKey(e)
         -- resolve an id for market data (chart / vs-median); grouping itself is by name
         local id = e.id or (e.name and (t.nameIndex[e.name:lower()] or M.NameToID(e.name)))
@@ -608,20 +831,22 @@ function M.TradeStats(realm)
           stats[key] = s
         end
         if e.kind == "sold" then
-          s.soldStacks = s.soldStacks + 1
+          -- a trade-window sale is money and units, but no AUCTION: it stays
+          -- out of the sold/returned counts and the sell-through rating
+          if e.src ~= "trade" then
+            s.soldStacks = s.soldStacks + 1
+            s.soldW = s.soldW + 1
+          end
           s.soldUnits  = s.soldUnits + (e.count or 0)
           s.gross = s.gross + (e.gross or 0)
           s.fees  = s.fees + (e.fee or 0)
           s.net   = s.net + (e.net or 0)
-          if e.day >= cutoff then s.soldW = s.soldW + 1 end
         elseif e.kind == "returned" then
           s.retStacks = s.retStacks + 1
           s.retUnits  = s.retUnits + (e.count or 0)
-          if e.day >= cutoff then s.retW = s.retW + 1 end
+          s.retW = s.retW + 1
         elseif e.kind == "bought" then
           s.boughtUnits = s.boughtUnits + (e.count or 0)
-          s.net = s.net + (e.net or 0)
-        elseif e.kind == "outbid" then
           s.net = s.net + (e.net or 0)
         end
         if not s.id and id then s.id = id end
@@ -630,6 +855,7 @@ function M.TradeStats(realm)
       end
     end
   end
+  M._tradeStats = M._tradeStats or {}   -- a day rollover inside the loop drops the caches
   M._tradeStats[realm] = stats
   return stats
 end
@@ -655,10 +881,20 @@ function M.Sellability(itemKey, realm)
 end
 
 -- ===== Window summary for the header strip ==================================
-function M.TradeSummary(realm, windowDays)
+-- afterDay: only trades AFTER that day (pairs with a net-worth snapshot taken at
+-- the end of afterDay). days = calendar days the window spans, today included.
+-- Outbid refunds and own-use vendor buys (ownUse = their cost) stay out of net.
+function M.TradeSummary(realm, windowDays, afterDay)
   realm = realm or M.RealmKey()
-  local cutoff = windowDays and (M.GetScanDay() - windowDays) or -math.huge
-  local s = { grossSells = 0, fees = 0, buyCost = 0, net = 0, sold = 0, ret = 0, bought = 0 }
+  local today = M.GetScanDay()
+  local cutoff, days = -math.huge, nil
+  if afterDay then
+    cutoff, days = afterDay + 1, today - afterDay
+  elseif windowDays then
+    cutoff, days = today - windowDays, windowDays + 1
+  end
+  local s = { grossSells = 0, fees = 0, buyCost = 0, net = 0, sold = 0, ret = 0, bought = 0,
+              ownUse = 0, days = days }
   local t = tradeDB()
   if t then
     for _, e in ipairs(t.log) do
@@ -667,15 +903,17 @@ function M.TradeSummary(realm, windowDays)
           s.grossSells = s.grossSells + (e.gross or 0)
           s.fees = s.fees + (e.fee or 0)
           s.net  = s.net + (e.net or 0)
-          s.sold = s.sold + 1
+          if e.src ~= "trade" then s.sold = s.sold + 1 end   -- sold/returned count AUCTIONS
         elseif e.kind == "returned" then
           s.ret = s.ret + 1
         elseif e.kind == "bought" then
-          s.buyCost = s.buyCost + (e.gross or 0)
-          s.net = s.net + (e.net or 0)
-          s.bought = s.bought + 1
-        elseif e.kind == "outbid" then
-          s.net = s.net + (e.net or 0)
+          if ownUse(e, realm) then
+            s.ownUse = s.ownUse + (e.gross or 0)
+          else
+            s.buyCost = s.buyCost + (e.gross or 0)
+            s.net = s.net + (e.net or 0)
+            s.bought = s.bought + 1
+          end
         end
       end
     end
@@ -705,9 +943,61 @@ end
 -- Avg-Buy / net-P&L statistics looked too rosy. Hook the merchant buy call and log
 -- a "bought" event with src="vendor" -- same shape as an AH buy, so Avg Buy,
 -- realized net and the History view all account for the real cost basis.
-local function noteVendorBuy(index, amount)
+-- The hook fires before the server answers and a buy can still fail (bags
+-- full, not enough gold), so it is only booked once its gold has left.
+local BUY_WAIT = 10        -- s an unconfirmed buy waits for its money change
+local pendingBuys, lastMoney = {}, nil
+
+local function bookVendorBuy(p, cost)
   local t = tradeDB(); if not t then return end
-  if not index then return end
+  if p.id and p.name then t.nameIndex[p.name:lower()] = p.id end
+  t.log[#t.log + 1] = {
+    ts = time(), day = M.GetScanDay(), kind = "bought", src = "vendor",
+    id = p.id, name = p.name, count = p.count,
+    gross = cost, fee = 0, net = -cost,
+    char = charKey(), realm = M.RealmKey(),
+  }
+  local max = M.C.TRADE_LOG_MAX or 20000
+  while #t.log > max do table.remove(t.log, 1) end
+  -- vendor buys change cost stats, not the sell-odds curve -> no DirtyAnalysis
+  dropCaches()
+  if M.RequestUIRefresh then M.RequestUIRefresh()
+  elseif M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+end
+
+local function costMatches(cost, spent)
+  return math.abs(cost - spent) <= math.max(1, cost * 0.01)
+end
+
+local function onMoney()
+  local money = GetMoney()
+  local spent = (lastMoney or money) - money
+  lastMoney = money
+  local now = GetTime()
+  while pendingBuys[1] and now - pendingBuys[1].at > BUY_WAIT do table.remove(pendingBuys, 1) end
+  if spent <= 0 or not pendingBuys[1] then return end
+  for i, p in ipairs(pendingBuys) do
+    if costMatches(p.cost, spent) then
+      table.remove(pendingBuys, i)
+      bookVendorBuy(p, spent)
+      return
+    end
+  end
+  -- several answers can land in one money update
+  local sum, k = 0, 0
+  for i, p in ipairs(pendingBuys) do
+    sum = sum + p.cost
+    if costMatches(sum, spent) then k = i; break end
+    if sum > spent then break end
+  end
+  for _ = 1, k do
+    local p = table.remove(pendingBuys, 1)
+    bookVendorBuy(p, p.cost)
+  end
+end
+
+local function noteVendorBuy(index, amount)
+  if not tradeDB() or not index then return end
   local name, _, price, batch = M.GetMerchantItemInfo(index)
   if not name or not price or price <= 0 then return end   -- extended-cost items etc.
   batch = (batch and batch > 0) and batch or 1
@@ -716,20 +1006,150 @@ local function noteVendorBuy(index, amount)
   if cost <= 0 then return end
   local link = GetMerchantItemLink and GetMerchantItemLink(index)
   local id = link and tonumber(link:match("item:(%d+)"))
-  if id and name then t.nameIndex[name:lower()] = id end
-  t.log[#t.log + 1] = {
-    ts = time(), day = M.GetScanDay(), kind = "bought", src = "vendor",
-    id = id, name = name, count = amount,
-    gross = cost, fee = 0, net = -cost,
-    char = charKey(), realm = M.RealmKey(),
-  }
-  local max = M.C.TRADE_LOG_MAX or 3000
-  while #t.log > max do table.remove(t.log, 1) end
-  -- vendor buys change cost stats, not the sell-odds curve -> no DirtyAnalysis
-  M._tradeStats = nil
-  M._boughtCache = nil
-  if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+  if not pendingBuys[1] then lastMoney = GetMoney() end
+  pendingBuys[#pendingBuys + 1] = { at = GetTime(), cost = cost, id = id, name = name, count = amount }
 end
 if type(BuyMerchantItem) == "function" then
   hooksecurefunc("BuyMerchantItem", noteVendorBuy)
+  local moneyEv = CreateFrame("Frame")
+  M.SafeRegister(moneyEv, "PLAYER_MONEY")
+  moneyEv:SetScript("OnEvent", onMoney)
+end
+
+-- ===== Player-to-player trades ==============================================
+-- The trade window moves items and gold both ways. It is booked when the
+-- server says "Trade complete", from the last state both sides accepted:
+--   items one way, gold the other -> "sold"/"bought" with src = "trade" (the
+--     gold is split over several item types by their Fair value)
+--   items both ways, or no gold   -> "given"/"received" without a price (a swap
+--     or a gift must not move Avg Buy or the P/L)
+--   gold only                     -> nothing to book (a gift or a loan)
+-- Trades with your own characters are transfers, not trades: never logged.
+local TRADE_SLOTS = 6   -- slot 7 is "will not be traded" (enchanting)
+local tradeSnap, tradeSnapAt
+
+local function isOwnChar(name)
+  local chars = M.db and M.db.chars
+  if not (name and name ~= "" and chars) then return false end
+  local short, realm = name:match("^(.-)%-(.+)$")
+  return chars[(short or name) .. "-" .. (realm or GetRealmName() or "?")] ~= nil
+end
+
+local function readTradeSide(infoFn, linkFn)
+  local byKey, list = {}, {}
+  for slot = 1, TRADE_SLOTS do
+    local name, _, qty = infoFn(slot)
+    if name and name ~= "" then
+      local link = linkFn and linkFn(slot)
+      local id = link and tonumber(link:match("item:(%d+)"))
+      local k = id or name
+      local it = byKey[k]
+      if not it then
+        it = { id = id, name = name, count = 0 }
+        byKey[k] = it; list[#list + 1] = it
+      end
+      it.count = it.count + ((qty and qty > 0) and qty or 1)
+    end
+  end
+  return list
+end
+
+local function snapTrade()
+  tradeSnap = {
+    partner = UnitName and UnitName("NPC") or nil,
+    mine = readTradeSide(GetTradePlayerItemInfo, GetTradePlayerItemLink),
+    theirs = readTradeSide(GetTradeTargetItemInfo, GetTradeTargetItemLink),
+    myGold = (GetPlayerTradeMoney and GetPlayerTradeMoney()) or 0,
+    theirGold = (GetTargetTradeMoney and GetTargetTradeMoney()) or 0,
+  }
+  tradeSnapAt = GetTime()
+end
+
+local function unitValue(id)
+  if not id then return 0 end
+  local key = tostring(id)
+  local s = M.GetSeries and M.GetSeries(key)
+  local m = s and M.Metrics(s, key)
+  if m and m.fair and m.fair > 0 then return m.fair end
+  return (M.ItemValue and M.ItemValue(id)) or 0
+end
+
+-- gold over several item types, by Fair value (by units when none is priced)
+local function splitTradeGold(list, gold)
+  local vals, sum, units = {}, 0, 0
+  for i, it in ipairs(list) do
+    vals[i] = unitValue(it.id) * it.count
+    sum = sum + vals[i]; units = units + it.count
+  end
+  local out, left = {}, gold
+  for i, it in ipairs(list) do
+    local share = left
+    if i < #list then
+      local w = (sum > 0) and (vals[i] / sum) or (it.count / units)
+      share = math.min(left, math.floor(gold * w + 0.5))
+    end
+    out[i] = share
+    left = left - share
+  end
+  return out
+end
+
+local function bookTrade(snap)
+  local t = tradeDB(); if not t then return end
+  if isOwnChar(snap.partner) then return end
+  local mine, theirs = snap.mine or {}, snap.theirs or {}
+  if #mine == 0 and #theirs == 0 then return end
+  local goldIn = (snap.theirGold or 0) - (snap.myGold or 0)
+  local now, day, char, realm = time(), M.GetScanDay(), charKey(), M.RealmKey()
+  local function add(kind, it, gross)
+    if it.id and it.name then t.nameIndex[it.name:lower()] = it.id end
+    t.log[#t.log + 1] = {
+      ts = now, day = day, kind = kind, src = "trade", partner = snap.partner,
+      id = it.id, name = it.name, count = it.count,
+      gross = gross, fee = 0,
+      net = (kind == "sold" and gross) or (kind == "bought" and -gross) or 0,
+      char = char, realm = realm,
+    }
+  end
+  if #theirs == 0 and goldIn > 0 then
+    local g = splitTradeGold(mine, goldIn)
+    for i, it in ipairs(mine) do add("sold", it, g[i]) end
+  elseif #mine == 0 and goldIn < 0 then
+    local g = splitTradeGold(theirs, -goldIn)
+    for i, it in ipairs(theirs) do add("bought", it, g[i]) end
+  else
+    for _, it in ipairs(mine) do add("given", it, 0) end
+    for _, it in ipairs(theirs) do add("received", it, 0) end
+  end
+  local max = M.C.TRADE_LOG_MAX or 20000
+  while #t.log > max do table.remove(t.log, 1) end
+  dropCaches()
+  if M.RequestUIRefresh then M.RequestUIRefresh()
+  elseif M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+end
+M.BookTrade = bookTrade
+
+if type(GetTradePlayerItemInfo) == "function" and type(GetTradeTargetItemInfo) == "function" then
+  local tradeEv = CreateFrame("Frame")
+  for _, ev in ipairs({ "TRADE_SHOW", "TRADE_ACCEPT_UPDATE", "TRADE_PLAYER_ITEM_CHANGED",
+                        "TRADE_TARGET_ITEM_CHANGED", "TRADE_MONEY_CHANGED", "PLAYER_TRADE_MONEY",
+                        "UI_INFO_MESSAGE" }) do
+    M.SafeRegister(tradeEv, ev)
+  end
+  tradeEv:SetScript("OnEvent", function(_, event, a1, a2)
+    if event == "TRADE_SHOW" then
+      tradeSnap = nil
+    elseif event == "UI_INFO_MESSAGE" then
+      -- (messageType, message) on current clients, (message) on older ones;
+      -- the window may already be closed here, so the snapshot carries it
+      local msg = (type(a1) == "string") and a1 or a2
+      if msg and msg == ERR_TRADE_COMPLETE and tradeSnap and GetTime() - (tradeSnapAt or 0) < 60 then
+        local snap = tradeSnap
+        tradeSnap = nil
+        bookTrade(snap)
+      end
+    elseif tradeDB() then
+      snapTrade()
+    end
+  end)
 end

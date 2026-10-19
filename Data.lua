@@ -9,6 +9,13 @@ local function Store(realm)
 end
 M.Store = Store
 
+-- Unit buyouts are floor(buyout / count): ammo stacks priced under 1c per unit
+-- come out as 0, which every ratio downstream divides by.
+local function unitPrice(c)
+  if c < 1 then return 1 end
+  return c
+end
+
 -- Commit a scan snapshot {itemID = {low=copper, qty=n}} into MidasDB.
 -- One bucket per scan day; idempotent merge (low = MIN, qty = MAX). Each record
 -- also carries cur (latest scan price, last-write-wins) and ts (scan timestamp,
@@ -39,27 +46,28 @@ function M.CommitScan(acc)
     if a.low then
       items = items + 1
       local key = tostring(itemID)
+      local low = unitPrice(a.low)
       local it = store[key]; if not it then it = {}; store[key] = it end
       -- a repeat of the same low+qty only slides the newest point's ts forward
       -- (a flat stretch needs no extra point)
       local st = istore[key]
       if not st then st = {}; istore[key] = st end
       local lp = st[#st]
-      if lp and lp.low == a.low and lp.qty == (a.qty or 0) then
+      if lp and lp.low == low and lp.qty == (a.qty or 0) then
         lp.ts = now
       else
-        st[#st + 1] = { ts = now, low = a.low, qty = a.qty or 0 }
+        st[#st + 1] = { ts = now, low = low, qty = a.qty or 0 }
       end
       while st[1] and (st[1].ts < icut or #st > 16) do table.remove(st, 1) end
       local rec = it[day]
       if not rec then
-        it[day] = { low = a.low, qty = a.qty or 0, cur = a.low, ts = now }
-        changed[#changed + 1] = { id = itemID, low = a.low, qty = a.qty or 0, cur = a.low }
+        it[day] = { low = low, qty = a.qty or 0, cur = low, ts = now }
+        changed[#changed + 1] = { id = itemID, low = low, qty = a.qty or 0, cur = low }
       else
         local ch = false
-        if a.low < rec.low then rec.low = a.low; ch = true end
+        if low < rec.low then rec.low = low; ch = true end
         if (a.qty or 0) > (rec.qty or 0) then rec.qty = a.qty; ch = true end
-        if rec.cur ~= a.low then rec.cur = a.low; ch = true end -- latest scan wins
+        if rec.cur ~= low then rec.cur = low; ch = true end -- latest scan wins
         rec.ts = now
         if ch then changed[#changed + 1] = { id = itemID, low = rec.low, qty = rec.qty, cur = rec.cur } end
       end
@@ -107,7 +115,12 @@ function M.CommitDepth(acc, now)
       local flat = { total }
       for i = 1, math.min(#prices, DEPTH_LEVELS) do
         local st = a.lv[prices[i]]
-        flat[#flat + 1] = prices[i]; flat[#flat + 1] = st[1]; flat[#flat + 1] = st[2]
+        local p, n = unitPrice(prices[i]), #flat
+        if n > 1 and flat[n - 2] == p then          -- 0c folded into the 1c level
+          flat[n - 1] = flat[n - 1] + st[1]; flat[n] = flat[n] + st[2]
+        else
+          flat[n + 1] = p; flat[n + 2] = st[1]; flat[n + 3] = st[2]
+        end
       end
       items[itemID] = flat
       qty[itemID] = a.qty          -- ALL listed units, not only the stored levels
@@ -140,7 +153,8 @@ function M.DepthBuyout(itemID, unit, units)
   local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
   local id = tonumber(itemID)
   local flat = d and d.items and id and d.items[id]
-  if not flat then return false end
+  if not flat or not unit then return false end
+  unit = unitPrice(unit)
   for i = 2, #flat, 3 do
     if flat[i] == unit then
       flat[i + 1] = flat[i + 1] - (units or 1)
@@ -168,6 +182,7 @@ function M.MergeSharedRows(day, rows, fromGuild)
   for i = 1, #rows do
     local r = rows[i]
     local key = tostring(r.id)
+    local low, cur = unitPrice(r.low), r.cur and unitPrice(r.cur)
     local it = store[key]
     local ref
     if it then
@@ -175,19 +190,19 @@ function M.MergeSharedRows(day, rows, fromGuild)
       if not ref then local nk = next(it); ref = nk and it[nk] end
     end
     -- poison guard: an absurd undercut from outside the guild is dropped
-    if not ((not fromGuild) and ref and ref.low and r.low < ref.low * frac) then
+    if not ((not fromGuild) and ref and ref.low and low < ref.low * frac) then
       if not it then it = {}; store[key] = it end
       local rec = it[day]
       if not rec then
-        it[day] = { low = r.low, qty = r.qty or 0, cur = r.cur, ts = r.ts }
+        it[day] = { low = low, qty = r.qty or 0, cur = cur, ts = r.ts }
         improved = improved + 1
       else
         local ch = false
-        if r.low < rec.low then rec.low = r.low; ch = true end
+        if low < rec.low then rec.low = low; ch = true end
         if (r.qty or 0) > (rec.qty or 0) then rec.qty = r.qty; ch = true end
-        if r.cur and r.ts and r.ts > (rec.ts or 0) then
-          if rec.cur ~= r.cur then ch = true end
-          rec.cur, rec.ts = r.cur, r.ts
+        if cur and r.ts and r.ts > (rec.ts or 0) then
+          if rec.cur ~= cur then ch = true end
+          rec.cur, rec.ts = cur, r.ts
         end
         if ch then improved = improved + 1 end
       end
@@ -217,7 +232,7 @@ end
 -- ===== Price alerts =========================================================
 -- MidasDB.alerts[realm][itemKey] = { below = copper, above = copper }, set in
 -- the Charts tab. Checked after every own scan and (debounced) sync merge
--- against the newest known price (cur, else low). Each side fires ONCE and
+-- against the newest scan day's price (cur, else low). Each side fires ONCE and
 -- re-arms when the price leaves the limit again.
 function M.AlertFire(name, cur, limit, isBelow)
   local msg = string.format("Midas alert: %s %s %s  (limit %s)", name,
@@ -235,13 +250,16 @@ function M.CheckAlerts()
   if not al or not next(al) then return end
   local store = M.db.realms and M.db.realms[realm]
   if not store then return end
+  -- an item missing from the newest scan day has no live price: its last-seen
+  -- one must neither fire nor re-arm an alert
+  local newest = M.LastScanDay(realm)
   for key, a in pairs(al) do
     local it = store[key]
     local lastDay
     if it then
       for d in pairs(it) do if not lastDay or d > lastDay then lastDay = d end end
     end
-    local rec = lastDay and it[lastDay]
+    local rec = lastDay and lastDay >= newest and it[lastDay]
     local cur = rec and (rec.cur or rec.low)
     if cur then
       local name = (M.ItemName and M.ItemName(key)) or tostring(key)
@@ -272,6 +290,7 @@ function M.MergeImport()
     for day, lq in pairs(days) do
       local low, qty = lq[1], lq[2] or 0
       if type(low) == "number" then
+        low = unitPrice(low)
         local cur = it[day]
         if not cur then
           it[day] = { low = low, qty = qty }; rows = rows + 1
@@ -309,6 +328,35 @@ function M.TrimBefore(cutoffDay, stamp)
   M.DirtyAnalysis()
   M.Print(string.format("Trimmed %d old daily values (%d items dropped) before %s.", rows, items, M.DayLabel(cutoffDay)))
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+end
+
+-- One-shot cleanup: stored 0c unit prices (daily rows and intraday tails) become 1c,
+-- the same floor unitPrice() applies to new data. Stamp-guarded.
+function M.RepairZeroPrices()
+  if not M.db then return 0 end
+  M.db.config = M.db.config or {}
+  if M.db.config.zeroPriceFix == "20261018" then return 0 end
+  M.db.config.zeroPriceFix = "20261018"
+  local n = 0
+  for _, store in pairs(M.db.realms or {}) do
+    for _, it in pairs(store) do
+      for _, v in pairs(it) do
+        if type(v) == "table" then
+          if v.low and v.low < 1 then v.low = 1; n = n + 1 end
+          if v.cur and v.cur < 1 then v.cur = 1; n = n + 1 end
+        end
+      end
+    end
+  end
+  for _, istore in pairs(M.db.intra or {}) do
+    for _, st in pairs(istore) do
+      for i = 1, #st do
+        if st[i].low and st[i].low < 1 then st[i].low = 1; n = n + 1 end
+      end
+    end
+  end
+  if n > 0 then M.DirtyAnalysis() end
+  return n
 end
 
 -- Remove days older than the horizon
@@ -366,3 +414,11 @@ function M.PrintStatus()
     M.Print("Last scan: " .. date("%Y-%m-%d %H:%M", M.db.config.lastIngest))
   end
 end
+
+local boot = CreateFrame("Frame")
+boot:RegisterEvent("PLAYER_LOGIN")
+boot:SetScript("OnEvent", function(self)
+  self:UnregisterEvent("PLAYER_LOGIN")
+  -- one frame later: M.db is created by Core's own PLAYER_LOGIN handler
+  C_Timer.After(0, M.RepairZeroPrices)
+end)

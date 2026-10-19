@@ -98,13 +98,14 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
    characters can be **moved to the graveyard** from their drill-down: they stop counting toward
    the total and rest in a separate graveyard sum - nothing is deleted, and logging in on the
    character (or one click) brings it back.
-4. **Trades** – your realized trading history and a **sellability** rating per item, both built purely from
-   the AH mail you collect. A segmented toggle switches between **History** (a chronological log of sells,
-   returns and buys with the net amount and character) and **By Item** (per-item aggregate: sold/returned
-   auctions, sell-through %, a rating chip and realized net, plus a price chart on hover; **click a row to
-   expand** it into the individual sales, buys and returns, each with its price and per-unit price). A summary strip on
-   top shows net P/L, gross sells, AH fees, gold spent buying, sold/returned counts and overall sell-through
-   for the last 60 days.
+4. **Trades** – your realized trading history and a **sellability** rating per item, built from the AH mail
+   you collect, your vendor buys and the player trade window. A segmented toggle switches between **History**
+   (a chronological log of sells, returns and buys with the net amount, character and trade partner) and
+   **By Item** (per-item aggregate over the last 60 days: sold/returned auctions, sell-through %, a rating chip,
+   avg sell/buy, the realized **margin** of the units you sold and the net cash flow, plus a price chart on
+   hover; **click a row to expand** it into the individual transactions, each judged against that day's Fair).
+   A summary strip on top shows net P/L, holdings change, gross sells, AH fees, gold spent buying,
+   sold/returned counts and overall sell-through over one shared window.
 5. **Charts** – the item's full price history on a real time axis, drawn as a smooth
    anti-aliased curve (missing scan days show as dashed gaps), with Floor MA, the Fair line and
    your own buys/sells as dots – all toggleable from the top-right of the window. A **timeframe
@@ -135,8 +136,8 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
 
 Also: **item tooltips** show current price, the **Fair price** (with its sell odds), sell speed, a
 quick-sell price, your estimated **sell odds at the current price**, what **you paid on average** for the
-item (from your buy mails), plus current and average quantity in the AH and how much is listed within 10 % of the cheapest price – with a colored marker
-(green = above Fair, red = below). Pick the style in **Settings** (Full / a two-line Reduced /
+item (from your logged buys), plus current and average quantity in the AH and how much is listed within 10 % of the cheapest price – with a colored marker
+(green = below Fair, red = above, the same rule as every table). Pick the style in **Settings** (Full / a two-line Reduced /
 Off). Inside the Midas window the tooltip stays vanilla – the table row and detail card already
 show those numbers.
 
@@ -216,10 +217,19 @@ Midas reads the AH mails and records each event into `MidasDB.trade` (account-wi
 - **sold** – your auction sold (net proceeds = the gold actually in the mail; the AH cut is read from the invoice),
 - **returned** – an auction expired and came back unsold,
 - **bought** – you won an auction (counts against your profit),
-- **outbid** – your bid was refunded.
+- **outbid** – your bid was refunded (logged, but never counted as profit).
 
 Mail subjects are matched via WoW's own localized strings, so this works in every client language, and each
-physical mail is de-duplicated so re-opening the mailbox never double-counts.
+physical mail is de-duplicated so re-opening the mailbox never double-counts. Trades are dated by the day
+their mail arrived.
+
+Two more sources join the ledger:
+- **vendor buys** – booked once the gold has left; buys of items you never sell (arrows, drinks) count as
+  own use, not as trading cost,
+- **the player trade window** – items one way and gold the other book as *Trade sell* / *Trade buy* (the gold
+  split over several items by Fair); swaps and gifts are listed without a price, trades with your own
+  characters are transfers and stay out. Trade-window sales count toward your gold, not toward the
+  auction sell-through.
 
 **Sellability** is the sell-through rate over the last 60 days: `sold / (sold + returned)`.
 - **Underpriced** (~all sold) → you probably could have asked for more,
