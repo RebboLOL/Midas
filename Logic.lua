@@ -330,8 +330,14 @@ function M.Metrics(series, key)
     return nil
   end
   local lows, from = {}, lastDay - STATS_DAYS
+  local minDay, minLow   -- day of the window low (the newest one on a tie)
   for day, v in pairs(series) do
-    if v.low and day > from then lows[#lows + 1] = v.low end
+    if v.low and day > from then
+      lows[#lows + 1] = v.low
+      if not minLow or v.low < minLow or (v.low == minLow and day > minDay) then
+        minLow, minDay = v.low, day
+      end
+    end
   end
   table.sort(lows)
   local C = M.C
@@ -405,7 +411,7 @@ function M.Metrics(series, key)
   if quick < 1 then quick = math.floor(fair) end
 
   local m = {
-    min = lows[1], max = lows[#lows], med = med, buy = buy, sell = sell,
+    min = lows[1], minDay = minDay, max = lows[#lows], med = med, buy = buy, sell = sell,
     fair = fair, quick = quick, liqLabel = liqLabel, speed = speed, maxPerDay = maxPerDay,
     floor7 = floor7, base = base, fairCapped = fairCapped, rstar = rstar,
     odds = oddsAt(cur), oddsAtFair = oddsAt(fair), oddsAtQuick = oddsAt(quick),

@@ -45,8 +45,10 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
   (hide it in the **Settings** tab if you prefer a clean minimap).
 - **Alt-click any item** – a link someone posted in chat, an item in your bags, or any row
   inside Midas – **posts its price card into chat**: current price, fair (± vs fair),
-  7-day floor and the all-time low, sent to your last-used chat channel (a whisper
+  7-day floor and the 60-day low with its date, sent to your last-used chat channel (a whisper
   answers the same person). The one-click answer to a guildmate's "price check?".
+  The Alt/Shift shortcuts start switched off on a new install – turn them on in **Settings**
+  ("Alt/Shift shortcuts") or bind them with `/midas keys`.
 - `/midas` – open/close the window (ESC closes too)
 - `/midas help` – print this command list in-game (any unknown command shows it too)
 - `/midas scan` – run a full AH scan now (must be at the auction house)

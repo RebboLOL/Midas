@@ -1,5 +1,9 @@
 # Midas – Changelog
 
+## 1.2.16 – 2026-10-22
+- **Click shortcuts start switched off.** New installs begin with the Alt/Shift item shortcuts off - the "Alt/Shift shortcuts" checkbox in Settings or "/midas keys" turns them on, and existing setups keep their setting.
+- **Price card dates its low.** The Alt-click price card in chat now posts the 60-day low together with the day it was seen.
+
 ## 1.2.15 – 2026-10-19
 - **Sells per day tells the truth.** Fixed a bug where "Sells ~N/day" divided by the days between your first and last sale - one busy day no longer reads as dozens of sales a day, the rate now spreads over the whole 60-day window.
 - **Charts end at the current price.** Fixed a bug where the newest point and its gold label showed the day's lowest scan instead of the current price - and Fair lines, above-only alert limits and flat or one-day prices now always sit on an honest scale with labels that no longer overlap.

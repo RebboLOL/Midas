@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.15"
+M.version = "1.2.16"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -292,6 +292,13 @@ function M.OnLogin()
   -- "fresh" = a genuinely new install (no news history, no price data): it gets
   -- the get-started tour below instead of the whole what's-new backlog.
   local fresh = (MidasDB.config.newsSeen == nil) and (next(MidasDB.realms) == nil)
+  -- the Alt/Shift item shortcuts (UI.lua M.ModKey) start OFF on a new install;
+  -- existing setups keep theirs (nil = on). One-shot: "fresh" stays true until
+  -- the first scan, and a later login must not undo a user who switched them on.
+  if MidasDB.config.modClicksInit == nil then
+    if fresh and MidasDB.config.modClicks == nil then MidasDB.config.modClicks = false end
+    MidasDB.config.modClicksInit = 1
+  end
   if not MidasDB.config.starterDone then
     MidasDB.config.starterDone = 1
     if MidasDB.config.starterWatch ~= false and next(MidasDB.watch) == nil

@@ -561,7 +561,11 @@ function M.PostItemStats(key)
     string.format("fair %s (%+.0f%%)", M.MoneyPlain(m.fair), (m.delta or 0) * 100),
   }
   if m.floor7 then parts[#parts + 1] = "floor " .. M.MoneyPlain(m.floor7) end
-  if m.min then parts[#parts + 1] = "low " .. M.MoneyPlain(m.min) end
+  -- the low covers Metrics' 60-day stats window; its day says how recent it is
+  if m.min then
+    parts[#parts + 1] = "60d low " .. M.MoneyPlain(m.min)
+      .. (m.minDay and (" (" .. M.DayLabel(m.minDay) .. ")") or "")
+  end
   local function build()
     return shown .. ":  " .. table.concat(parts, " \194\183 ") .. "  - by Midas Addon"
   end
@@ -2064,7 +2068,7 @@ function M.BuildSettings(panel)
   if T.HelpTip then
     T.HelpTip(mcCb, "Alt/Shift click shortcuts", {
       "ALT-click any item in Midas (or an item link in chat) to post its price card to chat. SHIFT-click an item in Midas to search it at the AH - and shift-click an item AT the AH to open its Midas chart.",
-      "Off disables both shortcuts; plain clicks keep working.",
+      "Off (the default on a new install) disables both shortcuts; plain clicks keep working.",
       "Rebind them per shortcut with  /midas keys post|search alt|ctrl|shift|off  -  \"/midas keys\" shows the current keys." })
   end
 
