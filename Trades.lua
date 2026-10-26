@@ -1034,6 +1034,7 @@ local function isOwnChar(name)
   local short, realm = name:match("^(.-)%-(.+)$")
   return chars[(short or name) .. "-" .. (realm or GetRealmName() or "?")] ~= nil
 end
+M.IsOwnChar = isOwnChar
 
 local function readTradeSide(infoFn, linkFn)
   local byKey, list = {}, {}
@@ -1096,6 +1097,8 @@ end
 
 local function bookTrade(snap)
   local t = tradeDB(); if not t then return end
+  -- the ledger books every completed trade, own characters included (transfers)
+  if M.LedgerTrade then M.LedgerTrade(snap) end
   if isOwnChar(snap.partner) then return end
   local mine, theirs = snap.mine or {}, snap.theirs or {}
   if #mine == 0 and #theirs == 0 then return end

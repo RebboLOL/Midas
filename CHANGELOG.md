@@ -1,5 +1,8 @@
 # Midas – Changelog
 
+## 1.2.17 – 2026-10-26
+- **Ledger tab (beta).** A new tab records every gold and item flow - loot, quests, sales and purchases, repairs, flights, training, AH fees, crafting and consumption - and shows where your wealth comes from and where it goes as one Sankey diagram, account-wide or per character.
+
 ## 1.2.16 – 2026-10-22
 - **Click shortcuts start switched off.** New installs begin with the Alt/Shift item shortcuts off - the "Alt/Shift shortcuts" checkbox in Settings or "/midas keys" turns them on, and existing setups keep their setting.
 - **Price card dates its low.** The Alt-click price card in chat now posts the 60-day low together with the day it was seen.

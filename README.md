@@ -55,6 +55,9 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
 - `/midas auto` – toggle automatic scan on AH open (off by default; the Midas Scan button is the normal way)
 - `/midas sells` – print sell tips from your holdings to chat
 - `/midas trades` – print your trading summary (net P/L, sell-through) to chat
+- `/midas ledger` – (beta) gold in/out of today and the last 7 days; `ledger recent` lists the last bookings,
+  `ledger check` compares the session's booked gold with your real gold change, `ledger debug` prints
+  every booking live
 - `/midas share` – community sync on/off (on by default); `share on` / `share off` set it explicitly
 - `/midas trust` – accept shared data from everyone (default, with sanity guards) or guild only
 - `/midas vicinity` – cross-guild sharing with nearby players at the AH: `say` / `yell` / `off` (default `yell`)
@@ -108,7 +111,15 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
    hover; **click a row to expand** it into the individual transactions, each judged against that day's Fair).
    A summary strip on top shows net P/L, holdings change, gross sells, AH fees, gold spent buying,
    sold/returned counts and overall sell-through over one shared window.
-5. **Charts** – the item's full price history on a real time axis, drawn as a smooth
+5. **Ledger (beta)** – every gold and item flow since install as one **Sankey diagram**: where your wealth came
+   from (looted gold and items, quest rewards, crafting, mail and trades), what turned into gold (AH,
+   vendor and player sales) and where it went (repairs, flights, training, AH deposits and cuts, postage,
+   purchases, consumed potions, food, ammo and reagents, destroyed items). Account-wide or per
+   character, on the shared timeframe; hover a band for its amount and top items, click to list them in
+   the flows table next to it. A summary strip shows gold in/out/net, goods in/out and how much could
+   not be tied to a cause. In **beta**: the bookings are still being tuned, and the "Record ledger"
+   switch in the tab (or in Settings) turns recording off.
+6. **Charts** – the item's full price history on a real time axis, drawn as a smooth
    anti-aliased curve (missing scan days show as dashed gaps), with Floor MA, the Fair line and
    your own buys/sells as dots – all toggleable from the top-right of the window. A **timeframe
    switch** (1W / 1M / 3M / All) on the plot zooms every big chart, including Net Worth.
@@ -124,7 +135,7 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
    Bigger new features introduce themselves once after an update with a short what's-new note
    (`/midas news` shows it again).
 
-6. **Settings** – everything configurable in one place. **General:** the item-tooltip style
+7. **Settings** – everything configurable in one place. **General:** the item-tooltip style
    (**Full / Reduced / Off**, with a live preview of exactly what each produces), the minimap
    button on/off, auto-scan on AH open, the default chart timeframe and a separate
    timeframe for the small preview cards. **Community sync:**
@@ -133,7 +144,7 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
    of each scan, beacon and backfill. (`/midas share on|off`, `/midas vicinity` and
    `/midas syncstatus` still work from chat.)
 
-7. **Help** – how the numbers are made, for humans: Fair and the sell odds explained with a
+8. **Help** – how the numbers are made, for humans: Fair and the sell odds explained with a
    worked example and two illustrative charts, plus a one-line glossary of every figure in the UI.
 
 Also: **item tooltips** show current price, the **Fair price** (with its sell odds), sell speed, a
@@ -212,6 +223,20 @@ equipped (now soulbound) – or for any looted BoP item – it no longer counts 
 The sell-chance is high for liquid mats (Crafting ~0.90, Consumables ~0.86) and low for slow movers (Recipes
 ~0.62, Gear/BoE ~0.45), with an extra haircut the more expensive the listing is (e.g. a 100g+ BoE is cut hard).
 This keeps net worth realistic instead of valuing an overpriced BoE at its full asking price.
+
+## Ledger (beta: every gold and item flow)
+The ledger books two things and nothing else: every change of the gold you carry, and every change of the
+items in your bags, bank (while it is open) and equipment. Each change is matched to its cause – the
+loot window, a quest turn-in, a merchant, the mailbox, the auction house, a flight master, a trainer,
+the trade window, a craft, a destroyed item or a used potion – so the booked gold always adds up to your
+real gold change. What cannot be tied to a cause is booked honestly as *Other income / Other spending*
+(the UNMATCHED share). Items are valued at Fair when they arrive or leave; sales and purchases count at
+the gold that changed hands. Moving gold or items between your own characters is a transfer, not income.
+Gold counts when it lands in your bags – an auction sale waiting in the mailbox joins when you take it,
+which is why the Ledger and the Trades tab (dated by the mail) can differ for a few days.
+The ledger starts with version 1.2.17 – nothing before it was ever recorded. It is in **beta**: the
+cause matching is still being tuned against real play, so categories may shift between versions.
+"Record ledger" (in the Ledger tab and in Settings) stops new bookings.
 
 ## Trading history & sellability
 The **Trades** tab needs no setup beyond **collecting your auction-house mail**. Whenever your mailbox is open,

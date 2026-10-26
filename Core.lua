@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.16"
+M.version = "1.2.17"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -259,6 +259,8 @@ function M.OnLogin()
   end
   MidasDB.depth = MidasDB.depth or {}
   MidasDB.trade = MidasDB.trade or { log = {}, seen = {}, nameIndex = {} }
+  -- every gold + item flow per character and day (Ledger.lua owns the layout)
+  MidasDB.ledger = MidasDB.ledger or { v = 1 }
   if MidasDB.config.share == nil then MidasDB.config.share = true end  -- community sync (opt-out)
   MidasDB.config.shareTrust = MidasDB.config.shareTrust or "all"
   -- cross-guild vicinity sync (SAY/YELL at the AH). Default on ("yell"); the hardened
@@ -420,6 +422,7 @@ function M.PrintHelp()
     "/midas sells  -  top sell tips from your bags, bank & mail",
     "/midas worth  -  net worth per character (also stores today's snapshot)",
     "/midas trades  -  trade summary of the last 60 days",
+    "/midas ledger  -  (beta) gold in/out summary   (recent: last bookings, check: session balance, debug: live)",
     "/midas vendor  -  number of known vendor-sold items",
     "/midas prune  -  drop archive days older than 2 years",
     "/midas share on|off  -  community sync (guild)",
@@ -618,6 +621,8 @@ SlashCmdList["MIDAS"] = function(msg)
     if M.PrintWorth then M.PrintWorth() end
   elseif msg == "trades" then
     if M.PrintTrades then M.PrintTrades() end
+  elseif msg == "ledger" or msg:match("^ledger%s") then
+    if M.LedgerSlash then M.LedgerSlash(msg:match("^ledger%s+(.-)%s*$") or "") end
   elseif msg == "share" or msg == "share on" or msg == "share off" then
     if msg == "share on" then M.db.config.share = true
     elseif msg == "share off" then M.db.config.share = false

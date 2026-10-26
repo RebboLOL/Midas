@@ -211,6 +211,53 @@ function M.MergeForkedChars()
       if e.char and moves[e.char] then e.char = moves[e.char] end
     end
   end
+  -- ledger: per-day and per-month records merge into the full key (summed),
+  -- markers and recent events follow it
+  local lg = M.db.ledger
+  if type(lg) == "table" then
+    local function addTo(dst, src)
+      for k, v in pairs(src) do
+        if type(v) == "table" then
+          if type(dst[k]) ~= "table" then dst[k] = {} end
+          addTo(dst[k], v)
+        elseif type(v) == "number" then
+          local nv = (tonumber(dst[k]) or 0) + v
+          if nv == 0 then dst[k] = nil else dst[k] = nv end
+        end
+      end
+    end
+    for _, store in ipairs({ lg.d, lg.mo }) do
+      if type(store) == "table" then
+        for _, periods in pairs(store) do
+          for _, chars in pairs(periods) do
+            if type(chars) == "table" then
+              for sk, fk in pairs(moves) do
+                if type(chars[sk]) == "table" then
+                  if type(chars[fk]) ~= "table" then chars[fk] = {} end
+                  addTo(chars[fk], chars[sk])
+                  chars[sk] = nil
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    for sk, fk in pairs(moves) do
+      if lg.since and lg.since[sk] then
+        lg.since[fk] = math.min(lg.since[fk] or lg.since[sk], lg.since[sk])
+        lg.since[sk] = nil
+      end
+      if lg.last and lg.last[sk] then
+        local a, b = lg.last[sk], lg.last[fk]
+        if not b or (a.t or 0) >= (b.t or 0) then lg.last[fk] = a end
+        lg.last[sk] = nil
+      end
+    end
+    for _, e in ipairs(lg.recent or {}) do
+      if e.ck and moves[e.ck] then e.ck = moves[e.ck] end
+    end
+  end
   -- daily snapshots: on days where BOTH keys were counted, the frozen full
   -- value was pure double counting -- remove it from the totals, then point
   -- the full key at the live (short) reading

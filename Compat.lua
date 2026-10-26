@@ -47,6 +47,16 @@ function M.GetMerchantItemInfo(index)
          info.isPurchasable, info.isUsable, info.hasExtendedCost
 end
 
+-- Classic AH browse row (the list API only exists on the legacy client):
+-- buyout, bid-to-place minimum, itemID, count. nil when the API is missing.
+function M.AuctionRowPrice(listType, index)
+  local fn = _G.GetAuctionItemInfo
+  if not fn then return nil end
+  local _, _, count, _, _, _, _, minBid, minInc, buyout, bidAmount, _, _, _, _, _, itemID = fn(listType, index)
+  local nextBid = ((bidAmount or 0) > 0) and (bidAmount + (minInc or 0)) or (minBid or 0)
+  return buyout, nextBid, itemID, count
+end
+
 -- Bank containers: classic = main bank (-1) + bank bags; modern = bank tabs from
 -- Enum.BagIndex (CharacterBankTab_1..n), whatever this client defines.
 function M.BankContainers()

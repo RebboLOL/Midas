@@ -2,9 +2,12 @@
 local ADDON, M = ...
 local T = M.Theme
 local C = T.C
-local TABS = { "Start", "Watchlist", "Net Worth", "Trades", "Charts", "Settings", "Help" }
+local TABS = { "Start", "Watchlist", "Net Worth", "Trades", "Ledger", "Charts", "Settings", "Help" }
 local TAB = {}
 for i, n in ipairs(TABS) do TAB[n] = i end
+M.TAB = TAB
+-- what the tab bar SHOWS; TABS stays the lookup key everywhere
+local TAB_LABEL = { Ledger = "Ledger (beta)" }
 
 -- small helpers --------------------------------------------------------------
 local function cell(parent, x, y, w, just, size, colorKey, variant)
@@ -162,7 +165,9 @@ function M.EnsureUI()
   close:SetScript("OnClick", function() f:Hide() end)
 
   -- Tabs + divider
-  M.tabBar = T.TabBar(f, TABS, function(i) M.SelectTab(i) end)
+  local labels = {}
+  for i, n in ipairs(TABS) do labels[i] = TAB_LABEL[n] or n end
+  M.tabBar = T.TabBar(f, labels, function(i) M.SelectTab(i) end)
   M.tabBar.frame:SetPoint("TOPLEFT", 14, -52)
 
   -- floor-MA toggle (on/off), rightmost of the chart-toggle row. "Floor MA"
@@ -262,6 +267,7 @@ function M.EnsureUI()
   M.BuildWatch(M.panels[TAB.Watchlist])
   M.BuildWealth(M.panels[TAB["Net Worth"]])
   M.BuildTrades(M.panels[TAB.Trades])
+  M.BuildLedger(M.panels[TAB.Ledger])
   M.BuildCharts(M.panels[TAB.Charts])
   M.BuildSettings(M.panels[TAB.Settings])
   M.BuildHelp(M.panels[TAB.Help])
@@ -277,6 +283,7 @@ function M.SelectTab(i)
   if M.whyView then M.whyView:Hide() end
   if M.depthView then M.depthView:Hide() end
   if M.alertsView then M.alertsView:Hide() end
+  if M.ledgerUI and M.ledgerUI.pop then M.ledgerUI.pop:Hide() end
   for j, p in ipairs(M.panels) do p:SetShown(j == i) end
   if M.tabBar then M.tabBar:Select(i) end
   M.RefreshUI()
@@ -320,6 +327,8 @@ function M.RefreshUI()
     hint = "account-wide assets (gold + item value)   \194\183   click a chart day or a character for details   \194\183   a snapshot is saved every day"
   elseif t == TAB.Trades then
     hint = "open your mailbox to log sells, returns & buys   \194\183   in By Item, click a row to see each sale's price"
+  elseif t == TAB.Ledger then
+    hint = "beta: every gold and item flow since install   \194\183   hover a band for details   \194\183   click lists its items"
   elseif t == TAB.Charts then
     hint = "click a list item to chart it   \194\183   shift: AH search   \194\183   alt: post stats to chat   \194\183   'why these numbers?' explains the math"
   elseif t == TAB.Settings then
@@ -332,6 +341,7 @@ function M.RefreshUI()
   elseif t == TAB.Watchlist and M.RefreshWatch then M.RefreshWatch()
   elseif t == TAB["Net Worth"] and M.RefreshWealth then M.RefreshWealth()
   elseif t == TAB.Trades and M.RefreshTrades then M.RefreshTrades()
+  elseif t == TAB.Ledger and M.RefreshLedger then M.RefreshLedger()
   elseif t == TAB.Settings and M.RefreshSettings then M.RefreshSettings()
   elseif t == TAB.Help and M.RefreshHelp then M.RefreshHelp()
   elseif t == TAB.Charts and M.RefreshCharts then M.RefreshCharts() end
@@ -2105,6 +2115,17 @@ function M.BuildSettings(panel)
     T.HelpTip(owCb, "Open with the auction house", {
       "Opens the Midas window automatically whenever you open the auction house. The coin button next to \"Midas Scan\" opens it on demand either way." })
   end
+  -- ledger recording (Ledger.lua); default ON, the switch only stops new bookings
+  local lgCb = T.Checkbox(panel, "Record ledger (beta)", function(on)
+    M.db.config.ledgerOff = (not on) and true or nil
+  end)
+  lgCb:SetPoint("TOPLEFT", 250, -284)
+  s.lgCb = lgCb
+  if T.HelpTip then
+    T.HelpTip(lgCb, "Record ledger (beta)", {
+      "Books every gold and item flow - loot, quests, repairs, flights, sales, purchases, crafting, consumption - for the Ledger tab.",
+      "Off stops new bookings; what is already recorded stays." })
+  end
   if T.HelpTip then
     T.HelpTip(gsBtn, "Get started guide", {
       "A six-step tour of the Midas workflow: scan, watchlist, fair price, offer book, alerts and your own trades." })
@@ -2293,6 +2314,7 @@ function M.RefreshSettings()
   if s.sdCb then s.sdCb:SetChecked(cfg.sellDock ~= false) end
   if s.mcCb then s.mcCb:SetChecked(cfg.modClicks ~= false) end
   if s.owCb then s.owCb:SetChecked(cfg.openWithAH == true) end
+  if s.lgCb then s.lgCb:SetChecked(cfg.ledgerOff ~= true) end
   s.cb:SetChecked(cfg.share == true)
   s.trustSeg:Select(cfg.shareTrust == "guild" and "guild" or "all")
   if s.prevSeg then s.prevSeg:Select(cfg.previewRange or "all") end
@@ -6625,6 +6647,323 @@ function M.BuildCharts(panel)
   end)
 end
 
+-- ===== Ledger tab: every gold and item flow as one Sankey ====================
+-- Ledger.lua records the flows and builds the model, Sankey.lua draws it. The
+-- diagram fills the left, the flows table the right; clicking a band, a node
+-- or a row lists that flow's items (or its breakdown) in the table.
+local LG_TABLE_W, LG_ROWH = 300, 18
+
+local function ledgerQuery()
+  local cfg = (M.db and M.db.config) or {}
+  local days = M.ChartRangeDays and M.ChartRangeDays()
+  local today = M.GetScanDay()
+  return { realm = M.RealmKey(), char = cfg.ledgerChar,
+           fromDay = days and (today - days + 1) or nil, toDay = today }
+end
+
+-- the side total a row's share is measured against
+local SHARE_BASE = { gin = "goldIn", sale = "goldIn", gout = "goldOut", buy = "goldOut",
+                     iin = "goodsIn", iout = "goodsOut" }
+
+local function ledgerTitle(hit)
+  if hit.node then return hit.node.label or "?" end
+  local l = hit.link
+  -- the title lands in GameTooltip, whose game font has no arrow glyphs: use a guillemet
+  return (l and l.label) or (((hit.from and hit.from.label) or "?") .. "  \194\187  " .. ((hit.to and hit.to.label) or "?"))
+end
+
+function M.BuildLedger(panel)
+  local lg = { rows = {}, popBtns = {}, panel = panel }
+  M.ledgerUI = lg
+
+  -- character filter: a button with a small pick list (account-wide by default)
+  local charBtn = T.Button(panel, "All characters", 180, 22)
+  charBtn:SetPoint("TOPLEFT", 0, -2)
+  lg.charBtn = charBtn
+  local pop = T.Surface(panel, "bg1", "borderlt")
+  pop:SetFrameStrata("DIALOG")
+  pop:SetPoint("TOPLEFT", charBtn, "BOTTOMLEFT", 0, -2)
+  pop:SetSize(180, 24)
+  pop:Hide()
+  lg.pop = pop
+  local function pick(ck)
+    if M.db and M.db.config then M.db.config.ledgerChar = ck end
+    pop:Hide()
+    lg.focus = nil
+    M.RefreshLedger()
+  end
+  charBtn:SetScript("OnClick", function()
+    if pop:IsShown() then pop:Hide(); return end
+    local list = { { key = nil, name = "All characters" } }
+    for _, c in ipairs((M.LedgerChars and M.LedgerChars(M.RealmKey())) or {}) do list[#list + 1] = c end
+    local cur = M.db and M.db.config and M.db.config.ledgerChar
+    for i, e in ipairs(list) do
+      local b = lg.popBtns[i]
+      if not b then
+        b = CreateFrame("Button", nil, pop)
+        b:SetSize(176, 18); b:SetPoint("TOPLEFT", 2, -2 - (i - 1) * 18)
+        local hl = b:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.06)
+        b.fs = cell(b, 6, -3, 166, "LEFT", T.SIZE.body)
+        lg.popBtns[i] = b
+      end
+      b.fs:SetText(e.name)
+      colorize(b.fs, (cur == e.key) and C.accent or C.text)
+      b:SetScript("OnClick", function() pick(e.key) end)
+      b:Show()
+    end
+    for i = #list + 1, #lg.popBtns do lg.popBtns[i]:Hide() end
+    pop:SetHeight(#list * 18 + 4)
+    pop:Show()
+  end)
+
+  -- recording switch right where the numbers are (the same setting as
+  -- Settings > "Record ledger"); off stops new bookings, the history stays
+  local recCb = T.Checkbox(panel, "Record ledger", function(on)
+    if M.db and M.db.config then M.db.config.ledgerOff = (not on) and true or nil end
+    M.RefreshLedger()
+  end)
+  recCb:SetPoint("LEFT", charBtn, "RIGHT", 16, 0)
+  lg.recCb = recCb
+  if T.HelpTip then
+    T.HelpTip(recCb, "Record ledger (beta)", {
+      "On: every gold and item flow is booked for this tab. Off: nothing new is booked; what is already recorded stays.",
+      "The same switch sits in Settings." })
+  end
+  local beta = T.Surface(panel, "bg0", "accent")
+  beta:SetSize(44, 18)
+  beta:SetPoint("LEFT", recCb, "RIGHT", 16, 0)
+  local betaTx = T.Text(beta, T.SIZE.tiny, "accent", T.FONT_SEMI)
+  betaTx:SetPoint("CENTER", 0, 0); betaTx:SetText("BETA")
+  local betaNote = T.Text(panel, T.SIZE.small, "muted")
+  betaNote:SetPoint("LEFT", beta, "RIGHT", 8, 0)
+  betaNote:SetText("bookings are still being tuned \226\128\148 feedback welcome on the Discord")
+
+  local rangeSeg = makeRangeSeg(panel)
+  rangeSeg.frame:SetPoint("TOPRIGHT", 0, -1)
+
+  -- summary strip
+  local function stat(x, w, label, tip)
+    local lbl = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
+    lbl:SetPoint("TOPLEFT", x, -34); lbl:SetWidth(w); lbl:SetText(label)
+    local val = T.Text(panel, T.SIZE.h2 + 2, "text", T.FONT_SEMI)
+    val:SetPoint("TOPLEFT", x, -47); val:SetWidth(w)
+    if tip and T.HelpTip then
+      local hb = CreateFrame("Button", nil, panel)
+      hb:SetPoint("TOPLEFT", x, -34); hb:SetSize(w, 32)
+      T.HelpTip(hb, label, tip)
+    end
+    return val
+  end
+  lg.sIn = stat(0, 120, "GOLD IN",
+    { "Every copper that reached your bags in the timeframe: loot, quests, sales, mail and trades.",
+      "Gold counts the moment it lands in your bags - a sale still waiting in the mailbox is not in yet." })
+  lg.sOut = stat(128, 120, "GOLD OUT",
+    { "Every copper that left: repairs, flights, training, AH deposits and cuts, postage, purchases." })
+  lg.sNet = stat(256, 120, "NET GOLD", { "Gold in minus gold out - the change of the gold you carry." })
+  lg.sGin = stat(384, 120, "GOODS IN",
+    { "Items that joined your stock (looted, gathered, crafted, quest rewards, bought), valued at Fair when they arrived." })
+  lg.sGout = stat(512, 120, "GOODS OUT",
+    { "Items that left your stock (sold, consumed, used in crafting, destroyed, given away). Sales count at the gold they brought in." })
+  lg.sUna = stat(640, 110, "UNMATCHED",
+    { "Share of gold moves Midas could not tie to a cause (booked as Other income / Other spending).",
+      "Low single digits are normal - quest NPCs and addons that bypass the usual calls leave a little behind." })
+  lg.sSince = stat(760, 180, "RECORDING SINCE",
+    { "The ledger starts with this version - loot, quests and repairs before it were never recorded anywhere." })
+
+  -- the diagram
+  local canvas = CreateFrame("Frame", nil, panel)
+  canvas:SetPoint("TOPLEFT", 0, -80)
+  canvas:SetPoint("BOTTOMRIGHT", -(LG_TABLE_W + 18), 0)
+  lg.canvas = canvas
+
+  -- the flows table
+  local tbl = CreateFrame("Frame", nil, panel)
+  tbl:SetPoint("TOPRIGHT", 0, -80); tbl:SetPoint("BOTTOMRIGHT", 0, 0); tbl:SetWidth(LG_TABLE_W)
+  lg.tbl = tbl
+  local sep = tbl:CreateTexture(nil, "ARTWORK")
+  sep:SetColorTexture(C.border[1], C.border[2], C.border[3], 0.6)
+  sep:SetPoint("TOPLEFT", -9, 0); sep:SetPoint("BOTTOMLEFT", -9, 0); sep:SetWidth(1)
+  lg.tHead = cell(tbl, 0, -2, 296, "LEFT", T.SIZE.small, "text", T.FONT_SEMI)
+  local back = CreateFrame("Button", nil, tbl)
+  back:SetAllPoints(lg.tHead)
+  back:SetScript("OnClick", function() if lg.focus then lg.focus = nil; M.RefreshLedger() end end)
+  lg.h1 = cell(tbl, 0, -22, 160, "LEFT", T.SIZE.tiny, "muted", T.FONT_MED)
+  lg.h2 = cell(tbl, 164, -22, 84, "RIGHT", T.SIZE.tiny, "muted", T.FONT_MED)
+  lg.h3 = cell(tbl, 252, -22, 44, "RIGHT", T.SIZE.tiny, "muted", T.FONT_MED)
+  local scroll = CreateFrame("ScrollFrame", "MidasLedgerScroll", tbl, "FauxScrollFrameTemplate")
+  scroll:SetPoint("TOPLEFT", 0, -38); scroll:SetPoint("BOTTOMRIGHT", -2, 0)
+  local function wheel(_, delta)
+    local sb = _G["MidasLedgerScrollScrollBar"]
+    if sb then sb:SetValue(sb:GetValue() - delta * LG_ROWH * 2) end
+  end
+  scroll:EnableMouseWheel(true); scroll:SetScript("OnMouseWheel", wheel)
+  scroll:SetScript("OnVerticalScroll", function(self, offset)
+    FauxScrollFrame_OnVerticalScroll(self, offset, LG_ROWH, lg.FillTable)
+  end)
+  T.StyleScrollbar("MidasLedgerScroll")
+  lg.scroll = scroll
+
+  local function mkRow(r)
+    local btn = CreateFrame("Button", nil, tbl)
+    btn:SetSize(282, LG_ROWH); btn:SetPoint("TOPLEFT", 0, -38 - (r - 1) * LG_ROWH)
+    local zb = btn:CreateTexture(nil, "BACKGROUND"); zb:SetAllPoints(); zb:SetColorTexture(1, 1, 1, 0.02); zb:Hide(); btn.zb = zb
+    local hl = btn:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.05)
+    btn.c1 = cell(btn, 2, -3, 158, "LEFT", T.SIZE.body)
+    btn.c2 = cell(btn, 164, -3, 84, "RIGHT", T.SIZE.body, "text", T.FONT_MED)
+    btn.c3 = cell(btn, 238, -3, 44, "RIGHT", T.SIZE.small, "muted")
+    btn:EnableMouseWheel(true); btn:SetScript("OnMouseWheel", wheel)
+    btn:SetScript("OnEnter", function() if btn.itemKey then ShowItemTip(btn.itemKey) end end)
+    btn:SetScript("OnLeave", HideTip)
+    btn:SetScript("OnClick", function()
+      local d = btn.data
+      if not d then return end
+      if d.itemKey then
+        M.SetChartKey(d.itemKey); M.SelectTab(TAB.Charts)
+      elseif d.focus then
+        lg.focus = d.focus; M.RefreshLedger()
+      end
+    end)
+    lg.rows[r] = btn
+  end
+
+  function lg.FillTable()
+    local data = lg.tableData or {}
+    local vis = math.max(4, math.floor(((tbl:GetHeight() or 0) > 60 and (tbl:GetHeight() - 40) or 300) / LG_ROWH))
+    for r = #lg.rows + 1, vis do mkRow(r) end
+    FauxScrollFrame_Update(scroll, #data, vis, LG_ROWH)
+    local off = math.min(FauxScrollFrame_GetOffset(scroll), math.max(0, #data - vis))
+    for r = 1, #lg.rows do
+      local btn = lg.rows[r]
+      local d = (r <= vis) and data[r + off] or nil
+      btn.data, btn.itemKey = d, d and d.itemKey or nil
+      if d then
+        btn.zb:SetShown((r % 2) == 0)
+        btn.c1:SetText(d.label)
+        if d.qc then btn.c1:SetTextColor(d.qc.r, d.qc.g, d.qc.b) else colorize(btn.c1, d.rgb or C.text) end
+        btn.c2:SetText(d.amount or "")
+        btn.c3:SetText(d.extra or "")
+        btn:Show()
+      else
+        btn:Hide()
+      end
+    end
+  end
+
+  -- band / node hover: amount, breakdown, top items
+  local function hitTip(hit)
+    if not hit then GameTooltip:Hide(); return end
+    local ref = hit.node or hit.link or {}
+    GameTooltip:SetOwner(canvas, "ANCHOR_CURSOR")
+    GameTooltip:SetText(ledgerTitle(hit), 1, 1, 1)
+    GameTooltip:AddDoubleLine("Amount", M.MoneyPlain(hit.value or 0), 0.65, 0.65, 0.65, 1, 1, 1)
+    for _, s in ipairs(ref.sub or {}) do
+      GameTooltip:AddDoubleLine("   " .. (s.label or "?"), M.MoneyPlain(s.value or 0), 0.65, 0.65, 0.65, 0.85, 0.85, 0.85)
+    end
+    local items = ref.items
+    if items and #items > 0 then
+      GameTooltip:AddLine(" ")
+      for i = 1, math.min(5, #items) do
+        local it = items[i]
+        local nm = (it.id and M.ItemName(tostring(it.id))) or "?"
+        GameTooltip:AddDoubleLine(nm .. "  \195\151" .. (it.qty or 0), M.MoneyPlain(it.value or 0), 0.85, 0.85, 0.85, 0.85, 0.85, 0.85)
+      end
+    end
+    if ref.note then GameTooltip:AddLine(ref.note, 0.55, 0.55, 0.55, true) end
+    if (items and #items > 0) or ref.sub then GameTooltip:AddLine("click: list it in the table", 0.45, 0.45, 0.45) end
+    GameTooltip:Show()
+  end
+  lg.onHover = hitTip
+  lg.onClick = function(hit)
+    if not hit then return end
+    local ref = hit.node or hit.link or {}
+    if (ref.items and #ref.items > 0) or ref.sub then
+      lg.focus = { label = ledgerTitle(hit), items = ref.items, sub = ref.sub }
+      M.RefreshLedger()
+    end
+  end
+end
+
+function M.RefreshLedger()
+  local lg = M.ledgerUI
+  if not (lg and lg.panel and lg.panel:IsShown()) then return end
+  local cfg = (M.db and M.db.config) or {}
+  local ck = cfg.ledgerChar
+  lg.charBtn.text:SetText(ck and (ck:match("^(.-)%-") or ck) or "All characters")
+  if lg.recCb then lg.recCb:SetChecked(cfg.ledgerOff ~= true) end
+  -- the canvas has no size before the first layout pass: draw one frame later
+  if (lg.canvas:GetWidth() or 0) < 50 and not lg.waited then
+    lg.waited = true
+    C_Timer.After(0, M.RefreshLedger)
+    return
+  end
+  lg.waited = nil
+
+  local model = M.LedgerModel and M.LedgerModel(ledgerQuery()) or nil
+  local sum = (model and model.summary) or {}
+  local function money(fs, v, rgb)
+    fs:SetText(M.MoneyPlain(math.abs(v or 0))); colorize(fs, rgb)
+  end
+  money(lg.sIn, sum.goldIn, C.green)
+  money(lg.sOut, sum.goldOut, C.red)
+  local net = sum.goldNet or 0
+  lg.sNet:SetText((net >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(net)))
+  colorize(lg.sNet, (net >= 0) and C.green or C.red)
+  money(lg.sGin, sum.goodsIn, C.mint or C.text)
+  money(lg.sGout, sum.goodsOut, C.sub)
+  local share = sum.unattributedShare
+  lg.sUna:SetText(share and string.format("%.0f%%", share * 100) or "\226\128\147")
+  colorize(lg.sUna, (share and share > 0.10) and C.red or C.sub)
+  lg.sSince:SetText(sum.since and date("%b %d, %Y", sum.since) or "\226\128\147")
+  colorize(lg.sSince, C.sub)
+
+  local empty = (cfg.ledgerOff == true)
+    and "Recording is off  \194\183  tick \"Record ledger\" above to start booking"
+    or "Nothing recorded in this timeframe yet \226\128\148 every gold and item flow is booked from now on."
+  if M.RenderSankey then
+    M.RenderSankey(lg.canvas, model or { nodes = {}, links = {} },
+      { onHover = lg.onHover, onClick = lg.onClick, emptyText = empty })
+  end
+
+  -- table: all flows, or the items / breakdown of the clicked one
+  local data = {}
+  if lg.focus then
+    lg.tHead:SetText("\226\128\185  all flows   \194\183   " .. (lg.focus.label or ""))
+    colorize(lg.tHead, C.accent)
+    lg.h1:SetText("ITEM"); lg.h2:SetText("VALUE"); lg.h3:SetText("QTY")
+    for _, it in ipairs(lg.focus.items or {}) do
+      local key = it.id and tostring(it.id)
+      data[#data + 1] = { label = (key and M.ItemName(key)) or "?", itemKey = key,
+                          qc = key and M.ItemQualityColor(key) or nil,
+                          amount = M.MoneyPlain(it.value or 0), extra = tostring(it.qty or "") }
+    end
+    for _, s in ipairs(lg.focus.sub or {}) do
+      data[#data + 1] = { label = s.label or "?", rgb = C.sub, amount = M.MoneyPlain(s.value or 0) }
+    end
+  else
+    lg.tHead:SetText("FLOWS")
+    colorize(lg.tHead, C.text)
+    lg.h1:SetText("FLOW"); lg.h2:SetText("AMOUNT"); lg.h3:SetText("SHARE")
+    for _, r in ipairs((model and model.rows) or {}) do
+      local cat = M.LEDGER_CATS and M.LEDGER_CATS[r.key]
+      local base = SHARE_BASE[r.side] and sum[SHARE_BASE[r.side]]
+      data[#data + 1] = {
+        label = r.label or r.key, rgb = (cat and C[cat.color]) or C.text,
+        amount = M.MoneyPlain(r.value or 0),
+        extra = (base and base > 0) and string.format("%.0f%%", (r.value or 0) / base * 100) or "",
+        focus = ((r.items and #r.items > 0) and { label = r.label, items = r.items }) or nil,
+      }
+    end
+  end
+  lg.tableData = data
+  -- back to the top only when WHAT is listed changed, not on every data refresh
+  local viewKey = tostring(ck) .. "|" .. tostring(cfg.chartRange) .. "|" .. tostring(lg.focus and lg.focus.label)
+  if lg.viewKey ~= viewKey then
+    lg.viewKey = viewKey
+    FauxScrollFrame_SetOffset(lg.scroll, 0)
+  end
+  lg.FillTable()
+end
+
 -- ===== Tab 8: Help -- how the numbers are made, for humans ==================
 -- Layout is CHAINED: section 2 and 3 anchor to the measured bottom of what
 -- sits above them (text or example chart, whichever is taller) -- fixed pixel
@@ -6636,7 +6975,7 @@ function M.BuildHelp(panel)
   local scroll = CreateFrame("ScrollFrame", "MidasHelpScroll", panel, "UIPanelScrollFrameTemplate")
   scroll:SetPoint("TOPLEFT", 0, 0); scroll:SetPoint("BOTTOMRIGHT", -24, 0)
   local content = CreateFrame("Frame", nil, scroll)
-  content:SetSize(880, 760)   -- room for section 4 (Discord) under the glossary
+  content:SetSize(880, 780)   -- room for section 4 (Discord) under the glossary
   scroll:SetScrollChild(content)
   T.StyleScrollbar("MidasHelpScroll")
 
@@ -6699,6 +7038,7 @@ function M.BuildHelp(panel)
     { "Fair \194\183 oversupplied", "even the trimmed market level misses the target sell chance \226\128\148 post fewer, not cheaper." },
     { "Score", "margin x liquidity x confidence \226\128\148 the opportunity ranking on the Start page." },
     { "vs Fair", "current price vs Fair; the BUY/SELL signal fires at +/-15%." },
+    { "Ledger (beta)", "every gold + item flow since install; gold counts when it lands in your bags (Trades dates sales by their mail)." },
   }
   for i, e in ipairs(GL) do
     local col = (i - 1) % 2
@@ -7108,6 +7448,20 @@ M.NEWS = {
       M.SelectTab(TAB.Trades)
     end,
   },
+  {
+    id = "ledger-1.2.17", version = "1.2.17", title = "Ledger (beta): every gold and item flow",
+    text = "A new tab books everything that moves your wealth - looted gold and items, quest rewards, "
+      .. "sales and purchases, repairs, flights, training, AH deposits and cuts, crafting and the potions "
+      .. "and food you used up - and draws it as one flow diagram. It is in beta: the bookings are still "
+      .. "being tuned, and the \"Record ledger\" switch in the tab turns it off.",
+    where = "Ledger (beta) tab   \194\183   hover a band, click to list its items",
+    preview = "ledger",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Ledger)
+    end,
+  },
 }
 
 -- ===== Get-started tour =====================================================
@@ -7468,6 +7822,30 @@ local function drawDiscordPreview(f)
   fs:SetPoint("TOPLEFT", 14, -124); fs:SetText("help \194\183 bugs \194\183 ideas \194\183 news")
 end
 
+-- tiny ledger illustration: the real Sankey renderer on a canned, balanced flow
+local function drawLedgerPreview(f)
+  if not M.RenderSankey then return end
+  M.RenderSankey(f, {
+    nodes = {
+      { id = "lo", label = "Looted gold", col = 0, lane = "gold", color = "accent" },
+      { id = "qu", label = "Quests", col = 0, lane = "gold", color = "accent" },
+      { id = "il", label = "Looted items", col = 0, lane = "goods", color = "mint" },
+      { id = "STOCK", label = "Stock", col = 1, lane = "goods", color = "mint", hub = true },
+      { id = "GOLD", label = "Gold", col = 2, lane = "gold", color = "accent", hub = true },
+      { id = "rp", label = "Repairs", col = 3, lane = "gold", color = "red" },
+      { id = "sv", label = "Saved gold", col = 3, lane = "gold", color = "green" },
+      { id = "xc", label = "Consumed", col = 3, lane = "goods", color = "purple" },
+    },
+    links = {
+      { from = "lo", to = "GOLD", value = 40 }, { from = "qu", to = "GOLD", value = 25 },
+      { from = "il", to = "STOCK", value = 60 },
+      { from = "STOCK", to = "GOLD", value = 35, label = "Sold" },
+      { from = "STOCK", to = "xc", value = 25 },
+      { from = "GOLD", to = "rp", value = 30 }, { from = "GOLD", to = "sv", value = 70 },
+    },
+  }, { compact = true, noHover = true })
+end
+
 local newsFrame
 -- render the current entry of the stacked news window (f._list / f._idx)
 local function renderNews(f)
@@ -7499,7 +7877,8 @@ local function renderNews(f)
     elseif item.preview == "watchlist" then drawWatchPreview(f.preview)
     elseif item.preview == "trades" then drawTradesPreview(f.preview)
     elseif item.preview == "selldock" then drawSellDockPreview(f.preview)
-    elseif item.preview == "discord" then drawDiscordPreview(f.preview) end
+    elseif item.preview == "discord" then drawDiscordPreview(f.preview)
+    elseif item.preview == "ledger" then drawLedgerPreview(f.preview) end
   end
   f.pager:SetText(f._idx .. " / " .. n)
   local multi = n > 1
