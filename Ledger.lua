@@ -95,6 +95,8 @@ local lastMoney
 
 local function now() return GetTime() end
 local function off() return M.db and M.db.config and M.db.config.ledgerOff == true end
+-- a running gold timer keeps the engine classifying even with recording off
+local function idle() return off() and not (M.GoldTimerRunning and M.GoldTimerRunning()) end
 local function secret(v) return issecretvalue ~= nil and issecretvalue(v) == true end
 local function idOf(link)
   if type(link) ~= "string" or secret(link) then return nil end
@@ -207,6 +209,7 @@ local function bookGold(cat, d, info, src)
   local def = CATS[cat]
   if not def or not def.g then cat = (d > 0) and "oi" or "os"; def = CATS[cat] end
   if src ~= "gap" then
+    if M.GoldTimerTap then M.GoldTimerTap("g", cat, d) end
     if off() then S.skipped = S.skipped + d; return end
     S.flow = S.flow + d
   end
@@ -243,6 +246,7 @@ local function bookItem(cat, id, d, src)
   local def = CATS[cat]
   if not def or not def.i then cat = (d > 0) and "ix" or "xu"; def = CATS[cat] end
   S.itemFlow[id] = (S.itemFlow[id] or 0) + d
+  if M.GoldTimerTap then M.GoldTimerTap("i", cat, d, id, unitValue(id)) end
   if off() then return end
   local L = ldb(); if not L then return end
   local ck = ckey()
@@ -513,7 +517,7 @@ local function onMoney(force)
   local d = m - lastMoney
   if d == 0 then return end
   lastMoney = m
-  if off() then S.skipped = S.skipped + d; return end
+  if idle() then S.skipped = S.skipped + d; return end
   saveLast()
   if not claimGold(d) then hold(d) end
 end
@@ -760,7 +764,7 @@ local function flushItems()
   if not base or now() < seedUntil then base = cur; return end
   local old = base
   base = cur
-  if off() then return end
+  if idle() then return end
   for id, q in pairs(cur) do
     local d = q - (old[id] or 0)
     if d ~= 0 then onItemDelta(id, d) end

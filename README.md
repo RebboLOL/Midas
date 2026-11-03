@@ -29,7 +29,7 @@ Midas scans the whole auction house itself (Classic Era: "GetAll" full scan; WoW
 snapshot scan, commodities included):
 - **Open the auction house** – a **Midas Scan** button appears at the top-right of the AH window.
   Click it to run a full scan; a **progress bar** shows while it runs.
-- You can also scan with `/midas scan`, the window's "Scan AH" button, or a right-click on the minimap coin.
+- You can also scan with `/midas scan`, the window's "Scan AH" button, or Shift + right-click on the minimap coin.
 - Automatic scanning on AH open is **off by default** – turn it on in the **Settings** tab or with `/midas auto`.
 - Every scan is stored permanently, so your history keeps growing.
 - **Already scanning with Auctionator or aux?** Midas imports their price history
@@ -41,8 +41,8 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
 
 ## Usage
 - **Minimap button** (gold coin) – mouseover shows the best sells from your holdings;
-  left-click opens the window, right-click runs a scan, dragging moves the button
-  (hide it in the **Settings** tab if you prefer a clean minimap).
+  left-click opens the window, right-click opens the **gold timer**, Shift + right-click runs a scan,
+  dragging moves the button (hide it in the **Settings** tab if you prefer a clean minimap).
 - **Alt-click any item** – a link someone posted in chat, an item in your bags, or any row
   inside Midas – **posts its price card into chat**: current price, fair (± vs fair),
   7-day floor and the 60-day low with its date, sent to your last-used chat channel (a whisper
@@ -58,6 +58,8 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
 - `/midas ledger` – (beta) gold in/out of today and the last 7 days; `ledger recent` lists the last bookings,
   `ledger check` compares the session's booked gold with your real gold change, `ledger debug` prints
   every booking live
+- `/midas timer` – open/close the gold timer; `timer start` / `pause` / `reset`, `timer report` prints the
+  session to chat
 - `/midas share` – community sync on/off (on by default); `share on` / `share off` set it explicitly
 - `/midas trust` – accept shared data from everyone (default, with sanity guards) or guild only
 - `/midas vicinity` – cross-guild sharing with nearby players at the AH: `say` / `yell` / `off` (default `yell`)
@@ -237,6 +239,18 @@ which is why the Ledger and the Trades tab (dated by the mail) can differ for a 
 The ledger starts with version 1.2.17 – nothing before it was ever recorded. It is in **beta**: the
 cause matching is still being tuned against real play, so categories may shift between versions.
 "Record ledger" (in the Ledger tab and in Settings) stops new bookings.
+
+## Gold timer (gold per hour)
+Right-click the minimap coin (or `/midas timer`) and a small stopwatch opens and starts counting what comes
+in: looted, quest and sales gold plus the value of the items you loot, gather or receive (Fair, or the vendor
+price for items without scan data). Hovering it lists every gold source, your top items, costs such as
+repairs, flights, AH fees and the potions or ammo you used up, and the net – each with its rate per hour,
+plus the rate of the last 10 minutes. Selling or using loot swaps its counted value for the gold or the
+result, so nothing counts twice; gold and items moved between your own characters do not count.
+**Pause** stops the clock, **Reset** starts over (it asks once after five minutes), and closing the window
+only hides it – the clock keeps going. Each character has its own timer; it survives reloads and logouts
+and pauses while you are offline. The timer uses the ledger's cause matching but works with
+"Record ledger" switched off too.
 
 ## Trading history & sellability
 The **Trades** tab needs no setup beyond **collecting your auction-house mail**. Whenever your mailbox is open,

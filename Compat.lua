@@ -91,7 +91,8 @@ do
   end
 end
 
--- Addon compartment (modern client minimap drawer): same as a left click on the coin.
-function Midas_OnCompartmentClick()
+-- Addon compartment (modern client minimap drawer): same clicks as on the coin.
+function Midas_OnCompartmentClick(_, button)
+  if button == "RightButton" and M.GoldTimerToggle then M.GoldTimerToggle(true); return end
   if M.Toggle then M.Toggle() end
 end

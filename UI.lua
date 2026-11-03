@@ -7039,6 +7039,7 @@ function M.BuildHelp(panel)
     { "Score", "margin x liquidity x confidence \226\128\148 the opportunity ranking on the Start page." },
     { "vs Fair", "current price vs Fair; the BUY/SELL signal fires at +/-15%." },
     { "Ledger (beta)", "every gold + item flow since install; gold counts when it lands in your bags (Trades dates sales by their mail)." },
+    { "Gold timer", "right-click the minimap coin: gold + loot value from that moment on, per hour; hover it for the sources." },
   }
   for i, e in ipairs(GL) do
     local col = (i - 1) % 2
@@ -7462,6 +7463,16 @@ M.NEWS = {
       M.SelectTab(TAB.Ledger)
     end,
   },
+  {
+    id = "goldtimer-1.2.18", version = "1.2.18", title = "Gold timer",
+    text = "A small stopwatch that counts what you earn from the moment it starts: looted, quest and "
+      .. "sales gold plus the value of the items you loot or gather. Hover it for every source, your top "
+      .. "items, costs like repairs and the net, each per hour. It keeps running through reloads and "
+      .. "pauses while you are offline.",
+    where = "minimap coin  \226\128\186  right-click   \194\183   /midas timer   \194\183   scan: shift + right-click",
+    preview = "goldtimer", showLabel = "Open timer",
+    open = function() if M.GoldTimerToggle then M.GoldTimerToggle(false) end end,
+  },
 }
 
 -- ===== Get-started tour =====================================================
@@ -7846,6 +7857,35 @@ local function drawLedgerPreview(f)
   }, { compact = true, noHover = true })
 end
 
+-- tiny gold timer illustration: the window itself over the start of its hover card
+local function drawGoldTimerPreview(f)
+  local AC, TL, B = C.accent, C.teal or C.accent, C.border
+  -- regions only (the pager hides regions, not child frames)
+  local win = f:CreateTexture(nil, "BORDER")
+  win:SetColorTexture(B[1], B[2], B[3], 1)
+  win:SetPoint("TOPLEFT", 10, -12); win:SetSize(160, 52)
+  local fill = f:CreateTexture(nil, "ARTWORK")
+  fill:SetColorTexture(C.bg1[1], C.bg1[2], C.bg1[3], 1)
+  fill:SetPoint("TOPLEFT", win, "TOPLEFT", 1, -1); fill:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -1, 1)
+  local kick = T.Text(f, T.SIZE.tiny, "muted", T.FONT_SEMI)
+  kick:SetPoint("TOPLEFT", win, "TOPLEFT", 8, -6); kick:SetText("GOLD TIMER")
+  local st = T.Text(f, T.SIZE.tiny, "green", T.FONT_MED)
+  st:SetPoint("LEFT", kick, "RIGHT", 6, 0); st:SetText("running")
+  local clk = T.Text(f, T.SIZE.body, "text", T.FONT_SEMI)
+  clk:SetPoint("TOPLEFT", win, "TOPLEFT", 8, -20); clk:SetText("0:42:13")
+  local earned = T.Text(f, T.SIZE.body, "text", T.FONT_SEMI)
+  earned:SetPoint("TOPRIGHT", win, "TOPRIGHT", -8, -20); earned:SetText("38g 20s"); earned:SetTextColor(TL[1], TL[2], TL[3])
+  local rate = T.Text(f, T.SIZE.tiny, "sub", T.FONT_MED)
+  rate:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -8, 6); rate:SetText("54g 30s / h")
+  local rows = { { "Looted gold", "11g 05s" }, { "Runecloth  x34", "20g 40s" }, { "Repairs", "-2g 10s" } }
+  for i, r in ipairs(rows) do
+    local y = -76 - (i - 1) * 16
+    local l = T.Text(f, T.SIZE.tiny, "sub", T.FONT_MED); l:SetPoint("TOPLEFT", 14, y); l:SetText(r[1])
+    local v = T.Text(f, T.SIZE.tiny, "text", T.FONT_MED); v:SetPoint("TOPRIGHT", -14, y); v:SetText(r[2])
+    if i == 3 then v:SetTextColor(C.red[1], C.red[2], C.red[3]) else v:SetTextColor(AC[1], AC[2], AC[3]) end
+  end
+end
+
 local newsFrame
 -- render the current entry of the stacked news window (f._list / f._idx)
 local function renderNews(f)
@@ -7878,7 +7918,8 @@ local function renderNews(f)
     elseif item.preview == "trades" then drawTradesPreview(f.preview)
     elseif item.preview == "selldock" then drawSellDockPreview(f.preview)
     elseif item.preview == "discord" then drawDiscordPreview(f.preview)
-    elseif item.preview == "ledger" then drawLedgerPreview(f.preview) end
+    elseif item.preview == "ledger" then drawLedgerPreview(f.preview)
+    elseif item.preview == "goldtimer" then drawGoldTimerPreview(f.preview) end
   end
   f.pager:SetText(f._idx .. " / " .. n)
   local multi = n > 1

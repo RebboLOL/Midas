@@ -1,5 +1,9 @@
 # Midas – Changelog
 
+## 1.2.18 – 2026-11-03
+- **Gold timer.** Right-click the minimap coin for a small stopwatch that counts gold and loot value from that moment on and shows, per hour, what each source brought in, what you spent and the net.
+- **Scan moved to Shift + right-click.** The minimap coin's right-click now opens the gold timer, so "Scan now" sits on Shift + right-click.
+
 ## 1.2.17 – 2026-10-26
 - **Ledger tab (beta).** A new tab records every gold and item flow - loot, quests, sales and purchases, repairs, flights, training, AH fees, crafting and consumption - and shows where your wealth comes from and where it goes as one Sankey diagram, account-wide or per character.
 

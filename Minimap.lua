@@ -46,8 +46,10 @@ function M.FillSellTooltip(tip)
   end
 
   tip:AddLine(" ")
+  if M.GoldTimerTipLine then M.GoldTimerTipLine(tip) end
   tip:AddDoubleLine("Left-click", "Open window", 0.50, 0.53, 0.60, 0.78, 0.80, 0.85)
-  tip:AddDoubleLine("Right-click", "Scan now", 0.50, 0.53, 0.60, 0.78, 0.80, 0.85)
+  tip:AddDoubleLine("Right-click", "Gold timer", 0.50, 0.53, 0.60, 0.78, 0.80, 0.85)
+  tip:AddDoubleLine("Shift + right-click", "Scan now", 0.50, 0.53, 0.60, 0.78, 0.80, 0.85)
 end
 
 -- ===== Button setup ==========================================================
@@ -105,7 +107,7 @@ function M.InitMinimap()
 
   btn:SetScript("OnClick", function(_, button)
     if button == "RightButton" then
-      M.Scan(true)
+      if IsShiftKeyDown() or not M.GoldTimerToggle then M.Scan(true) else M.GoldTimerToggle(true) end
     else
       M.Toggle()
     end
