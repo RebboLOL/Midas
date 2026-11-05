@@ -1373,6 +1373,12 @@ hookG("AutoLootMailItem", function(i)
 end)
 
 local pendingSend
+-- the client empties the send form's money once SendMail runs: remember what
+-- the mail frame (or a mail addon) put in right before the send
+local formMoney, formCod
+hookG("SetSendMailMoney", function(c) formMoney = { v = num(c), at = now() } end)
+hookG("SetSendMailCOD", function(c) formCod = { v = num(c), at = now() } end)
+local function formValue(f) return (f and f.v and f.v > 0 and now() - f.at < 5) and f.v or nil end
 hookG("SendMail", function(to)
   local items = {}
   for a = 1, ATTACHMENTS_MAX_SEND or 12 do
@@ -1382,11 +1388,15 @@ hookG("SendMail", function(to)
       items[#items + 1] = { id = id, q = (cnt and cnt > 0) and cnt or 1 }
     end
   end
+  local money = num(GetSendMailMoney and GetSendMailMoney()) or 0
+  local cod = num(GetSendMailCOD and GetSendMailCOD()) or 0
+  if money <= 0 then money = formValue(formMoney) or 0 end
+  if cod <= 0 then cod = formValue(formCod) or 0 end
+  formMoney, formCod = nil, nil
   pendingSend = {
     to = to, at = now(), items = items,
     postage = num(GetSendMailPrice and GetSendMailPrice()) or 0,
-    money = num(GetSendMailMoney and GetSendMailMoney()) or 0,
-    cod = num(GetSendMailCOD and GetSendMailCOD()) or 0,
+    money = money, cod = cod,
   }
 end)
 
@@ -1526,6 +1536,7 @@ local function onEnterWorld()
   if not S.begun then
     S.begun = true
     M.LedgerPrune()
+    M.LedgerRepairMail()
     local function try(n)
       local m = num(GetMoney and GetMoney())
       if not m then return end
@@ -1695,6 +1706,60 @@ function M.LedgerPrune()
   local R = L.recent
   while #R > RECENT_MAX do table.remove(R) end
   if (L.ri or 0) > #R then L.ri = #R end
+end
+
+-- once (1.2.19): gold sent by mail used to land on Postage, because the send
+-- form is empty after SendMail. Postage is copper per mail, so the whole-gold
+-- part of a day's postage is sent gold: a transfer where an own character
+-- booked gold from this sender that day or the next, else gold to a player.
+function M.LedgerRepairMail()
+  local L = ldb(); if not L or L.fixMail then return 0 end
+  L.fixMail = 1
+  local chars = (M.db and M.db.chars) or {}
+  local function nameOf(ck)
+    local c = chars[ck]
+    return (c and c.name) or ck:match("^(.*)%-[^%-]*$") or ck
+  end
+  local moved = 0
+  for _, days in pairs(L.d) do
+    local list, used = {}, {}
+    for day in pairs(days) do if type(day) == "number" then list[#list + 1] = day end end
+    table.sort(list)
+    for _, day in ipairs(list) do
+      for ck, c in pairs(days[day]) do
+        local po = c.v and c.v.po
+        if type(po) == "number" and po >= 10000 then
+          local gold = po - po % 10000
+          local sender = nameOf(ck)
+          for _, dd in ipairs({ day, day + 1 }) do
+            for rck, r in pairs(days[dd] or {}) do
+              if gold <= 0 then break end
+              local got = rck ~= ck and r.x and r.x[sender]
+              local ag = r.v and r.v.ag
+              if type(got) == "number" and got > 0 and type(ag) == "number" and ag > 0 then
+                local key = dd .. "|" .. rck .. "|" .. sender
+                local take = math.min(math.min(got, ag) - (used[key] or 0), gold)
+                if take > 0 then
+                  used[key] = (used[key] or 0) + take
+                  addKey(c.v, "po", -take)
+                  addKey(c.v, "ag", -take)
+                  c.x = c.x or {}
+                  addKey(c.x, nameOf(rck), -take)
+                  gold, moved = gold - take, moved + take
+                end
+              end
+            end
+          end
+          if gold > 0 then
+            addKey(c.v, "po", -gold)
+            addKey(c.v, "tp", gold)
+            moved = moved + gold
+          end
+        end
+      end
+    end
+  end
+  return moved
 end
 
 -- ===== Query ================================================================

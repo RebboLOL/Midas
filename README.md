@@ -10,13 +10,9 @@ Questions, bug reports and feature ideas: **[Midas Discord](https://discord.gg/C
 
 ## Supported game versions
 - **Classic Era 1.15.9** (incl. Hardcore) – classic auction house, "GetAll" full scan.
-- **WoW Forever beta 1.60.1** (modern client) – modern auction house, snapshot full scan
+- **WoW Forever 1.60.1** (modern client) – modern auction house, snapshot full scan
   (commodities included). Everything else works the same. The nearby (say/yell) sync layer is
   not available there – the client blocks it – so sync runs over guild and group.
-  Known beta issue: the Forever beta sometimes fails to load saved addon data at login
-  (Blizzard bug, affects all addons); Midas explains this in a one-time popup on Forever.
-  Community workaround: [ForeverSVFix](https://github.com/nobewayo/ForeverSVFix) (third-party;
-  re-run it after every Midas update).
 
 Midas detects the client by its auction-house API, so the same download runs on both.
 
@@ -190,7 +186,10 @@ because someone else did. It works in two layers:
 - **Cross-guild / nearby** (on by default, `yell`; Classic Era only – WoW Forever blocks say/yell addon messages): at the auction house Midas also beacons that tiny
   manifest to **nearby players in other guilds** and answers their backfill requests – that's how data
   crosses guild boundaries, since Midas users meet at the AH. Pick the channel or turn it off in the
-  **Sync** tab or with `/midas vicinity say|yell|off`.
+  **Settings** tab or with `/midas vicinity say|yell|off`.
+- **Live log:** the **Settings** tab lists the Midas users online (last 10 minutes) with their version and
+  keeps a scrollable log of the last 300 sync events – **PUSH** = sent by you, **PULL** = received or asked
+  for, **WARN** = throttled or unreadable traffic, **INFO** = everything else.
 
 - **Completely invisible:** everything travels over WoW's hidden addon-message channel (`CHAT_MSG_ADDON`),
   which the chat UI never shows – players with or without the addon see **nothing**, and nothing appears in

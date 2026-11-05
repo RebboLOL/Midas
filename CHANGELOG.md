@@ -1,5 +1,11 @@
 # Midas – Changelog
 
+## 1.2.19 – 2026-11-05
+- **Mailed gold is no longer postage.** Fixed a bug where gold you sent by mail was booked as Postage in the Ledger - it now counts as a transfer to your alt or as gold to another player, and the days already recorded are corrected once.
+- **Ledger diagram easier to read.** Sources and destinations sit under GOLD IN, GOODS IN, GOLD OUT and GOODS OUT headings, and every label shows its amount on the same line in its band's color.
+- **Live sync log.** The Settings tab keeps a scrollable log of the last 300 sync events, tagged PUSH, PULL, WARN and INFO, and lists the Midas users online with the version they run.
+- **No more Forever beta popup.** WoW Forever is live, so the one-time note about the beta losing saved addon data no longer appears.
+
 ## 1.2.18 – 2026-11-03
 - **Gold timer.** Right-click the minimap coin for a small stopwatch that counts gold and loot value from that moment on and shows, per hour, what each source brought in, what you spent and the net.
 - **Scan moved to Shift + right-click.** The minimap coin's right-click now opens the gold timer, so "Scan now" sits on Shift + right-click.

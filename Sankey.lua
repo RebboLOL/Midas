@@ -16,7 +16,7 @@ local LANES = { "gold", "goods" }
 local LANE_RANK = { gold = 0, goods = 1 }
 
 local GEO = {
-  full    = { gutter = 120, padT = 30, padB = 30, nodeGap = 6, laneGap = 18, barW = 10 },
+  full    = { gutter = 150, padT = 30, padB = 30, nodeGap = 6, laneGap = 18, barW = 10 },
   compact = { gutter = 4,   padT = 4,  padB = 4,  nodeGap = 2, laneGap = 6,  barW = 6 },
 }
 
@@ -224,7 +224,8 @@ function M.SankeyLayout(model, W, H, opts)
   end
 
   -- geometry
-  local gutter = opts.compact and geo.gutter or max(70, min(geo.gutter, floor(W * 0.16)))
+  -- the full view keeps one-line "name  amount" labels in the gutters
+  local gutter = opts.compact and geo.gutter or max(70, min(geo.gutter, floor(W * 0.2)))
   local plotL, plotR = gutter, W - gutter
   local plotTop, plotBot = H - geo.padT, geo.padB
   local plotH = plotTop - plotBot
@@ -529,15 +530,17 @@ local function drawSeg(canvas, sk, s, n, r, g, b, a)
 end
 
 -- ===== Labels ===============================================================
--- Greedy by value: each block sits at its bar centre or the nearest free spot
--- within reach; the amount line goes first when space runs out, then the label.
-local function placeLabels(list, H)
+-- Greedy by value: each one-line label ("name  amount") sits at its bar
+-- centre or the nearest free spot within reach; the lane headings are placed
+-- first and every label keeps clear of them. No room within reach: no label.
+local LABEL_H = 13
+local function placeLabels(list, H, placed)
   table.sort(list, function(a, b)
     if a.value ~= b.value then return a.value > b.value end
     return a.yc > b.yc
   end)
-  local placed = {}
-  local function free(c, half)
+  local half = LABEL_H / 2
+  local function free(c)
     if c - half < 1 or c + half > H - 1 then return false end
     for _, p in ipairs(placed) do
       if c - half < p.hi - 0.01 and c + half > p.lo + 0.01 then return false end
@@ -545,27 +548,32 @@ local function placeLabels(list, H)
     return true
   end
   for _, e in ipairs(list) do
-    local reach = max(12, e.h / 2)
-    for _, hb in ipairs(e.wantAmount and { 23, 12 } or { 12 }) do
-      local half = hb / 2
-      local cands = { e.yc }
-      for _, p in ipairs(placed) do
-        cands[#cands + 1] = p.hi + half + 1
-        cands[#cands + 1] = p.lo - half - 1
-      end
-      local best, bd
-      for _, c in ipairs(cands) do
-        local d = abs(c - e.yc)
-        if d <= reach and (not bd or d < bd) and free(c, half) then best, bd = c, d end
-      end
-      if best then
-        e.cy, e.amount = best, hb > 12
-        placed[#placed + 1] = { lo = best - half, hi = best + half }
-        break
-      end
+    local reach = max(14, e.h / 2)
+    local cands = { e.yc }
+    for _, p in ipairs(placed) do
+      cands[#cands + 1] = p.hi + half + 1
+      cands[#cands + 1] = p.lo - half - 1
+    end
+    local best, bd
+    for _, c in ipairs(cands) do
+      local d = abs(c - e.yc)
+      if d <= reach and (not bd or d < bd) and free(c) then best, bd = c, d end
+    end
+    if best then
+      e.cy = best
+      placed[#placed + 1] = { lo = best - half, hi = best + half }
     end
   end
 end
+
+-- a node colour lifted towards white, so amounts read on the dark canvas
+local function liftRGB(key)
+  if key == nil or key == "muted" or key == "sub" then return rgb("sub") end
+  local r, g, b = rgb(key)
+  return r + (1 - r) * 0.25, g + (1 - g) * 0.25, b + (1 - b) * 0.25
+end
+
+local HEADINGS = { [0] = { gold = "GOLD IN", goods = "GOODS IN" }, [3] = { gold = "GOLD OUT", goods = "GOODS OUT" } }
 
 local function drawLabels(canvas, sk, L)
   local T = M.Theme
@@ -573,14 +581,18 @@ local function drawLabels(canvas, sk, L)
   local FONT_A = (T and T.FONT) or FONT_L
   local tr, tg, tb = rgb("text")
   local sr, sg, sb = rgb("sub")
+  local mr, mg, mb = rgb("muted")
   local gw = L.plot.gutter - 10
   local left, right = {}, {}
+  local tops = { [0] = {}, [3] = {} }   -- top edge of each lane in the outer columns
   for _, n in ipairs(L.list) do
     if not n.pass then
       local text = (n.node and n.node.label) or tostring(n.id)
       if n.labelSide == "left" or n.labelSide == "right" then
-        local e = { n = n, text = text, yc = n.y + n.h / 2, h = n.h, value = n.value, wantAmount = n.h >= 10 }
+        local e = { n = n, text = text, yc = n.y + n.h / 2, h = n.h, value = n.value }
         if n.labelSide == "left" then left[#left + 1] = e else right[#right + 1] = e end
+        local t = tops[n.col]
+        if t and (not t[n.lane] or n.y + n.h > t[n.lane]) then t[n.lane] = n.y + n.h end
       else
         -- hubs: name and amount above (gold lane) or below (goods lane) the bar
         local cx, up = n.x + n.w / 2, n.labelSide == "top"
@@ -602,24 +614,47 @@ local function drawLabels(canvas, sk, L)
       end
     end
   end
-  placeLabels(left, L.H); placeLabels(right, L.H)
-  for pass = 1, 2 do
-    local list = (pass == 1) and left or right
+  -- lane headings (GOLD IN / GOODS IN left, GOLD OUT / GOODS OUT right) above
+  -- the top bar of each lane; the labels below keep clear of them
+  local reserved = { [0] = {}, [3] = {} }
+  local FONT_H = (T and T.FONT_SEMI) or FONT_L
+  for col, t in pairs(tops) do
+    for lane, top in pairs(t) do
+      local cy = top + 12
+      if cy + 6 <= L.H then
+        local r = reserved[col]
+        r[#r + 1] = { lo = cy - 6, hi = cy + 6 }
+        local x = (col == 0) and (L.plot.l - 6) or (L.plot.r + 6)
+        local h = getFS(canvas, sk, FONT_H, 9)
+        h:SetText(HEADINGS[col][lane]); h:SetTextColor(mr, mg, mb)
+        h:SetPoint((col == 0) and "RIGHT" or "LEFT", canvas, "BOTTOMLEFT", x, cy)
+      end
+    end
+  end
+  placeLabels(left, L.H, reserved[0]); placeLabels(right, L.H, reserved[3])
+  -- one line per node: the name in text colour, the amount in the band's own
+  -- (lifted) colour next to the bar; long names shorten, amounts never do
+  for side = 1, 2 do
+    local list = (side == 1) and left or right
     for _, e in ipairs(list) do
       if e.cy then
         local n = e.n
-        local anchor = (pass == 1) and "RIGHT" or "LEFT"
-        local x = (pass == 1) and (n.x - 6) or (n.x + n.w + 6)
+        local a = getFS(canvas, sk, FONT_H, 11)
+        a:SetText(M.MoneyShort(n.value))
+        a:SetTextColor(liftRGB(n.other and "sub" or (n.node and n.node.color)))
         local s = getFS(canvas, sk, FONT_L, 11)
-        s:SetWidth(gw); s:SetJustifyH(anchor)
         s:SetText(e.text)
         if n.other then s:SetTextColor(sr, sg, sb) else s:SetTextColor(tr, tg, tb) end
-        s:SetPoint(anchor, canvas, "BOTTOMLEFT", x, e.cy + (e.amount and 5.5 or 0))
-        if e.amount then
-          local a = getFS(canvas, sk, FONT_A, 10)
-          a:SetWidth(gw); a:SetJustifyH(anchor)
-          a:SetText(M.MoneyShort(n.value)); a:SetTextColor(sr, sg, sb)
-          a:SetPoint(anchor, canvas, "BOTTOMLEFT", x, e.cy - 6)
+        local room = gw - (a:GetStringWidth() or 0) - 6
+        if (s:GetStringWidth() or 0) > room then s:SetWidth(max(24, room)) end
+        if side == 1 then
+          s:SetJustifyH("RIGHT")
+          a:SetPoint("RIGHT", canvas, "BOTTOMLEFT", n.x - 6, e.cy)
+          s:SetPoint("RIGHT", a, "LEFT", -6, 0)
+        else
+          s:SetJustifyH("LEFT")
+          s:SetPoint("LEFT", canvas, "BOTTOMLEFT", n.x + n.w + 6, e.cy)
+          a:SetPoint("LEFT", s, "RIGHT", 6, 0)
         end
       end
     end

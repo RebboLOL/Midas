@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.18"
+M.version = "1.2.19"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -360,13 +360,8 @@ function M.OnLogin()
     M.db.config.privacyNote = 1
     M.Print("Midas shares scan data with guildmates & nearby Midas users at the AH (addon messages - invisible to other players). Toggle it in the Settings tab, or /midas share off.")
   end
-  -- WoW Forever beta: the client sometimes starts a session without the saved addon
-  -- data (Blizzard bug, all addons). Explain it once. If the data fails to load, the
-  -- flag is gone too, so the note comes back exactly when the user sees an empty archive.
-  if M.MODERN_AH and M.db.config.foreverNote ~= 2 then
-    M.db.config.foreverNote = 2
-    C_Timer.After(4, M.ShowForeverNote)
-  end
+  -- WoW Forever is live (05.11.2026): the beta's lost-save-data popup is gone
+  M.db.config.foreverNote = nil
   -- one-time "what's new" spotlight for bigger features (UI.lua M.NEWS). A
   -- fresh install gets the onboarding welcome card instead (UI.lua OB_STAGES):
   -- the news would describe changes to a UI the player has never seen, and
@@ -386,28 +381,6 @@ function M.OnLogin()
       end
     end)
   end
-end
-
-function M.ShowForeverNote()
-  if not (StaticPopupDialogs and StaticPopup_Show) then return end
-  StaticPopupDialogs["MIDAS_FOREVER_NOTE"] = StaticPopupDialogs["MIDAS_FOREVER_NOTE"] or {
-    text = "|cffE8B44AMidas|r - WoW Forever beta\n\n"
-      .. "The Forever beta client sometimes fails to load saved addon data at login. "
-      .. "When that happens, Midas - like every other addon - starts empty, and the price "
-      .. "history, trades and net-worth records of this game version are lost.\n\n"
-      .. "This is a known Blizzard beta bug, not a Midas bug, and only Blizzard can fix it. "
-      .. "Your Classic Era data is not affected.\n\n"
-      .. "If your archive is suddenly empty, just keep scanning - Midas rebuilds it.\n\n"
-      .. "Community workaround until Blizzard fixes it: the free tool |cffE8B44AForeverSVFix|r "
-      .. "(search it on GitHub, not made by Midas). Run it once with WoW closed - and again "
-      .. "after every Midas update.",
-    button1 = OKAY or "OK",
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    preferredIndex = 3,
-  }
-  StaticPopup_Show("MIDAS_FOREVER_NOTE")
 end
 
 -- /midas help: every user-facing command in one place (the README mirrors this)

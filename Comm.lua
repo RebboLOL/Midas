@@ -14,14 +14,20 @@ local ADDON, M = ...
 
 local PREFIX = "Midas1"   -- protocol version lives in the prefix (breaking -> Midas2)
 
-M.commStats = { rxRows = 0, txRows = 0, rxMsgs = 0, txMsgs = 0, txThrottled = 0, peers = {} }
+M.commStats = { rxRows = 0, txRows = 0, rxMsgs = 0, txMsgs = 0, txThrottled = 0, peers = {}, ver = {} }
 
--- recent activity ring for the Sync tab (newest appended)
+-- live sync log for the Settings tab (oldest first): dir = "push" (sent by
+-- us) | "pull" (received or asked for) | "info" | "warn"; M.onSyncLog(entry)
+-- hears every new entry while the log is on screen
 local commLog = {}
-local function logEvent(dir, text)   -- dir: "tx" | "rx" | "info"
-  commLog[#commLog + 1] = { t = time(), dir = dir, text = text }
-  if #commLog > 40 then table.remove(commLog, 1) end
+local LOG_MAX = 300
+local function logEvent(dir, text)
+  local e = { t = time(), dir = dir, text = text }
+  commLog[#commLog + 1] = e
+  if #commLog > LOG_MAX then table.remove(commLog, 1) end
+  if M.onSyncLog then pcall(M.onSyncLog, e) end
 end
+function M.SyncLog() return commLog end
 
 -- probe pongs are printed ONLY to the player who ran the probe (otherwise a guild
 -- probe would print "pong from ..." on everyone's screen). Set when WE probe.
@@ -67,6 +73,12 @@ end
 local function ValidDay(day)
   local today = M.GetScanDay()
   return day > today - M.C.PRUNE_DAYS and day <= today + 1
+end
+
+-- scan day as people read it in the log ("Nov 03"), the raw number as fallback
+local function dayTxt(day)
+  local ok, s = pcall(date, "%b %d", day * 86400 + M.C.SCAN_DAY_0 + 43200)
+  return (ok and s) or ("day " .. tostring(day))
 end
 
 -- ===== send queue + throttle (byte + message token buckets + backoff) =======
@@ -122,12 +134,14 @@ pump:SetScript("OnUpdate", function(self, elapsed)
     queue[qHead] = nil; qHead = qHead + 1
     if (item.chan == "SAY" or item.chan == "YELL") and not M.vicinityBlocked then
       M.vicinityBlocked = true
-      logEvent("info", "vicinity sync unavailable on this client (" .. M.SEND_PERMANENT_FAIL[r] .. ") - guild/group only")
+      logEvent("warn", "nearby sync unavailable on this client (" .. M.SEND_PERMANENT_FAIL[r] .. ") - guild and group only")
     end
   else                                          -- throttled/failed: keep item, spend nothing
+    local first = commBackoff == 0
     commBackoff = math.min(BACKOFF_CAP, (commBackoff > 0 and commBackoff * 2) or BACKOFF_BASE)
     nextSend = now + commBackoff
     M.commStats.txThrottled = (M.commStats.txThrottled or 0) + 1
+    if first then logEvent("warn", "client throttled a send - backing off, nothing is lost") end
   end
 end)
 
@@ -272,14 +286,14 @@ local function SendManifest(force)
     buf[#buf + 1] = s; blen = blen + #s + 1
   end
   if #buf > 0 then chunks[#chunks + 1] = head .. table.concat(buf, ",") end
-  logEvent("info", "sent manifest (" .. #days .. " days)")
+  logEvent("push", "manifest: " .. #days .. " days on offer")
   for _, c in ipairs(chunks) do Broadcast(c) end
   -- Cross-guild discovery beacon: only the FIRST chunk (newest days), on its own
   -- 120 s throttle so a crowd arriving together doesn't co-time public beacons.
   if VicinityOn() and #chunks > 0 and GetTime() - lastManifestVicinityTx > 120 then
     lastManifestVicinityTx = GetTime()
     BroadcastVicinity(chunks[1])
-    logEvent("tx", "beacon to nearby (" .. (M.db.config.vicinity or "?") .. ")")
+    logEvent("push", "beacon to nearby Midas users (" .. (M.db.config.vicinity or "?") .. ")")
   end
 end
 
@@ -301,7 +315,7 @@ local function RequestNext()
   local req = "R" .. RealmHash() .. "|" .. enc36(best)
   Broadcast(req)
   BroadcastVicinity(req)        -- also ask nearby cross-guild peers at the AH
-  logEvent("info", "requested day " .. best)
+  logEvent("pull", "asked for " .. dayTxt(best))
 end
 local function QueueWant(day)
   if GetTime() - (reqCooldown[day] or -9e9) < 600 then return end
@@ -328,7 +342,7 @@ local function SendDayData(day, chan)
   local chunks = EncodeChunks("D" .. RealmHash() .. "|" .. enc36(day) .. "|", rows, true)
   for _, c in ipairs(chunks) do Enqueue(chan, c) end
   M.commStats.txRows = M.commStats.txRows + #rows
-  logEvent("tx", "served day " .. day .. " (" .. #rows .. " rows) to " .. chan)
+  logEvent("push", "sent " .. dayTxt(day) .. ": " .. #rows .. " prices (" .. chan:lower() .. ")")
 end
 
 local function OnRequest(day, chan)
@@ -358,6 +372,12 @@ local function HandleMsg(text, chan, sender, isSelf)
   M.commStats.peers[sender] = time()
 
   if typ == "H" or typ == "Q" then
+    if rest ~= "" and rest ~= "1" then
+      if typ == "H" and M.commStats.ver[sender] == nil then
+        logEvent("info", sender .. " is online (Midas " .. rest .. ")")
+      end
+      M.commStats.ver[sender] = rest
+    end
     if typ == "Q" and GetTime() < probeUntil then M.Print("comm probe: pong from " .. sender .. " via " .. chan .. " (v" .. rest .. ")") end
     -- a Hello means someone (re)logged in: advertise our state so they can pull
     -- whatever they missed while offline (SendManifest is cooldown-gated)
@@ -378,7 +398,7 @@ local function HandleMsg(text, chan, sender, isSelf)
     if not rs then return "bad" end
     local imp = M.MergeSharedRows(day, rs, isGuild) or 0
     M.commStats.rxRows = M.commStats.rxRows + imp
-    logEvent("rx", "scan from " .. sender .. ": +" .. imp .. " rows (day " .. day .. ")")
+    logEvent("pull", "scan from " .. sender .. ": +" .. imp .. " prices (" .. dayTxt(day) .. ")")
     return "ok"
   elseif typ == "D" then
     local d36, rows = rest:match("^([^|]+)|(.+)$")
@@ -389,7 +409,7 @@ local function HandleMsg(text, chan, sender, isSelf)
     if not rs then return "bad" end
     local imp = M.MergeSharedRows(day, rs, isGuild) or 0
     M.commStats.rxRows = M.commStats.rxRows + imp
-    logEvent("rx", "backfill from " .. sender .. ": +" .. imp .. " rows (day " .. day .. ")")
+    logEvent("pull", "backfill from " .. sender .. ": +" .. imp .. " prices (" .. dayTxt(day) .. ")")
     return "ok"
   elseif typ == "M" then
     logEvent("info", "manifest from " .. sender)
@@ -419,6 +439,7 @@ end
 
 -- ===== events ================================================================
 local ahTicker
+local warned = {}
 local ef = CreateFrame("Frame")
 ef:RegisterEvent("CHAT_MSG_ADDON")
 ef:RegisterEvent("PLAYER_LOGIN")
@@ -431,7 +452,16 @@ ef:SetScript("OnEvent", function(_, event, ...)
     if not (M.db and M.db.config and M.db.config.share) then return end
     M.commStats.rxMsgs = M.commStats.rxMsgs + 1
     local short = Ambiguate(sender or "", "short")
-    pcall(HandleMsg, text, chan, short, short == UnitName("player"))
+    local ok, res = pcall(HandleMsg, text, chan, short, short == UnitName("player"))
+    if not ok or res == "bad" or res == "trust" then
+      -- one line per sender and minute, so a broken or untrusted peer cannot flood the log
+      local key = short .. (res == "trust" and "|t" or "|b")
+      if GetTime() - (warned[key] or -9e9) > 60 then
+        warned[key] = GetTime()
+        if res == "trust" then logEvent("info", "ignored data from " .. short .. " (guild only)")
+        else logEvent("warn", "skipped an unreadable message from " .. short) end
+      end
+    end
   elseif event == "PLAYER_LOGIN" then
     C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
     C_Timer.After(5, function() Broadcast("H" .. RealmHash() .. "|" .. M.version) end)
@@ -453,7 +483,7 @@ function M.OnScanCommitted(day, changed, ts)
   local chunks = EncodeChunks("S" .. RealmHash() .. "|" .. enc36(day) .. "|" .. enc36(ts) .. "|", changed, false)
   for _, c in ipairs(chunks) do Broadcast(c) end
   M.commStats.txRows = M.commStats.txRows + #changed
-  logEvent("tx", "sent scan: " .. #changed .. " rows (day " .. day .. ")")
+  logEvent("push", "your scan: " .. #changed .. " prices shared (" .. dayTxt(day) .. ")")
   C_Timer.After(5, function() SendManifest(false) end)
 end
 
@@ -476,12 +506,31 @@ function M.CommStatus()
 end
 
 -- Snapshot for the Sync tab (UI reads this instead of poking comm internals).
+local function verLess(a, b)
+  local pa, pb = {}, {}
+  for n in tostring(a):gmatch("%d+") do pa[#pa + 1] = tonumber(n) end
+  for n in tostring(b):gmatch("%d+") do pb[#pb + 1] = tonumber(n) end
+  for i = 1, math.max(#pa, #pb) do
+    local x, y = pa[i] or 0, pb[i] or 0
+    if x ~= y then return x < y end
+  end
+  return false
+end
+
 function M.CommInfo()
   local cfg = M.db.config
   local now, names, cnt = time(), {}, 0
+  local online, newest = {}, nil
   for name, t in pairs(M.commStats.peers) do
-    if now - t < 600 then cnt = cnt + 1; if #names < 6 then names[#names + 1] = name end end
+    if now - t < 600 then
+      cnt = cnt + 1
+      local v = M.commStats.ver[name]
+      online[#online + 1] = { name = name, ver = v, ago = now - t }
+      if v and verLess(M.version, v) and (not newest or verLess(newest, v)) then newest = v end
+    end
   end
+  table.sort(online, function(a, b) if a.ago ~= b.ago then return a.ago < b.ago end return a.name < b.name end)
+  for i = 1, math.min(6, #online) do names[i] = online[i].name end
   local log = {}
   for i = #commLog, 1, -1 do
     local e = commLog[i]
@@ -495,7 +544,8 @@ function M.CommInfo()
     txRows = M.commStats.txRows, txMsgs = M.commStats.txMsgs,
     txThrottled = M.commStats.txThrottled or 0,
     vicinity = cfg.vicinity or "off", ahOpen = M.AHOpen == true,
-    peerCount = cnt, peers = names, queue = qTail - qHead + 1, log = log,
+    peerCount = cnt, peers = names, online = online, newer = newest,
+    queue = qTail - qHead + 1, log = log,
   }
 end
 

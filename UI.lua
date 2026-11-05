@@ -2239,15 +2239,49 @@ function M.BuildSettings(panel)
   sh:SetPoint("TOPLEFT", 0, -424); sh:SetText("SYNC \194\183 STATUS")
   local stats = T.Text(panel, T.SIZE.body, "sub")
   stats:SetPoint("TOPLEFT", 0, -444); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
-  stats:SetWidth(430); stats:SetSpacing(5)
+  stats:SetWidth(430); stats:SetSpacing(5); stats:SetWordWrap(true)
   s.stats = stats
+  -- live log: every entry tagged PUSH (sent by you) / PULL (received or asked
+  -- for) / WARN / INFO, oldest first, scrolls with the wheel and follows live
   local ah = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
-  ah:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -14); ah:SetText("SYNC \194\183 LIVE ACTIVITY")
-  local log = T.Text(panel, T.SIZE.small, "sub")
-  log:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -32)
-  log:SetPoint("BOTTOMRIGHT", panel, "BOTTOMLEFT", 430, 0)
-  log:SetJustifyH("LEFT"); log:SetJustifyV("TOP"); log:SetSpacing(4)
+  ah:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -14); ah:SetText("SYNC \194\183 LIVE LOG")
+  local lh = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
+  lh:SetPoint("LEFT", ah, "RIGHT", 10, 0)
+  lh:SetText("PUSH = sent by you  \194\183  PULL = received  \194\183  wheel scrolls")
+  local box = T.Surface(panel, "bg0", "border")
+  box:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -32)
+  box:SetPoint("BOTTOMRIGHT", panel, "BOTTOMLEFT", 430, 30)
+  local log = CreateFrame("ScrollingMessageFrame", nil, box)
+  log:SetPoint("TOPLEFT", 7, -6); log:SetPoint("BOTTOMRIGHT", -7, 6)
+  log:SetFont(T.FONT, T.SIZE.tiny, "")
+  log:SetJustifyH("LEFT")
+  log:SetFading(false)
+  log:SetMaxLines(300)
+  log:EnableMouseWheel(true)
+  log:SetScript("OnMouseWheel", function(self, d)
+    if d > 0 then self:ScrollUp() else self:ScrollDown() end
+  end)
   s.log = log
+  local SYNC_TAG = { push = { "PUSH", C.accent }, pull = { "PULL", C.green }, warn = { "WARN", C.red },
+                     info = { "INFO", C.sub } }
+  local function syncLine(e)
+    local tag = SYNC_TAG[e.dir] or SYNC_TAG.info
+    return MUT .. date("%H:%M:%S", e.t) .. "|r  " .. hx(tag[2]) .. tag[1] .. "|r  " .. WHT .. e.text .. "|r"
+  end
+  function s.refillLog()
+    log:Clear()
+    local list = M.SyncLog and M.SyncLog() or {}
+    for _, e in ipairs(list) do log:AddMessage(syncLine(e)) end
+    if #list == 0 then log:AddMessage(MUT .. 'No sync traffic yet - open the AH or click "Sync now".|r') end
+    log:ScrollToBottom()
+  end
+  M.onSyncLog = function(e)
+    if panel:IsVisible() then log:AddMessage(syncLine(e)) end
+  end
+  panel:HookScript("OnShow", function() s.refillLog() end)
+  local clearBtn = T.Button(panel, "Clear view", 96, 20)
+  clearBtn:SetPoint("TOPRIGHT", box, "BOTTOMRIGHT", 0, -5)
+  clearBtn:SetScript("OnClick", function() log:Clear() end)
 
   -- ----- FAIR PRICE (right column, under the sync controls) ----------------
   -- recency slider: how fast the market base behind Fair forgets old scan
@@ -2336,21 +2370,35 @@ function M.RefreshSettings()
   if not info then s.stats:SetText("Comm module not loaded.") return end
   local GRN, RED, WHT, MUT, GOLD, MINT = s.GRN, s.RED, s.WHT, s.MUT, s.GOLD, s.MINT
   local statusCol = info.share and (GRN .. "ON|r") or (RED .. "OFF|r")
-  local guildCol = info.guild and (GRN .. "yes|r") or (RED .. "no|r")
-  local names = (#info.peers > 0) and ("   " .. table.concat(info.peers, ", ")) or ""
+  local guildCol = info.guild and "" or ("   " .. RED .. "not in a guild|r - group and nearby only")
   local vic = info.vicinity or "off"
   local vicTxt = (vic == "off") and (MUT .. "off|r")
     or (WHT .. vic .. "|r  (AH " .. (info.ahOpen and (GRN .. "open|r") or (MUT .. "closed|r")) .. ")")
-  local thrCol = ((info.txThrottled or 0) > 0) and GOLD or GRN
+  -- who is online, newest contact first, with the Midas version they run
+  local who
+  local online = info.online or {}
+  if #online == 0 then
+    who = MUT .. "No other Midas users seen in the last 10 minutes.|r"
+  else
+    local parts = {}
+    for i = 1, math.min(6, #online) do
+      local p = online[i]
+      parts[i] = WHT .. p.name .. "|r" .. (p.ver and (MUT .. " " .. p.ver .. "|r") or "")
+    end
+    who = "Midas users online (10 min):  " .. WHT .. #online .. "|r   " .. table.concat(parts, ", ")
+      .. ((#online > 6) and (MUT .. ", +" .. (#online - 6) .. "|r") or "")
+  end
+  local thr = info.txThrottled or 0
   local sl = {
-    "Sync:  " .. statusCol .. "      in guild:  " .. guildCol,
-    "Cross-guild (nearby):  " .. vicTxt,
-    "Peers (last 10 min):  " .. WHT .. info.peerCount .. "|r" .. names,
-    " ",
-    "Received:  " .. MINT .. info.rxRows .. "|r rows   (" .. info.rxMsgs .. " messages)",
-    "Sent:  " .. GOLD .. info.txRows .. "|r rows   (" .. info.txMsgs .. " messages)",
-    "Queued:  " .. info.queue .. "      throttled:  " .. thrCol .. (info.txThrottled or 0) .. "|r",
+    "Sync  " .. statusCol .. guildCol .. "      cross-guild:  " .. vicTxt,
+    who,
+    "Received  " .. MINT .. info.rxRows .. "|r prices  (" .. info.rxMsgs .. " msgs)   \194\183   sent  "
+      .. GOLD .. info.txRows .. "|r prices  (" .. info.txMsgs .. " msgs)",
+    "Queue  " .. WHT .. math.max(0, info.queue) .. "|r" .. ((thr > 0) and ("   \194\183   throttled  " .. GOLD .. thr .. "|r") or ""),
   }
+  if info.newer then
+    sl[#sl + 1] = GOLD .. "Midas " .. info.newer .. " is out - players you sync with run it already.|r"
+  end
   -- last import from other addons' price databases (Import.lua), per source
   local imp = cfg.impSrc
   if imp then
@@ -2365,13 +2413,6 @@ function M.RefreshSettings()
     end
   end
   s.stats:SetText(table.concat(sl, "\n"))
-  local lines = {}
-  for _, e in ipairs(info.log) do
-    local col = (e.dir == "tx") and GOLD or (e.dir == "rx") and MINT or MUT
-    lines[#lines + 1] = MUT .. e.clock .. "|r  " .. col .. e.text .. "|r"
-  end
-  if #lines == 0 then lines[1] = MUT .. 'No sync traffic yet. Open the AH or click "Sync now".|r' end
-  s.log:SetText(table.concat(lines, "\n"))
 end
 
 
