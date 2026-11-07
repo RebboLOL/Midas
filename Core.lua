@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.19"
+M.version = "1.2.20"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -261,6 +261,8 @@ function M.OnLogin()
   MidasDB.trade = MidasDB.trade or { log = {}, seen = {}, nameIndex = {} }
   -- every gold + item flow per character and day (Ledger.lua owns the layout)
   MidasDB.ledger = MidasDB.ledger or { v = 1 }
+  -- recipes each character knows (Crafting.lua reads the profession windows)
+  MidasDB.crafts = MidasDB.crafts or {}
   if MidasDB.config.share == nil then MidasDB.config.share = true end  -- community sync (opt-out)
   MidasDB.config.shareTrust = MidasDB.config.shareTrust or "all"
   -- cross-guild vicinity sync (SAY/YELL at the AH). Default on ("yell"); the hardened
@@ -397,6 +399,8 @@ function M.PrintHelp()
     "/midas trades  -  trade summary of the last 60 days",
     "/midas ledger  -  (beta) gold in/out summary   (recent: last bookings, check: session balance, debug: live)",
     "/midas timer  -  gold timer: gold + loot value per hour   (start, pause, reset, report)",
+    "/midas tree [item]  -  (beta) crafting tree: material cost now / Fair, used in, disenchant value",
+    "/midas lines  -  chart lines smooth (default) or crisp",
     "/midas vendor  -  number of known vendor-sold items",
     "/midas prune  -  drop archive days older than 2 years",
     "/midas share on|off  -  community sync (guild)",
@@ -597,6 +601,13 @@ SlashCmdList["MIDAS"] = function(msg)
     if M.PrintTrades then M.PrintTrades() end
   elseif msg == "ledger" or msg:match("^ledger%s") then
     if M.LedgerSlash then M.LedgerSlash(msg:match("^ledger%s+(.-)%s*$") or "") end
+  elseif msg == "tree" or msg:match("^tree%s") then
+    if M.CraftSlash then M.CraftSlash(raw:match("^%a+%s+(.-)$") or "") end
+  elseif msg == "lines" then
+    -- smooth (soft-edged) chart lines are the default; crisp = plain pixels
+    M.db.config.crispLines = (not M.db.config.crispLines) and true or nil
+    M.Print("Chart lines: " .. (M.db.config.crispLines and "crisp (plain pixel lines)" or "smooth (default)"))
+    if M.RerenderCharts then M.RerenderCharts() end
   elseif msg == "timer" or msg:match("^timer%s") then
     if M.GoldTimerSlash then M.GoldTimerSlash(msg:match("^timer%s+(.-)%s*$") or "") end
   elseif msg == "share" or msg == "share on" or msg == "share off" then

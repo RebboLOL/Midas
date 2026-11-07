@@ -2,12 +2,13 @@
 local ADDON, M = ...
 local T = M.Theme
 local C = T.C
-local TABS = { "Start", "Watchlist", "Net Worth", "Trades", "Ledger", "Charts", "Settings", "Help" }
+local TABS = { "Start", "Watchlist", "Net Worth", "Trades", "Ledger", "Charts", "Crafting", "Settings", "Help" }
 local TAB = {}
 for i, n in ipairs(TABS) do TAB[n] = i end
 M.TAB = TAB
+M.TABS = TABS
 -- what the tab bar SHOWS; TABS stays the lookup key everywhere
-local TAB_LABEL = { Ledger = "Ledger (beta)" }
+local TAB_LABEL = { Ledger = "Ledger (beta)", Crafting = "Crafting (beta)" }
 
 -- small helpers --------------------------------------------------------------
 local function cell(parent, x, y, w, just, size, colorKey, variant)
@@ -59,7 +60,24 @@ local function ShowItemTip(key)
   GameTooltip:SetHyperlink("item:" .. id)
   GameTooltip:Show()
 end
+M.ShowItemTip = ShowItemTip
 local function HideTip() GameTooltip:Hide() end
+M.HideTip = HideTip
+
+-- Right-click on an item row: the item menu with every page Midas has for it
+-- (Nav.lua). Returns true when it handled the click.
+local function ItemMenuClick(mouse, key)
+  if mouse ~= "RightButton" or not key then return false end
+  HideTip()
+  if M.ItemMenu then M.ItemMenu(key) end
+  return true
+end
+
+-- the one jump to another tab's page (Nav.lua M.Go leaves a Back pill)
+local function GoChart(key)
+  if not key then return end
+  if M.Go then M.Go("chart", key) else M.SetChartKey(key); M.SelectTab(TAB.Charts) end
+end
 
 -- ===== Build ================================================================
 function M.EnsureUI()
@@ -159,15 +177,29 @@ function M.EnsureUI()
   sub:SetPoint("LEFT", mark, "RIGHT", 9, -1); sub:SetText("AH Market Analysis")
   M.headerStatus = T.Text(header, T.SIZE.small, "sub")
   M.headerStatus:SetPoint("RIGHT", -44, 0); M.headerStatus:SetJustifyH("RIGHT")
+  -- Back pill: appears after a jump from one tab's item to another tab's page
+  -- and returns to exactly where you came from (Nav.lua)
+  if M.BuildNavPill then
+    local pill = M.BuildNavPill(f, sub)
+    pill:SetFrameLevel(f:GetFrameLevel() + 20)
+  end
+  -- a closed window starts fresh: no stale way back, no open item menu
+  f:HookScript("OnHide", function()
+    if M.NavClear then M.NavClear() end
+    if M.HideItemMenu then M.HideItemMenu() end
+  end)
 
   local close = T.Close(f)
   close:SetPoint("TOPRIGHT", -10, -12)
   close:SetScript("OnClick", function() f:Hide() end)
 
-  -- Tabs + divider
+  -- Tabs + divider. Picking a tab yourself ends the jump trail (Back pill).
   local labels = {}
   for i, n in ipairs(TABS) do labels[i] = TAB_LABEL[n] or n end
-  M.tabBar = T.TabBar(f, labels, function(i) M.SelectTab(i) end)
+  M.tabBar = T.TabBar(f, labels, function(i)
+    if M.NavClear then M.NavClear() end
+    M.SelectTab(i)
+  end)
   M.tabBar.frame:SetPoint("TOPLEFT", 14, -52)
 
   -- floor-MA toggle (on/off), rightmost of the chart-toggle row. "Floor MA"
@@ -215,6 +247,12 @@ function M.EnsureUI()
   M.fairToggle = fairToggle
   if T.HelpTip then
     T.HelpTip(fairToggle, "Fair line", T.HELP.fair[2])
+  end
+  -- nine tabs share the row with the three toggles: at the minimum window width
+  -- the tab padding shrinks until the bar ends before the first toggle
+  if M.tabBar.Fit then
+    local togW = maToggle:GetWidth() + trToggle:GetWidth() + fairToggle:GetWidth() + 28
+    M.tabBar:Fit(980 - 28 - togW - 16)
   end
 
   local div = T.Divider(f)
@@ -269,6 +307,7 @@ function M.EnsureUI()
   M.BuildTrades(M.panels[TAB.Trades])
   M.BuildLedger(M.panels[TAB.Ledger])
   M.BuildCharts(M.panels[TAB.Charts])
+  if M.BuildCrafting then M.BuildCrafting(M.panels[TAB.Crafting]) end
   M.BuildSettings(M.panels[TAB.Settings])
   M.BuildHelp(M.panels[TAB.Help])
   M.curTab = 1
@@ -284,6 +323,8 @@ function M.SelectTab(i)
   if M.depthView then M.depthView:Hide() end
   if M.alertsView then M.alertsView:Hide() end
   if M.ledgerUI and M.ledgerUI.pop then M.ledgerUI.pop:Hide() end
+  if M.HideCraftPopups then M.HideCraftPopups() end
+  if M.HideItemMenu then M.HideItemMenu() end
   for j, p in ipairs(M.panels) do p:SetShown(j == i) end
   if M.tabBar then M.tabBar:Select(i) end
   M.RefreshUI()
@@ -319,18 +360,26 @@ function M.RefreshUI()
   local t = M.curTab
   if M.UpdateChartToggles then M.UpdateChartToggles() end
   local hint = "/midas scan to update   \194\183   /midas help lists every command"
-  if t == TAB.Start then
-    hint = "your account at a glance   \194\183   click a card for its tab   \194\183   right-click an item to watch it   \194\183   alt: post stats to chat"
+  if t == TAB.Start and M.db and M.db.config and M.db.config.homeView == "classic" then
+    hint = "click a card for its tab   \194\183   right-click an item to watch it   \194\183   alt: post stats to chat"
+  elseif t == TAB.Start then
+    hint = "click an item for its chart   \194\183   right-click: watch / unwatch   \194\183   hover a card title for how it is computed"
   elseif t == TAB.Watchlist then
     hint = "\"+ group\" creates a section   \194\183   drag a row onto a group   \194\183   right-click removes   \194\183   header: right-click renames, shift-click deletes"
   elseif t == TAB["Net Worth"] then
-    hint = "account-wide assets (gold + item value)   \194\183   click a chart day or a character for details   \194\183   a snapshot is saved every day"
+    hint = "account-wide assets (gold + item value)   \194\183   click a chart day or a character for details   \194\183   right-click an item: all its pages"
   elseif t == TAB.Trades then
-    hint = "open your mailbox to log sells, returns & buys   \194\183   in By Item, click a row to see each sale's price"
+    hint = "open your mailbox to log trades   \194\183   By Item: click a row for each sale's price   \194\183   right-click an item: all its pages"
   elseif t == TAB.Ledger then
-    hint = "beta: every gold and item flow since install   \194\183   hover a band for details   \194\183   click lists its items"
+    hint = "beta: every gold and item flow   \194\183   hover a band for details   \194\183   click lists its items   \194\183   right-click an item: all its pages"
   elseif t == TAB.Charts then
-    hint = "click a list item to chart it   \194\183   shift: AH search   \194\183   alt: post stats to chat   \194\183   'why these numbers?' explains the math"
+    hint = "chips next to the name: the item's other pages   \194\183   right-click any item: all its pages   \194\183   shift: AH search   \194\183   alt: chat"
+  elseif t == TAB.Crafting then
+    if M.CraftingOn and not M.CraftingOn() then
+      hint = "beta: crafting is switched off   \194\183   tick \"Enable crafting\" above to turn it on"
+    else
+      hint = "beta   \194\183   click a card to open it   \194\183   + shows how a material is made   \194\183   right-click: all its pages   \194\183   bottom bar: sideways"
+    end
   elseif t == TAB.Settings then
     hint = "general options + community sync   \194\183   sync is invisible to other players"
   elseif t == TAB.Help then
@@ -342,6 +391,7 @@ function M.RefreshUI()
   elseif t == TAB["Net Worth"] and M.RefreshWealth then M.RefreshWealth()
   elseif t == TAB.Trades and M.RefreshTrades then M.RefreshTrades()
   elseif t == TAB.Ledger and M.RefreshLedger then M.RefreshLedger()
+  elseif t == TAB.Crafting and M.RefreshCrafting then M.RefreshCrafting()
   elseif t == TAB.Settings and M.RefreshSettings then M.RefreshSettings()
   elseif t == TAB.Help and M.RefreshHelp then M.RefreshHelp()
   elseif t == TAB.Charts and M.RefreshCharts then M.RefreshCharts() end
@@ -444,8 +494,10 @@ function M.SetChartKey(key)
   M.chartListOff = 0            -- a new pick starts the left list at the top
 end
 
--- Open the window on the Charts tab showing a given item
+-- Open the window on the Charts tab showing a given item (from the AH, the
+-- offer book dock, ...): through M.Go, so an open window keeps its way back
 function M.ShowChartFor(key)
+  if M.Go then M.Go("chart", key); return end
   M.EnsureUI(); M.frame:Show()
   M.SetChartKey(key)
   M.SelectTab(TAB.Charts)
@@ -797,7 +849,7 @@ local function ahBookPanel()
   ahb.sub:SetPoint("TOPLEFT", 36, -27)
   ahb.head = T.Text(ahb, T.SIZE.tiny, "muted", T.FONT_MED)
   ahb.head:SetPoint("TOPLEFT", 10, -46)
-  ahb.head:SetText("OFFER BOOK  \194\183  click the title for the full chart")
+  ahb.head:SetText("OFFER BOOK  \194\183  title: chart  \194\183  right-click: all pages")
   -- small X: hides the dock for this AH visit (Settings turns it off for good)
   if T.Close then
     local xb = T.Close(ahb)
@@ -811,7 +863,12 @@ local function ahBookPanel()
   end
   local hb = CreateFrame("Button", nil, ahb)   -- title block opens the Midas chart
   hb:SetPoint("TOPLEFT", 6, -6); hb:SetPoint("TOPRIGHT", -26, -6); hb:SetHeight(36)
-  hb:SetScript("OnClick", function() if ahb._id and M.ShowChartFor then M.ShowChartFor(ahb._id) end end)
+  hb:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+  hb:SetScript("OnClick", function(_, mouse)
+    if not ahb._id then return end
+    if ItemMenuClick(mouse, tostring(ahb._id)) then return end
+    if M.ShowChartFor then M.ShowChartFor(ahb._id) end
+  end)
   hb:SetScript("OnEnter", function() if ahb._id and M.ShowItemTip then M.ShowItemTip(tostring(ahb._id)) end end)
   hb:SetScript("OnLeave", function() if M.HideTip then M.HideTip() end end)
   ahb.rows = {}
@@ -1395,6 +1452,14 @@ local function CreateChartCard(parent, x0, w, h)
   local hint = T.Text(card, T.SIZE.small, "muted")
   hint:SetPoint("BOTTOMLEFT", 10, 8); hint:SetPoint("BOTTOMRIGHT", -8, 8)
   hint:SetJustifyH("LEFT"); hint:SetText("Hover: preview   \194\183   Click: full chart")
+  obj.hint = hint
+  -- the hovered item's pages as chips in place of the hint (Nav.lua); what
+  -- does not fit the card stays in the right-click menu
+  if M.LinkBar then
+    obj.links = M.LinkBar(card, { short = true })
+    obj.links:SetPoint("BOTTOMLEFT", 10, 5)
+    obj.links:Hide()
+  end
   M.detailCards = M.detailCards or {}
   M.detailCards[#M.detailCards + 1] = obj
   return obj
@@ -1409,11 +1474,24 @@ end
 -- Re-fills only when the item OR the data generation changed: a scan, sync,
 -- trade mail or the Fair slider bumps M._analysisGen, so the card follows the
 -- table rows next to it instead of keeping the numbers of its first fill.
+local function cardLinks(obj, key)
+  if not obj.links then return end
+  if key then
+    local w = obj.frame:GetWidth() or 0
+    if w < 120 then w = 240 end
+    obj.links:SetItem(key, w - 20)
+  else
+    obj.links:SetItem(nil)
+  end
+  if obj.hint then obj.hint:SetShown(not obj.links:IsShown()) end
+end
+
 function M.FillChartCard(obj, key)
   if not obj then return end
   local gen = M._analysisGen or 0
   if obj.shownKey == key and obj.shownGen == gen then return end
   obj.shownKey, obj.shownGen = key, gen
+  cardLinks(obj, key)
   if not key then
     obj.title:SetText("No data"); colorize(obj.title, C.sub); obj.cat:SetText("")
     for i = 1, 5 do obj.stats[i].lbl:SetText(""); obj.stats[i].val:SetText("") end
@@ -1458,36 +1536,8 @@ function M.FillChartCard(obj, key)
   if M.RenderItemChart then M.RenderItemChart(obj.canvas, key) end
 end
 
--- ===== Tab 1: Start dashboard ===============================================
--- The account at a glance, in three rows: net-worth hero + MARKET TODAY (the
--- best buy/sell signals - today's picks merged with the archive-wide
--- opportunity ranking), the WATCHLIST across the full width (the focus), and
--- the biggest character movers + your trading highlights. Item rows behave
--- like everywhere else: hover = tooltip, left-click = chart, right-click = watch.
-local HOME_ROWH = 17
-
-local function homeCard(panel, titleText, rgb, tabName, clickFn, goText)
-  local card = T.Surface(panel, "bg1", "border")
-  local head = T.Text(card, T.SIZE.small, nil, T.FONT_MED)
-  head:SetPoint("TOPLEFT", 12, -10); head:SetText(titleText); colorize(head, rgb or C.sub)
-  local ur = rgb or C.sub
-  local ul = card:CreateTexture(nil, "ARTWORK")
-  ul:SetColorTexture(ur[1], ur[2], ur[3], 0.45)
-  ul:SetHeight(2); ul:SetPoint("TOPLEFT", 12, -26); ul:SetWidth(head:GetStringWidth() + 2)
-  card.head = head
-  if tabName then
-    local b = CreateFrame("Button", nil, card)
-    b:SetAllPoints(); b:SetFrameLevel(card:GetFrameLevel() + 1)
-    local hl = b:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.02)
-    b:SetScript("OnClick", function()
-      if clickFn then clickFn() elseif TAB[tabName] then M.SelectTab(TAB[tabName]) end
-    end)
-    local go = T.Text(card, T.SIZE.tiny, "muted")
-    go:SetPoint("TOPRIGHT", -12, -11); go:SetText((goText or tabName:lower()) .. " \226\134\146")
-  end
-  return card
-end
-
+-- ===== Shared item-row helpers ==============================================
+-- (the Start tab itself lives in Home.lua)
 local function wireItemBtn(b)
   b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   b:SetScript("OnEnter", function() if b.key then ShowItemTip(b.key) end end)
@@ -1500,38 +1550,9 @@ local function wireItemBtn(b)
       M.ToggleWatch(b.key)
       if M.RefreshHome then M.RefreshHome() end
     else
-      M.SetChartKey(b.key); M.SelectTab(TAB.Charts)
+      GoChart(b.key)
     end
   end)
-end
-
--- rows of aligned cells inside a card region; row.btn covers the line (hover
--- tooltip, click-to-chart, right-click-to-watch). rows.mk adds more on demand.
--- inert = display-only rows (e.g. characters): no mouse, no hover promise.
-local function homeRows(parent, x0, y0, cols, n, rowW, inert)
-  local rows = {}
-  local function mkRow(r)
-    local y = y0 - (r - 1) * HOME_ROWH
-    local row, cx = {}, x0
-    for i, d in ipairs(cols) do
-      row[i] = cell(parent, cx, y, d.w, d.just or "LEFT", T.SIZE.body)
-      cx = cx + d.w + 6
-    end
-    local b = CreateFrame("Button", nil, parent)
-    b:SetPoint("TOPLEFT", x0 - 2, y + 2); b:SetSize(rowW, HOME_ROWH - 1)
-    b:SetFrameLevel(parent:GetFrameLevel() + 5)
-    if inert then
-      b:EnableMouse(false)
-    else
-      local hl = b:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.05)
-      wireItemBtn(b)
-    end
-    row.btn = b
-    rows[r] = row
-  end
-  for r = 1, n do mkRow(r) end
-  rows.mk = mkRow
-  return rows
 end
 
 local function setItemName(fs, key, fallbackText)
@@ -1543,409 +1564,14 @@ local function setItemName(fs, key, fallbackText)
   end
 end
 
-local function clearHomeRow(row)
-  for i = 1, #row do row[i]:SetText("") end
-  if row.btn then row.btn.key = nil end
-end
-
-local W_COLS  = { { w = 170 }, { w = 70, just = "RIGHT" }, { w = 70, just = "RIGHT" }, { w = 50, just = "RIGHT" } }
-local MT_COLS = { { w = 190 }, { w = 48, just = "RIGHT" } }
-local MV_COLS = { { w = 150 }, { w = 100, just = "RIGHT" }, { w = 84, just = "RIGHT" } }
-local AL_COLS = { { w = 150 }, { w = 94, just = "RIGHT" }, { w = 90, just = "RIGHT" } }
-local LT_COLS = { { w = 44 }, { w = 46 }, { w = 150 }, { w = 84, just = "RIGHT" } }
-
-function M.BuildHome(panel)
-  local h = {}
-  M.home = h
-  h.panel = panel
-  local R1H, R2H = 146, 136
-  local R2Y, R3Y = -(146 + 8), -(146 + 8 + 136 + 8)
-
-  -- NET WORTH hero + sparkline ----------------------------------------------
-  local nwc = homeCard(panel, "NET WORTH", C.accent, "Net Worth")
-  nwc:SetPoint("TOPLEFT", 0, 0); nwc:SetSize(380, R1H)
-  h.nwTotal = T.Text(nwc, 25, "accent", T.FONT_SEMI)
-  h.nwTotal:SetPoint("TOPLEFT", 12, -36)
-  h.nwD1 = T.Text(nwc, T.SIZE.body, "sub"); h.nwD1:SetPoint("TOPLEFT", 12, -74)
-  h.nwD7 = T.Text(nwc, T.SIZE.body, "sub"); h.nwD7:SetPoint("TOPLEFT", 12, -93)
-  h.nwSub = T.Text(nwc, T.SIZE.tiny, "muted"); h.nwSub:SetPoint("BOTTOMLEFT", 12, 10)
-  h.spark = CreateFrame("Frame", nil, nwc)
-  h.spark:SetPoint("TOPLEFT", 196, -34); h.spark:SetPoint("BOTTOMRIGHT", -10, 8)
-  h.spark:SetFrameLevel(nwc:GetFrameLevel() + 5)
-  h.spark._compact = true
-  if T.HelpTip then
-    T.HelpTip(nwc, "Net worth", {
-      "Gold + item value + active auctions across all your living characters. A snapshot is stored once a day; the line shows how it develops.",
-      "Click for the full Net Worth tab with the per-character and per-item breakdown." }, "ANCHOR_CURSOR")
-  end
-
-  -- MARKET TODAY (today's picks + top opportunities, merged) ----------------
-  local mt = homeCard(panel, "MARKET TODAY", C.sub, "Watchlist",
-    function() if M.OpenBrowse then M.OpenBrowse() else M.SelectTab(TAB.Watchlist) end end,
-    "all items")
-  mt:SetPoint("TOPLEFT", 388, 0); mt:SetPoint("TOPRIGHT", 0, 0); mt:SetHeight(R1H)
-  h.mtDay = T.Text(mt, T.SIZE.tiny, "muted")
-  h.mtDay:SetPoint("TOPRIGHT", -84, -11); h.mtDay:SetJustifyH("RIGHT")   -- left of "all items >"
-  local mbh = T.Text(mt, T.SIZE.tiny, "green", T.FONT_MED)
-  mbh:SetPoint("TOPLEFT", 12, -32); mbh:SetText("BUY")
-  local msh = T.Text(mt, T.SIZE.tiny, "red", T.FONT_MED)
-  msh:SetPoint("TOPLEFT", mt, "TOP", 8, -32); msh:SetText("SELL")
-  local ml = CreateFrame("Frame", nil, mt)
-  ml:SetPoint("TOPLEFT", 12, -46); ml:SetPoint("BOTTOMRIGHT", mt, "BOTTOM", -8, 8)
-  local mr = CreateFrame("Frame", nil, mt)
-  mr:SetPoint("TOPLEFT", mt, "TOP", 8, -46); mr:SetPoint("BOTTOMRIGHT", -12, 8)
-  h.mtBuy  = homeRows(ml, 0, 0, MT_COLS, 4, 250)
-  h.mtSell = homeRows(mr, 0, 0, MT_COLS, 4, 250)
-  if T.HelpTip then
-    T.HelpTip(mt, "Market today", {
-      "BUY: the best flip candidates right now - items trading clearly under Fair on the newest scan day, merged with the highest-scoring opportunities from your whole archive (score = margin x liquidity x confidence).",
-      "SELL: highly liquid items trading clearly above Fair today. Vendor goods are excluded.",
-      "Right-click an item to put it on your watchlist - the Watchlist is the working view." }, "ANCHOR_CURSOR")
-  end
-
-  -- WATCHLIST (the focus: a full-width row of its own) ----------------------
-  local wc = homeCard(panel, "WATCHLIST", C.accent, "Watchlist")
-  wc:SetPoint("TOPLEFT", 0, R2Y); wc:SetPoint("TOPRIGHT", 0, R2Y); wc:SetHeight(R2H)
-  h.wCard = wc
-  local wbh = T.Text(wc, T.SIZE.tiny, "green", T.FONT_MED)
-  wbh:SetPoint("TOPLEFT", 12, -32); wbh:SetText("BUY LOW")
-  local wsh = T.Text(wc, T.SIZE.tiny, "red", T.FONT_MED)
-  wsh:SetPoint("TOPLEFT", wc, "TOP", 8, -32); wsh:SetText("SELL HIGH")
-  h.wHeadL, h.wHeadR = wbh, wsh
-  local wl = CreateFrame("Frame", nil, wc)
-  wl:SetPoint("TOPLEFT", 12, -46); wl:SetPoint("BOTTOMRIGHT", wc, "BOTTOM", -8, 8)
-  local wr = CreateFrame("Frame", nil, wc)
-  wr:SetPoint("TOPLEFT", wc, "TOP", 8, -46); wr:SetPoint("BOTTOMRIGHT", -12, 8)
-  h.wBuy  = homeRows(wl, 0, 0, W_COLS, 4, 440)
-  h.wSell = homeRows(wr, 0, 0, W_COLS, 4, 440)
-  h.wCount = T.Text(wc, T.SIZE.tiny, "muted")
-  h.wCount:SetPoint("BOTTOMRIGHT", -12, 10); h.wCount:SetJustifyH("RIGHT")
-  h.wEmpty = T.Text(wc, T.SIZE.body, "sub")
-  h.wEmpty:SetPoint("LEFT", 24, 0); h.wEmpty:SetPoint("RIGHT", -24, 0)
-  h.wEmpty:SetJustifyH("CENTER"); h.wEmpty:SetWordWrap(true); h.wEmpty:SetSpacing(4)
-  h.wEmpty:SetText("Your watchlist is empty.\nOpen the Watchlist tab to search & add items \226\128\148 or right-click any item on this page to watch it.")
-  h.wEmpty:Hide()
-
-  -- BIGGEST MOVERS + PRICE ALERTS (one card, two compact sections) ----------
-  local mv = homeCard(panel, "BIGGEST MOVERS", C.sub, "Net Worth")
-  mv:SetPoint("TOPLEFT", 0, R3Y); mv:SetPoint("BOTTOMLEFT", 0, 0); mv:SetWidth(380)
-  h.mvCard = mv
-  -- character rows, not item rows: display-only (inert), no fake click promise
-  h.mvRows = homeRows(mv, 12, -32, MV_COLS, 2, 348, true)
-  -- the card's lower half: this realm's active price alerts, click = chart
-  local alh = T.Text(mv, T.SIZE.tiny, "accent", T.FONT_MED)
-  alh:SetPoint("TOPLEFT", 12, -74); alh:SetText("PRICE ALERTS")
-  h.alMore = T.Text(mv, T.SIZE.tiny, "muted")
-  h.alMore:SetPoint("LEFT", alh, "RIGHT", 8, 0)
-  h.alRows = homeRows(mv, 12, -88, AL_COLS, 2, 348)
-  if T.HelpTip then
-    T.HelpTip(mv, "Movers & alerts", {
-      "MOVERS: which characters gained or lost the most net worth since the previous daily snapshot.",
-      "PRICE ALERTS: this realm's active below/above limits. Click one to open its chart - the Charts tab sets and clears them." }, "ANCHOR_CURSOR")
-  end
-
-  -- YOUR TRADES -------------------------------------------------------------
-  local tc = homeCard(panel, "YOUR TRADES", C.sub, "Trades")
-  tc:SetPoint("TOPLEFT", 388, R3Y); tc:SetPoint("BOTTOMRIGHT", 0, 0)
-  h.tcCard = tc
-  local bs = T.Text(tc, T.SIZE.tiny, "muted", T.FONT_MED)
-  bs:SetPoint("TOPLEFT", 12, -32); bs:SetText("BEST SALE \194\183 ALL TIME")
-  h.tSale  = cell(tc, 12, -48, 182, "LEFT", T.SIZE.body)
-  h.tSale2 = cell(tc, 12, -65, 182, "LEFT", T.SIZE.small)
-  local bb = T.Text(tc, T.SIZE.tiny, "muted", T.FONT_MED)
-  bb:SetPoint("TOPLEFT", 12, -88); bb:SetText("BEST BARGAIN \194\183 60 DAYS")
-  h.tBuy  = cell(tc, 12, -104, 182, "LEFT", T.SIZE.body)
-  h.tBuy2 = cell(tc, 12, -121, 182, "LEFT", T.SIZE.small)
-  h.tSaleBtn = CreateFrame("Button", nil, tc)
-  h.tSaleBtn:SetPoint("TOPLEFT", 10, -46); h.tSaleBtn:SetSize(188, 36)
-  h.tSaleBtn:SetFrameLevel(tc:GetFrameLevel() + 5)
-  local hl1 = h.tSaleBtn:CreateTexture(nil, "HIGHLIGHT"); hl1:SetAllPoints(); hl1:SetColorTexture(1, 1, 1, 0.05)
-  wireItemBtn(h.tSaleBtn)
-  h.tBuyBtn = CreateFrame("Button", nil, tc)
-  h.tBuyBtn:SetPoint("TOPLEFT", 10, -102); h.tBuyBtn:SetSize(188, 36)
-  h.tBuyBtn:SetFrameLevel(tc:GetFrameLevel() + 5)
-  local hl2 = h.tBuyBtn:CreateTexture(nil, "HIGHLIGHT"); hl2:SetAllPoints(); hl2:SetColorTexture(1, 1, 1, 0.05)
-  wireItemBtn(h.tBuyBtn)
-  local lh = T.Text(tc, T.SIZE.tiny, "muted", T.FONT_MED)
-  lh:SetPoint("TOPLEFT", 206, -32); lh:SetText("LATEST")
-  h.ltRows = homeRows(tc, 206, -48, LT_COLS, 4, 336)
-  if T.HelpTip then
-    T.HelpTip(tc, "Your trades", {
-      "Highlights from your mail-based trade log: the biggest sale you ever booked, the best bargain of the last 60 days (bought furthest under today's Fair) and your latest trades.",
-      "Click for the full Trades tab with history, per-item sellability and P/L." }, "ANCHOR_CURSOR")
-  end
-end
-
-function M.RefreshHome()
-  local h = M.home
-  if not h then return end
-  local realm = M.RealmKey()
-  local today = M.GetScanDay()
-
-  -- net worth hero ----------------------------------------------------------
-  local nw = M.NetWorth and M.NetWorth()
-  h.nwTotal:SetText(nw and M.MoneyPlain(nw.total) or "\226\128\148")
-  local hist = M.NWHist()
-  local dPrevDay, dPrev, d7Day, d7
-  for day, s in pairs(hist) do
-    if type(s) == "table" and s.t then
-      if day < today and (not dPrevDay or day > dPrevDay) then dPrevDay, dPrev = day, s.t end
-      if day <= today - 7 and (not d7Day or day > d7Day) then d7Day, d7 = day, s.t end
-    end
-  end
-  local function deltaLine(fs, ref, suffix)
-    if not (nw and ref) then fs:SetText(""); return end
-    local d = nw.total - ref
-    local rgb = (d > 0) and C.green or (d < 0) and C.red or C.sub
-    fs:SetText((d >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(d)) .. "  " .. suffix)
-    colorize(fs, rgb)
-  end
-  if dPrev then
-    local since = (dPrevDay == today - 1) and "since yesterday" or ("since " .. M.DayLabel(dPrevDay))
-    deltaLine(h.nwD1, dPrev, since)
-  else
-    h.nwD1:SetText("snapshots build up daily"); colorize(h.nwD1, C.muted)
-  end
-  if d7 and d7Day ~= dPrevDay then deltaLine(h.nwD7, d7, "vs " .. M.DayLabel(d7Day)) else h.nwD7:SetText("") end
-  local nChars = 0
-  if nw then for _ in pairs(nw.chars or {}) do nChars = nChars + 1 end end
-  local subT = nChars .. ((nChars == 1) and " character" or " characters")
-  if nw and (nw.graveTotal or 0) > 0 then
-    subT = subT .. "   \194\183   graveyard " .. M.MoneyPlain(nw.graveTotal)
-  end
-  h.nwSub:SetText(subT)
-  if M.RenderWorthSpark then M.RenderWorthSpark(h.spark) end
-
-  -- layout: the watchlist row (R2) soaks up ~half of any extra window height,
-  -- the bottom row (R3) slides down and keeps the rest
-  local r2h = 136 + math.floor(extraH(h.panel) * 0.45)
-  h.wCard:SetHeight(r2h)
-  local r3y = -(146 + 8 + r2h + 8)
-  h.mvCard:ClearAllPoints()
-  h.mvCard:SetPoint("TOPLEFT", 0, r3y); h.mvCard:SetPoint("BOTTOMLEFT", 0, 0); h.mvCard:SetWidth(380)
-  h.tcCard:ClearAllPoints()
-  h.tcCard:SetPoint("TOPLEFT", 388, r3y); h.tcCard:SetPoint("BOTTOMRIGHT", 0, 0)
-
-  -- watchlist ---------------------------------------------------------------
-  local wlist = (M.RankWatch and M.RankWatch()) or {}
-  local wBuys, wSells = {}, {}
-  for _, e in ipairs(wlist) do
-    -- an item missing from the newest scan has no current price to signal on
-    if e.m and e.m.delta and not (M.NotListed and M.NotListed(e.m)) then
-      if e.m.delta < 0 then wBuys[#wBuys + 1] = e
-      elseif e.m.delta > 0 then wSells[#wSells + 1] = e end
-    end
-  end
-  table.sort(wBuys, function(a, b) return a.m.delta < b.m.delta end)
-  table.sort(wSells, function(a, b) return a.m.delta > b.m.delta end)
-  local wEmpty = (#wlist == 0)
-  h.wEmpty:SetShown(wEmpty)
-  h.wHeadL:SetShown(not wEmpty); h.wHeadR:SetShown(not wEmpty)
-  local wN = math.max(4, math.floor((r2h - 56) / HOME_ROWH))
-  for r = #h.wBuy + 1, wN do h.wBuy.mk(r) end
-  for r = #h.wSell + 1, wN do h.wSell.mk(r) end
-  local function fillWatchRow(row, e)
-    setItemName(row[1], e.key)
-    row[2]:SetText(M.MoneyPlain(e.m.cur)); colorize(row[2], C.text)
-    row[3]:SetText(M.MoneyPlain(e.m.fair)); colorize(row[3], C.sub)
-    row[4]:SetText(string.format("%+.0f%%", e.m.delta * 100))
-    colorize(row[4], C[M.DeltaColor and M.DeltaColor(e.m.delta) or "sub"] or C.sub)
-    row.btn.key = e.key
-  end
-  for r = 1, #h.wBuy do
-    local okRow = (r <= wN) and not wEmpty
-    if okRow and wBuys[r] then fillWatchRow(h.wBuy[r], wBuys[r]) else clearHomeRow(h.wBuy[r]) end
-    if okRow and wSells[r] then fillWatchRow(h.wSell[r], wSells[r]) else clearHomeRow(h.wSell[r]) end
-  end
-  if not wEmpty then
-    if #wBuys == 0 then h.wBuy[1][1]:SetText("nothing under Fair right now"); colorize(h.wBuy[1][1], C.muted) end
-    if #wSells == 0 then h.wSell[1][1]:SetText("nothing over Fair right now"); colorize(h.wSell[1][1], C.muted) end
-  end
-  h.wCount:SetText(wEmpty and "" or (#wlist .. " watched"))
-
-  -- market today: today's picks merged with the best archive-wide flips ------
-  local buys, sells, lastPick, pending = M.TopPicks()
-  h.mtDay:SetText((lastPick and lastPick >= 0) and ("scan day " .. M.DayLabel(lastPick)) or "")
-  local mtBuys, seen = {}, {}
-  for _, rec in ipairs(buys) do
-    local id = (M.BaseID and M.BaseID(rec.key)) or rec.key
-    if not seen[id] then seen[id] = true; mtBuys[#mtBuys + 1] = rec end
-  end
-  if #mtBuys < #h.mtBuy then
-    -- top up with the highest-scoring opportunities that are ALSO a buy signal
-    -- on the same scan day (same gate as the picks themselves)
-    for _, e in ipairs((M.RankAll and M.RankAll()) or {}) do
-      if e.m and (e.m.delta or 0) <= -M.C.PICK_DELTA and lastPick and e.m.lastDay == lastPick then
-        local id = (M.BaseID and M.BaseID(e.key)) or e.key
-        if not seen[id] then
-          seen[id] = true
-          mtBuys[#mtBuys + 1] = { key = e.key, delta = e.m.delta }
-          if #mtBuys >= #h.mtBuy then break end
-        end
-      end
-    end
-  end
-  local function fillMT(row, rec)
-    setItemName(row[1], rec.key)
-    row[2]:SetText(string.format("%+.0f%%", rec.delta * 100))
-    colorize(row[2], C[M.DeltaColor and M.DeltaColor(rec.delta) or "sub"] or C.sub)
-    row.btn.key = rec.key
-  end
-  for r = 1, #h.mtBuy do
-    if mtBuys[r] then fillMT(h.mtBuy[r], mtBuys[r]) else clearHomeRow(h.mtBuy[r]) end
-    if sells[r] then fillMT(h.mtSell[r], sells[r]) else clearHomeRow(h.mtSell[r]) end
-  end
-  local mtEmpty = pending and "analyzing market data\226\128\166" or "no signals today"
-  if #mtBuys == 0 then h.mtBuy[1][1]:SetText(mtEmpty); colorize(h.mtBuy[1][1], C.muted) end
-  if #sells == 0 then h.mtSell[1][1]:SetText(mtEmpty); colorize(h.mtSell[1][1], C.muted) end
-
-  -- biggest movers ----------------------------------------------------------
-  local movers = {}
-  if nw and M.CharDeltaSince then
-    for ck, info in pairs(nw.chars or {}) do
-      -- direct call: an `x and f()` chain would truncate the (delta, refDay) pair
-      local d, refDay = M.CharDeltaSince(ck, info.total)
-      if d and d ~= 0 and refDay then movers[#movers + 1] = { name = info.name or ck, d = d, refDay = refDay } end
-    end
-  end
-  table.sort(movers, function(a, b) return math.abs(a.d) > math.abs(b.d) end)
-  -- fixed two rows: the card's lower half carries the price alerts
-  local mvN = #h.mvRows
-  for r = 1, #h.mvRows do
-    local e = (r <= mvN) and movers[r] or nil
-    local row = h.mvRows[r]
-    if e then
-      row[1]:SetText(e.name); colorize(row[1], C.text)
-      row[2]:SetText((e.d >= 0 and "+" or "-") .. M.MoneyPlain(math.abs(e.d)))
-      colorize(row[2], (e.d > 0) and C.green or C.red)
-      row[3]:SetText(e.refDay and ("since " .. M.DayLabel(e.refDay)) or ""); colorize(row[3], C.muted)
-      row.btn.key = nil
-    else
-      clearHomeRow(row)
-    end
-  end
-  if #movers == 0 then
-    h.mvRows[1][1]:SetText(dPrev and "no changes since the last snapshot" or "snapshots build up daily")
-    colorize(h.mvRows[1][1], C.muted)
-  end
-
-  -- price alerts (lower half of the movers card) -----------------------------
-  if h.alRows then
-    local al = M.db.alerts and M.db.alerts[realm]
-    local alist = {}
-    if al then
-      for key, a in pairs(al) do
-        if type(a) == "table" and (a.below or a.above) then
-          alist[#alist + 1] = { key = key, below = a.below, above = a.above }
-        end
-      end
-    end
-    table.sort(alist, function(a, b)
-      return (M.ItemName(a.key) or tostring(a.key)) < (M.ItemName(b.key) or tostring(b.key))
-    end)
-    -- the card bottom is elastic (the window resizes for real): grow the
-    -- alert rows into whatever height is actually there
-    local alN = math.max(2, math.floor((((h.mvCard and h.mvCard:GetHeight()) or 128) - 90) / HOME_ROWH))
-    for r = #h.alRows + 1, alN do h.alRows.mk(r) end
-    for r = 1, #h.alRows do
-      local e, row = (r <= alN) and alist[r] or nil, h.alRows[r]
-      if e then
-        setItemName(row[1], e.key)
-        row[2]:SetText(e.below and ("\226\137\164 " .. M.MoneyPlain(e.below)) or "")
-        colorize(row[2], C.green)
-        row[3]:SetText(e.above and ("\226\137\165 " .. M.MoneyPlain(e.above)) or "")
-        colorize(row[3], C.accent)
-        row.btn.key = e.key
-      else
-        clearHomeRow(row)
-      end
-    end
-    h.alMore:SetText(#alist > alN and ("+" .. (#alist - alN) .. " more") or "")
-    if #alist == 0 then
-      h.alRows[1][1]:SetText("none set - use below / above in the Charts tab")
-      colorize(h.alRows[1][1], C.muted)
-    end
-  end
-
-  -- your trades -------------------------------------------------------------
-  local ltN = math.max(4, math.floor((((h.tcCard and h.tcCard:GetHeight()) or 128) - 56) / HOME_ROWH))
-  for r = #h.ltRows + 1, ltN do h.ltRows.mk(r) end
-  local log = (M.TradeLog and M.TradeLog(realm)) or {}
-  local latest, bestSale, bestBuy, bestBuySave = {}, nil, nil, nil
-  local cutoff60 = today - 60
-  for i = 1, #log do
-    local e = log[i]
-    if #latest < ltN and (e.kind == "sold" or e.kind == "bought" or e.kind == "returned") then
-      latest[#latest + 1] = e
-    end
-    if e.kind == "sold" and (e.gross or 0) > ((bestSale and bestSale.gross) or 0) then bestSale = e end
-    if e.kind == "bought" and e.src ~= "vendor" and e.id and (e.day or 0) >= cutoff60
-       and (e.gross or 0) > 0 and (e.count or 0) > 0 then
-      local key = tostring(e.id)
-      local s = M.GetSeries(key)
-      local m = s and M.Metrics(s, key)
-      if m and m.fair and m.fair > 0 then
-        local save = 1 - (e.gross / e.count) / m.fair
-        if save > (bestBuySave or 0.05) then bestBuySave, bestBuy = save, e end
-      end
-    end
-  end
-  local function tradeName(e) return (e.id and M.ItemName(tostring(e.id))) or e.name or "?" end
-  if bestSale then
-    local key = bestSale.id and tostring(bestSale.id)
-    setItemName(h.tSale, key, tradeName(bestSale))
-    local cnt = (bestSale.count and bestSale.count > 1) and (" x" .. bestSale.count) or ""
-    h.tSale2:SetText(M.MoneyPlain(bestSale.gross) .. cnt .. "   \194\183   " .. M.DayLabel(bestSale.day or today))
-    colorize(h.tSale2, C.green)
-    h.tSaleBtn.key = key
-  else
-    h.tSale:SetText("no sales logged yet"); colorize(h.tSale, C.muted)
-    h.tSale2:SetText("open your mailbox after selling"); colorize(h.tSale2, C.muted)
-    h.tSaleBtn.key = nil
-  end
-  if bestBuy then
-    local key = tostring(bestBuy.id)
-    setItemName(h.tBuy, key)
-    h.tBuy2:SetText(string.format("paid %s \194\183 %.0f%% under Fair",
-      M.MoneyPlain(bestBuy.gross / bestBuy.count), bestBuySave * 100))
-    colorize(h.tBuy2, C.green)
-    h.tBuyBtn.key = key
-  else
-    h.tBuy:SetText("no AH bargain in the window"); colorize(h.tBuy, C.muted)
-    h.tBuy2:SetText(""); h.tBuyBtn.key = nil
-  end
-  for r = 1, #h.ltRows do
-    local e = (r <= ltN) and latest[r] or nil
-    local row = h.ltRows[r]
-    if e then
-      row[1]:SetText(M.DayLabel(e.day or today)); colorize(row[1], C.muted)
-      local kind, krgb = "sold", C.green
-      if e.kind == "bought" then kind, krgb = "bought", C.red
-      elseif e.kind == "returned" then kind, krgb = "back", C.sub end
-      row[2]:SetText(kind); colorize(row[2], krgb)
-      local key = e.id and tostring(e.id)
-      setItemName(row[3], key, tradeName(e))
-      if e.kind == "returned" then
-        row[4]:SetText("x" .. (e.count or 1)); colorize(row[4], C.sub)
-      else
-        row[4]:SetText(((e.kind == "sold") and "+" or "-") .. M.MoneyPlain(e.gross or 0))
-        colorize(row[4], krgb)
-      end
-      row.btn.key = key
-    else
-      clearHomeRow(row)
-    end
-  end
-  if #latest == 0 then
-    h.ltRows[1][1]:SetText("\226\128\148"); colorize(h.ltRows[1][1], C.muted)
-    h.ltRows[1][3]:SetText("no trades logged yet"); colorize(h.ltRows[1][3], C.muted)
-  end
-end
-
 
 -- ===== Settings tab: general options + community sync =======================
 -- The old Sync tab, rededicated: everything configurable lives HERE (plus the
 -- three chart toggles in the window header, which stay next to the charts).
+-- height of the scrolling left column of the Settings tab (general options,
+-- sync status, live log); a taller window simply shows more of the log
+local SET_LEFT_H = 700
+
 function M.BuildSettings(panel)
   local s = {}
   M.setUI = s
@@ -1954,14 +1580,24 @@ function M.BuildSettings(panel)
   s.GRN, s.RED, s.WHT, s.MUT, s.GOLD, s.MINT = GRN, RED, WHT, MUT, GOLD, MINT
 
   vline(panel, 445)
+  -- the left column scrolls: the general options, the sync status and the
+  -- live log need about 700px; the panel has 426 at the smallest window
+  local lscroll = CreateFrame("ScrollFrame", "MidasSettingsScroll", panel, "UIPanelScrollFrameTemplate")
+  lscroll:SetPoint("TOPLEFT", 0, 0); lscroll:SetPoint("BOTTOMLEFT", 0, 0); lscroll:SetWidth(430)
+  local left = CreateFrame("Frame", nil, lscroll)
+  left:SetSize(430, SET_LEFT_H)
+  lscroll:SetScrollChild(left)
+  T.StyleScrollbar("MidasSettingsScroll")
+  s.left, s.leftScroll = left, lscroll
+
 
   -- ----- GENERAL (left column) ---------------------------------------------
-  local gh = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
+  local gh = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
   gh:SetPoint("TOPLEFT", 0, -2); gh:SetText("GENERAL")
 
-  local tl = T.Text(panel, T.SIZE.body, "sub")
+  local tl = T.Text(left, T.SIZE.body, "sub")
   tl:SetPoint("TOPLEFT", 0, -26); tl:SetText("Item tooltip")
-  local tipSeg = T.Segment(panel, {
+  local tipSeg = T.Segment(left, {
     { key = "full",    label = "Full" },
     { key = "reduced", label = "Reduced" },
     { key = "off",     label = "Off" },
@@ -1978,38 +1614,61 @@ function M.BuildSettings(panel)
       "The preview below shows exactly what each setting produces." })
   end
 
+  -- craft / disenchant lines in item tooltips (Crafting.lua), default on
+  local tcCb = T.Checkbox(left, "Craft lines", function(on)
+    if on then M.db.config.tooltipCraft = nil else M.db.config.tooltipCraft = false end
+    if s.setPreview then s.setPreview(M.db.config.tooltipMode or "full") end
+    if M.RerenderCharts then M.RerenderCharts() end
+  end)
+  tcCb:SetPoint("TOPLEFT", 318, -24)
+  s.tcCb = tcCb
+  if T.HelpTip then
+    T.HelpTip(tcCb, "Craft lines", {
+      "Adds what an item costs to make from its materials (now in gold, Fair in purple, with the profit after the AH cut), what gear disenchants into, and how many recipes use a material.",
+      "Craftable items without market data get these lines too. The full tree is in the Crafting tab.",
+      "Also draws the dashed mint \"Crafted\" line (what it costs to make now) in the item's big chart." })
+  end
+
   -- live preview of the tooltip block (mirrors Tooltip.lua's example output)
-  local pv = T.Surface(panel, "bg0", "border")
+  local pv = T.Surface(left, "bg0", "border")
   pv:SetPoint("TOPLEFT", 0, -52); pv:SetSize(430, 118)
   local pvL, pvR = {}, {}
   local PREVIEW = {
     { "|cffE8B44AMidas|r",                        "|cff5CD178+18% above fair|r" },
     { "|cff5CD178Current  12g 34s|r",             "Fair (~52%)  10g 50s" },
+    { "Craft  |cffFDCC619g 40s|r  |cff5CD178+24%|r", "|cff9E8CFAfair 9g 10s|r  |cff5CD178+20%|r" },
     { "Sells  ~6.0/day \194\183 Steady",           "Quick-sell  9g 80s" },
     { "In AH now:  14",                           "Avg in AH:  11" },
     { "|cff5CD178Sell odds at current price  ~44%|r", "" },
     { "You paid  8g 20s avg  (12 bought)",        "" },
   }
   for i, ln in ipairs(PREVIEW) do
-    local y = -8 - (i - 1) * 17
+    local y = -7 - (i - 1) * 15
     pvL[i] = T.Text(pv, T.SIZE.small, "sub"); pvL[i]:SetPoint("TOPLEFT", 12, y); pvL[i]:SetText(ln[1])
     pvR[i] = T.Text(pv, T.SIZE.small, "sub"); pvR[i]:SetPoint("TOPRIGHT", -12, y); pvR[i]:SetJustifyH("RIGHT"); pvR[i]:SetText(ln[2])
   end
   local pvOff = T.Text(pv, T.SIZE.small, "muted")
   pvOff:SetPoint("CENTER", 0, 0); pvOff:SetText("no Midas lines on item tooltips"); pvOff:Hide()
-  local pvCap = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
+  local pvCap = T.Text(left, T.SIZE.tiny, "muted", T.FONT_MED)
   pvCap:SetPoint("TOPLEFT", pv, "BOTTOMLEFT", 0, -4)
   pvCap:SetText("PREVIEW \194\183 what an item tooltip will show")
   function s.setPreview(mode)
-    local nShow = (mode == "off") and 0 or (mode == "reduced") and 2 or #PREVIEW
+    local nShow = (mode == "off") and 0 or (mode == "reduced") and 3 or #PREVIEW
+    local craft = M.db.config.tooltipCraft ~= false and (not M.CraftingOn or M.CraftingOn())
+    local y = -7
     for i = 1, #PREVIEW do
-      pvL[i]:SetShown(i <= nShow)
-      pvR[i]:SetShown(i <= nShow)
+      local show = i <= nShow and (i ~= 3 or craft)
+      pvL[i]:SetShown(show)
+      pvR[i]:SetShown(show)
+      if show then
+        pvL[i]:SetPoint("TOPLEFT", 12, y); pvR[i]:SetPoint("TOPRIGHT", -12, y)
+        y = y - 15
+      end
     end
     pvOff:SetShown(mode == "off")
   end
 
-  local mmCb = T.Checkbox(panel, "Minimap button", function(on)
+  local mmCb = T.Checkbox(left, "Minimap button", function(on)
     if M.SetMinimapShown then M.SetMinimapShown(on) end
   end)
   mmCb:SetPoint("TOPLEFT", 0, -196)
@@ -2019,7 +1678,7 @@ function M.BuildSettings(panel)
   -- NOTE on these toggles: the and-nil-else-false shorthand is ALWAYS false in
   -- Lua (a nil result in the and branch falls through to the or) - re-enabling
   -- silently kept features off and the box unticked itself. Explicit if/else only.
-  local alCb = T.Checkbox(panel, "Alert lines in charts", function(on)
+  local alCb = T.Checkbox(left, "Alert lines in charts", function(on)
     if on then M.db.config.alertLines = nil else M.db.config.alertLines = false end
     M.RerenderCharts()
   end)
@@ -2031,7 +1690,7 @@ function M.BuildSettings(panel)
       "A limit far outside the current price range stays off the chart, so a stray alert cannot crush the scale." })
   end
 
-  local sdCb = T.Checkbox(panel, "Sell helper at the AH", function(on)
+  local sdCb = T.Checkbox(left, "Sell helper at the AH", function(on)
     if on then M.db.config.sellDock = nil else M.db.config.sellDock = false end
     if on then
       if _G.MidasSellDock then _G.MidasSellDock._dismissed = nil end
@@ -2047,7 +1706,7 @@ function M.BuildSettings(panel)
       "Green = 15%+ over fair (sell it), red = under fair (hold)." })
   end
 
-  local autoCb = T.Checkbox(panel, "Auto-scan when the AH opens", function(on)
+  local autoCb = T.Checkbox(left, "Auto-scan when the AH opens", function(on)
     M.db.config.autoScan = on and true or nil
   end)
   autoCb:SetPoint("TOPLEFT", 0, -218)
@@ -2057,7 +1716,7 @@ function M.BuildSettings(panel)
       "Starts a full scan automatically ~2 seconds after you open the auction house. Full (GetAll) scans are rate-limited by the server to roughly one per 15 minutes." })
   end
 
-  local ahCb = T.Checkbox(panel, "Offer book at the auction house", function(on)
+  local ahCb = T.Checkbox(left, "Offer book at the auction house", function(on)
     if on then M.db.config.ahBook = nil else M.db.config.ahBook = false end
     if not on and ahb then ahb:Hide() end
     if on and _G.MidasAHBook then _G.MidasAHBook._dismissed = nil end
@@ -2070,7 +1729,7 @@ function M.BuildSettings(panel)
       "The ladder comes from your newest full scan; clicking its title opens the full Midas chart." })
   end
 
-  local mcCb = T.Checkbox(panel, "Alt/Shift shortcuts", function(on)
+  local mcCb = T.Checkbox(left, "Alt/Shift shortcuts", function(on)
     if on then M.db.config.modClicks = nil else M.db.config.modClicks = false end
   end)
   mcCb:SetPoint("TOPLEFT", 250, -240)
@@ -2083,7 +1742,7 @@ function M.BuildSettings(panel)
   end
 
   -- the two onboarding helpers share a row: the starter set + the tour
-  local swCb = T.Checkbox(panel, "Starter watchlist", function(on)
+  local swCb = T.Checkbox(left, "Starter watchlist", function(on)
     if on then M.db.config.starterWatch = nil else M.db.config.starterWatch = false end
     local n = M.ApplyStarterWatch and M.ApplyStarterWatch(on) or 0
     if on then
@@ -2101,12 +1760,12 @@ function M.BuildSettings(panel)
       "ON adds the missing ones to your watchlist; OFF removes exactly those again and keeps every item you picked yourself." })
   end
 
-  local gsBtn = T.Button(panel, "Get started guide", 150, 22)
+  local gsBtn = T.Button(left, "Get started guide", 150, 22)
   gsBtn:SetPoint("TOPLEFT", 250, -258)
   gsBtn:SetScript("OnClick", function() if M.ShowGuide then M.ShowGuide() end end)
 
   -- opt-in auto-open with the AH (CF request spudster90); default OFF
-  local owCb = T.Checkbox(panel, "Open with the auction house", function(on)
+  local owCb = T.Checkbox(left, "Open with the auction house", function(on)
     M.db.config.openWithAH = on and true or nil
   end)
   owCb:SetPoint("TOPLEFT", 0, -284)
@@ -2116,7 +1775,7 @@ function M.BuildSettings(panel)
       "Opens the Midas window automatically whenever you open the auction house. The coin button next to \"Midas Scan\" opens it on demand either way." })
   end
   -- ledger recording (Ledger.lua); default ON, the switch only stops new bookings
-  local lgCb = T.Checkbox(panel, "Record ledger (beta)", function(on)
+  local lgCb = T.Checkbox(left, "Record ledger (beta)", function(on)
     M.db.config.ledgerOff = (not on) and true or nil
   end)
   lgCb:SetPoint("TOPLEFT", 250, -284)
@@ -2126,20 +1785,34 @@ function M.BuildSettings(panel)
       "Books every gold and item flow - loot, quests, repairs, flights, sales, purchases, crafting, consumption - for the Ledger tab.",
       "Off stops new bookings; what is already recorded stays." })
   end
+  -- crafting (Crafting.lua / CraftTree.lua); default ON, the same switch as
+  -- "Enable crafting" in the Crafting tab
+  local crCb = T.Checkbox(left, "Crafting (beta)", function(on)
+    if M.SetCraftingOn then M.SetCraftingOn(on) end
+    if s.setPreview then s.setPreview(M.db.config.tooltipMode or "full") end
+  end)
+  crCb:SetPoint("TOPLEFT", 250, -306)
+  s.crCb = crCb
+  if T.HelpTip then
+    T.HelpTip(crCb, "Crafting (beta)", {
+      "Prices every recipe of your game version from your scans: the Crafting tab's tech tree, the Crafted price and line in the Charts tab, the craft lines in item tooltips and the Craft tree links of an item.",
+      "Off switches all of that off; the recipes your characters know keep being recorded. The same switch sits in the Crafting tab." })
+  end
   if T.HelpTip then
     T.HelpTip(gsBtn, "Get started guide", {
       "A six-step tour of the Midas workflow: scan, watchlist, fair price, offer book, alerts and your own trades." })
   end
 
-  local rl = T.Text(panel, T.SIZE.body, "sub")
-  rl:SetPoint("TOPLEFT", 0, -322); rl:SetText("Chart timeframe")
-  local rangeSeg = makeRangeSeg(panel)
-  rangeSeg.frame:SetPoint("TOPLEFT", 150, -318)
+  -- (the rows below sit one row lower since the Crafting (beta) switch)
+  local rl = T.Text(left, T.SIZE.body, "sub")
+  rl:SetPoint("TOPLEFT", 0, -344); rl:SetText("Chart timeframe")
+  local rangeSeg = makeRangeSeg(left)
+  rangeSeg.frame:SetPoint("TOPLEFT", 150, -340)
 
   -- the small preview cards get their own window, independent of the big charts
-  local pl = T.Text(panel, T.SIZE.body, "sub")
-  pl:SetPoint("TOPLEFT", 0, -350); pl:SetText("Preview timeframe")
-  local prevSeg = T.Segment(panel, {
+  local pl = T.Text(left, T.SIZE.body, "sub")
+  pl:SetPoint("TOPLEFT", 0, -372); pl:SetText("Preview timeframe")
+  local prevSeg = T.Segment(left, {
     { key = "7",   label = "1W" },
     { key = "30",  label = "1M" },
     { key = "90",  label = "3M" },
@@ -2148,18 +1821,18 @@ function M.BuildSettings(panel)
     M.db.config.previewRange = key
     M.RerenderCharts()
   end)
-  prevSeg.frame:SetPoint("TOPLEFT", 150, -346)
+  prevSeg.frame:SetPoint("TOPLEFT", 150, -368)
   s.prevSeg = prevSeg
   if T.HelpTip then
     T.HelpTip(prevSeg.frame, "Preview timeframe", {
-      "How far back the small preview cards look: the hover charts on Home, Opportunities, Watchlist and Trades, and the net-worth sparkline on the start page.",
+      "How far back the small preview cards look: the hover charts on the Watchlist and Trades tabs and the net-worth chart on the Start page.",
       "All keeps the classic view - the full history (the sparkline shows its last 45 snapshots)." })
   end
 
   -- mini price chart docked to the item tooltip: own timeframe, or off
-  local tcl = T.Text(panel, T.SIZE.body, "sub")
-  tcl:SetPoint("TOPLEFT", 0, -378); tcl:SetText("Tooltip chart")
-  local ttSeg = T.Segment(panel, {
+  local tcl = T.Text(left, T.SIZE.body, "sub")
+  tcl:SetPoint("TOPLEFT", 0, -400); tcl:SetText("Tooltip chart")
+  local ttSeg = T.Segment(left, {
     { key = "7",   label = "1W" },
     { key = "30",  label = "1M" },
     { key = "90",  label = "3M" },
@@ -2168,7 +1841,7 @@ function M.BuildSettings(panel)
   }, function(key)
     M.db.config.tooltipRange = key
   end)
-  ttSeg.frame:SetPoint("TOPLEFT", 150, -374)
+  ttSeg.frame:SetPoint("TOPLEFT", 150, -396)
   s.ttSeg = ttSeg
   if T.HelpTip then
     T.HelpTip(ttSeg.frame, "Tooltip chart", {
@@ -2179,8 +1852,8 @@ function M.BuildSettings(panel)
   -- ----- SYNC STATUS + LIVE LOG (left column, below the timeframes) --------
   -- the FAIR PRICE block lives in the right column now, where its demo graph
   -- gets real height; the status read-out is monitoring and sits fine here
-  local sdiv = T.Divider(panel)
-  sdiv:SetPoint("TOPLEFT", 0, -412); sdiv:SetPoint("TOPRIGHT", panel, "TOPLEFT", 430, -412)
+  local sdiv = T.Divider(left)
+  sdiv:SetPoint("TOPLEFT", 0, -434); sdiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -434)
 
   -- ----- COMMUNITY SYNC (right column) -------------------------------------
   local X = 464
@@ -2235,22 +1908,22 @@ function M.BuildSettings(panel)
 
   -- status + live log in the LEFT column (monitoring, below the timeframes);
   -- the stats anchor keeps the log below however many import-source lines show
-  local sh = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
-  sh:SetPoint("TOPLEFT", 0, -424); sh:SetText("SYNC \194\183 STATUS")
-  local stats = T.Text(panel, T.SIZE.body, "sub")
-  stats:SetPoint("TOPLEFT", 0, -444); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
+  local sh = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
+  sh:SetPoint("TOPLEFT", 0, -446); sh:SetText("SYNC \194\183 STATUS")
+  local stats = T.Text(left, T.SIZE.body, "sub")
+  stats:SetPoint("TOPLEFT", 0, -466); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
   stats:SetWidth(430); stats:SetSpacing(5); stats:SetWordWrap(true)
   s.stats = stats
   -- live log: every entry tagged PUSH (sent by you) / PULL (received or asked
   -- for) / WARN / INFO, oldest first, scrolls with the wheel and follows live
-  local ah = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
+  local ah = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
   ah:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -14); ah:SetText("SYNC \194\183 LIVE LOG")
-  local lh = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
+  local lh = T.Text(left, T.SIZE.tiny, "muted", T.FONT_MED)
   lh:SetPoint("LEFT", ah, "RIGHT", 10, 0)
   lh:SetText("PUSH = sent by you  \194\183  PULL = received  \194\183  wheel scrolls")
-  local box = T.Surface(panel, "bg0", "border")
+  local box = T.Surface(left, "bg0", "border")
   box:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", 0, -32)
-  box:SetPoint("BOTTOMRIGHT", panel, "BOTTOMLEFT", 430, 30)
+  box:SetPoint("BOTTOMRIGHT", left, "BOTTOMLEFT", 430, 30)
   local log = CreateFrame("ScrollingMessageFrame", nil, box)
   log:SetPoint("TOPLEFT", 7, -6); log:SetPoint("BOTTOMRIGHT", -7, 6)
   log:SetFont(T.FONT, T.SIZE.tiny, "")
@@ -2279,7 +1952,7 @@ function M.BuildSettings(panel)
     if panel:IsVisible() then log:AddMessage(syncLine(e)) end
   end
   panel:HookScript("OnShow", function() s.refillLog() end)
-  local clearBtn = T.Button(panel, "Clear view", 96, 20)
+  local clearBtn = T.Button(left, "Clear view", 96, 20)
   clearBtn:SetPoint("TOPRIGHT", box, "BOTTOMRIGHT", 0, -5)
   clearBtn:SetScript("OnClick", function() log:Clear() end)
 
@@ -2336,10 +2009,16 @@ end
 function M.RefreshSettings()
   local s = M.setUI
   if not s then return end
+  if s.left then
+    -- the log box grows with the window; below SET_LEFT_H the column scrolls
+    local vis = ((M.frame and M.frame:GetHeight()) or 560) - 134
+    s.left:SetHeight(math.max(SET_LEFT_H, math.floor(vis)))
+  end
   local cfg = M.db.config
   local mode = cfg.tooltipMode or "full"
   s.tipSeg:Select(mode)
   s.setPreview(mode)
+  if s.tcCb then s.tcCb:SetChecked(cfg.tooltipCraft ~= false) end
   s.mmCb:SetChecked(not cfg.minimapHide)
   s.autoCb:SetChecked(cfg.autoScan == true)
   if s.ahCb then s.ahCb:SetChecked(cfg.ahBook ~= false) end
@@ -2349,6 +2028,7 @@ function M.RefreshSettings()
   if s.mcCb then s.mcCb:SetChecked(cfg.modClicks ~= false) end
   if s.owCb then s.owCb:SetChecked(cfg.openWithAH == true) end
   if s.lgCb then s.lgCb:SetChecked(cfg.ledgerOff ~= true) end
+  if s.crCb then s.crCb:SetChecked(cfg.craftOff ~= true) end
   s.cb:SetChecked(cfg.share == true)
   s.trustSeg:Select(cfg.shareTrust == "guild" and "guild" or "all")
   if s.prevSeg then s.prevSeg:Select(cfg.previewRange or "all") end
@@ -2708,6 +2388,11 @@ local function CreateRankTab(panel, opts)
     av:HookScript("OnShow", agLabel)
     av:HookScript("OnHide", agLabel)
     agLabel()
+    -- the Start page's "all alerts" link lands here
+    M.OpenAlerts = function()
+      M.SelectTab(TAB.Watchlist)
+      av:Show()
+    end
     if T.HelpTip then
       T.HelpTip(ag, "Price alerts", {
         "All below/above price alerts of this realm with their CURRENT prices - the price turns green once it is at or under your buy limit, gold once it reached your sell limit.",
@@ -2910,7 +2595,7 @@ local function CreateRankTab(panel, opts)
       if M.ModSearchDown() then M.ItemShiftAction(btn.key); return end
       if mouse == "RightButton" then M.ToggleWatch(btn.key); st.Refresh()
       elseif btn.addable then M.ToggleWatch(btn.key); st.Refresh()
-      else M.SetChartKey(btn.key); M.SelectTab(TAB.Charts) end
+      else GoChart(btn.key) end
     end)
     -- drag a watchlist row onto a group header, one of its rows, or a drop
     -- chip (the chips appear while dragging - the search view has no headers).
@@ -3223,7 +2908,7 @@ function M.BuildWatch(panel)
     emptyText   = "Watchlist is empty - type a name above to add items",
   })
   M.RefreshWatch = st.Refresh
-  -- jump straight into the all-items browse (MARKET TODAY card, what's-new)
+  -- jump straight into the all-items browse (what's-new)
   M.OpenBrowse = function()
     st.showAll, st.showRemoved = true, nil
     M.SelectTab(TAB.Watchlist)   -- SelectTab refreshes the tab
@@ -3496,10 +3181,12 @@ function M.BuildTrades(panel)
     btn:EnableMouseWheel(true); btn:SetScript("OnMouseWheel", logWheel)
     btn:SetScript("OnEnter", function() if btn.key then ShowItemTip(btn.key) end end)
     btn:SetScript("OnLeave", HideTip)
-    btn:SetScript("OnClick", function()
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(_, mouse)
       if not btn.key then return end
+      if ItemMenuClick(mouse, btn.key) then return end
       if M.ModPostDown() then M.PostItemStats(btn.key); return end
-      if M.ModSearchDown() then M.ItemShiftAction(btn.key) else M.SetChartKey(btn.key); M.SelectTab(TAB.Charts) end
+      if M.ModSearchDown() then M.ItemShiftAction(btn.key) else GoChart(btn.key) end
     end)
     logRows[r] = btn
   end
@@ -3606,14 +3293,16 @@ function M.BuildTrades(panel)
     btn:EnableMouseWheel(true); btn:SetScript("OnMouseWheel", itemWheel)
     btn:SetScript("OnEnter", function() if btn.key then M.FillChartCard(itemCard, btn.key); ShowItemTip(btn.key) end end)
     btn:SetScript("OnLeave", HideTip)
-    btn:SetScript("OnClick", function()
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(_, mouse)
       -- Shift-click anywhere in By Item (group row OR an expanded transaction row)
       -- jumps to the full chart of that item; alt posts its price card;
-      -- plain click expands/collapses.
+      -- right-click opens the item menu; plain click expands/collapses.
+      if ItemMenuClick(mouse, btn.key) then return end
+      if mouse == "RightButton" then return end
       if M.ModPostDown() and btn.key then M.PostItemStats(btn.key); return end
       if M.ModSearchDown() and btn.key then
-        M.SetChartKey(btn.key)
-        M.SelectTab(TAB.Charts)
+        GoChart(btn.key)
         return
       end
       if btn.expandKey then
@@ -3942,6 +3631,43 @@ function M.BuildTrades(panel)
     buildItems(); st.FillItem()
   end
 
+  -- ----- jumps in from other pages (Nav.lua) ------------------------------
+  -- one item: By Item, searched by its name, its transactions unfolded
+  local function setSearch(txt)
+    txt = txt or ""
+    if search.edit:GetText() ~= txt then
+      search.edit:SetText(txt)          -- OnTextChanged sets st.search + refreshes
+    end
+    st.search = txt:lower()
+  end
+  function M.TradesFocus(key)
+    local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
+    local _, sk = nil, nil
+    if id and M.TradeEntryForID then _, sk = M.TradeEntryForID(id) end
+    st.view = "item"; M.tradeView = "item"
+    if M.db and M.db.config then M.db.config.tradeView = "item" end
+    st.expanded = {}
+    if sk then st.expanded[sk] = true end
+    setSearch(id and M.ItemName(tostring(id)) or "")
+    FauxScrollFrame_SetOffset(itemScroll, 0)
+    local sb = _G["MidasTradeItemScrollScrollBar"]
+    if sb then sb:SetValue(0) end
+    if id then M.FillChartCard(itemCard, tostring(id)) end
+  end
+  -- what the Back pill needs to come back here
+  function M.TradesState()
+    local ex = {}
+    for k, v in pairs(st.expanded) do ex[k] = v end
+    return { view = st.view, search = search.edit:GetText() or "", expanded = ex }
+  end
+  function M.TradesRestore(view, txt, expanded)
+    st.view = view or st.view; M.tradeView = st.view
+    if M.db and M.db.config then M.db.config.tradeView = st.view end
+    st.expanded = {}
+    for k, v in pairs(expanded or {}) do st.expanded[k] = v end
+    setSearch(txt)
+  end
+
   function st.Refresh()
     -- holdings: value change of the item stock over the window - today's
     -- holdings value vs the frozen snapshot ~60 days back. The pair NET P/L +
@@ -4196,17 +3922,19 @@ function M.BuildWealth(panel)
         C.sub, tp >= 0 and C.green or C.red)
     end
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine("Click: holding history \194\183 shift: market chart \194\183 alt: post to chat", C.muted[1], C.muted[2], C.muted[3])
+    GameTooltip:AddLine("Click: holding history \194\183 shift: market chart \194\183 right-click: all pages", C.muted[1], C.muted[2], C.muted[3])
     GameTooltip:Show()
   end
   local function wireMini(btn)
     btn:SetScript("OnEnter", miniTip)
     btn:SetScript("OnLeave", HideTip)
-    btn:SetScript("OnClick", function(self)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(self, mouse)
       local e = self.e; if not e then return end
       HideTip()
+      if ItemMenuClick(mouse, tostring(e.id)) then return end
       if M.ModPostDown() then M.PostItemStats(tostring(e.id)); return end
-      if M.ModSearchDown() then M.SetChartKey(tostring(e.id)); M.SelectTab(TAB.Charts); return end
+      if M.ModSearchDown() then GoChart(tostring(e.id)); return end
       if M.ShowItemWorth then M.ShowItemWorth(tostring(e.id), e.qH or 0) end
     end)
   end
@@ -4535,13 +4263,16 @@ function M.BuildWealth(panel)
     btn:EnableMouseWheel(true); btn:SetScript("OnMouseWheel", ivWheel)
     btn:SetScript("OnEnter", function() if btn.key then ShowItemTip(btn.key) end end)
     btn:SetScript("OnLeave", HideTip)
-    btn:SetScript("OnClick", function()
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(_, mouse)
       if not btn.key then return end
       -- drill-down chain: click = this item's holding-value history;
-      -- Shift-click = the full market chart; alt posts its price card
+      -- Shift-click = the full market chart; alt posts its price card;
+      -- right-click = the item menu with every page
+      if ItemMenuClick(mouse, btn.key) then return end
       if M.ModPostDown() then M.PostItemStats(btn.key); return end
       if M.ModSearchDown() then
-        M.SetChartKey(btn.key); M.SelectTab(TAB.Charts)
+        GoChart(btn.key)
       elseif M.ShowItemWorth then
         HideTip(); M.ShowItemWorth(btn.key, btn.qty or 0, "this character")
       end
@@ -4815,11 +4546,13 @@ function M.BuildWealth(panel)
     local ihl = r.btn:CreateTexture(nil, "HIGHLIGHT"); ihl:SetAllPoints(); ihl:SetColorTexture(1, 1, 1, 0.04)
     r.btn:SetScript("OnEnter", function(self) if self.key then ShowItemTip(self.key) end end)
     r.btn:SetScript("OnLeave", HideTip)
-    r.btn:SetScript("OnClick", function(self)
+    r.btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    r.btn:SetScript("OnClick", function(self, mouse)
       if not self.key then return end
+      if ItemMenuClick(mouse, self.key) then return end
       if M.ModPostDown() then M.PostItemStats(self.key); return end
       if M.ModSearchDown() then
-        M.SetChartKey(self.key); M.SelectTab(TAB.Charts)
+        GoChart(self.key)
       elseif M.ShowItemWorth then
         HideTip(); M.ShowItemWorth(self.key, self.qty or 0)
       end
@@ -4849,14 +4582,11 @@ function M.BuildWealth(panel)
   wvBack:SetPoint("TOPRIGHT", -2, -2)
   wvBack:SetScript("OnClick", function() M.NWNavBack(wv) end)
   if T.HelpTip then T.HelpTip(wvBack, "Back", { "One step back in the drill-down - it retraces exactly the path you came in on." }) end
-  local wvChart = T.Button(wv, "Open market chart", 150, 22)
-  wvChart:SetPoint("TOPRIGHT", wvBack, "TOPLEFT", -8, 0)
-  wvChart:SetScript("OnClick", function()
-    if wv.key then M.SetChartKey(wv.key); M.SelectTab(TAB.Charts) end
-  end)
-  if T.HelpTip then
-    T.HelpTip(wvChart, "Open market chart", {
-      "Jumps to this item's full market price chart in the Charts tab (market view, not your holding)." })
+  -- the item's other pages (market chart, craft tree, offer book, trades) as
+  -- chips left of the back button; they grow leftwards (Nav.lua)
+  if M.LinkBar then
+    wv.links = M.LinkBar(wv, { except = "holding", watch = true })
+    wv.links:SetPoint("TOPRIGHT", wvBack, "TOPLEFT", -10, -1)
   end
   wv.chart = CreateFrame("Frame", nil, wv)
   wv.chart:SetPoint("TOPLEFT", 0, -52)
@@ -4971,11 +4701,13 @@ function M.BuildWealth(panel)
       elseif self.key then ShowItemTip(self.key) end
     end)
     btn:SetScript("OnLeave", HideTip)
-    btn:SetScript("OnClick", function(self)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(self, mouse)
       local e = self.e; if not e then return end
       HideTip()
+      if ItemMenuClick(mouse, tostring(e.id)) then return end
       if M.ModPostDown() then M.PostItemStats(tostring(e.id)); return end
-      if M.ModSearchDown() then M.SetChartKey(tostring(e.id)); M.SelectTab(TAB.Charts); return end
+      if M.ModSearchDown() then GoChart(tostring(e.id)); return end
       if M.ShowItemWorth then M.ShowItemWorth(tostring(e.id), e.qH or 0) end
     end)
     mo.rows[r] = btn
@@ -5434,6 +5166,7 @@ function M.FillItemWorth()
   local qc = M.ItemQualityColor(key)
   wv.title:SetText(M.ItemName(key))
   wv.title:SetTextColor(qc.r, qc.g, qc.b)
+  if wv.links then wv.links:SetItem(key) end
   local unit = M.ItemValue and M.ItemValue(key) or 0
   -- the chart re-anchors on the account-wide daily snapshots (which INCLUDE
   -- your own auctions), so the header must count the same way -- a class-list
@@ -5722,8 +5455,10 @@ function M.BuildCharts(panel)
     b.fs:SetPoint("LEFT", 6, 0); b.fs:SetWidth(172); b.fs:SetJustifyH("LEFT")
     b:SetScript("OnEnter", function() if b.key then ShowItemTip(b.key) end end)
     b:SetScript("OnLeave", HideTip)
-    b:SetScript("OnClick", function()
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:SetScript("OnClick", function(_, mouse)
       if not b.key then return end
+      if ItemMenuClick(mouse, b.key) then return end
       if M.ModPostDown() then M.PostItemStats(b.key); return end
       if M.ModSearchDown() then M.ItemShiftAction(b.key); return end
       M.SetChartKey(b.key); M.RefreshCharts()
@@ -5756,21 +5491,33 @@ function M.BuildCharts(panel)
   title:SetPoint("TOPLEFT", 234, -8); title:SetPoint("TOPRIGHT", -12, -8); title:SetJustifyH("LEFT")
   M.chartTitle = title
   -- the header (icon + name) is a live item link: hover shows the in-game
-  -- item tooltip, shift-click runs the AH search, alt-click posts the stats.
+  -- item tooltip, a click (or right-click) opens the item menu with every
+  -- page, shift-click runs the AH search, alt-click posts the stats.
   -- Width follows the rendered name (set in RefreshCharts).
   local titleBtn = CreateFrame("Button", nil, panel)
   titleBtn:SetPoint("TOPLEFT", 206, -4); titleBtn:SetSize(150, 26)
   titleBtn:SetFrameLevel(panel:GetFrameLevel() + 10)
+  titleBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   titleBtn:SetScript("OnEnter", function() if M.chartKey then ShowItemTip(M.chartKey) end end)
   titleBtn:SetScript("OnLeave", HideTip)
   titleBtn:SetScript("OnClick", function()
     if not M.chartKey then return end
     if M.ModPostDown() then M.PostItemStats(M.chartKey)
-    elseif M.ModSearchDown() then M.ItemShiftAction(M.chartKey) end
+    elseif M.ModSearchDown() then M.ItemShiftAction(M.chartKey)
+    else HideTip(); if M.ItemMenu then M.ItemMenu(M.chartKey) end end
   end)
   M.chartTitleBtn = titleBtn
+  -- the item's other pages, right next to its name: craft tree, your trades,
+  -- your stock and the watchlist toggle (the offer book has its own switch
+  -- above the chart). Placed behind the measured name in RefreshCharts.
+  if M.LinkBar then
+    M.chartLinks = M.LinkBar(panel, { except = "chart", skip = { book = true }, watch = true })
+    M.chartLinks:SetFrameLevel(panel:GetFrameLevel() + 12)
+    M.chartLinks:Hide()
+  end
+  -- category / avg qty / days: quiet, right-aligned on the "your record" line
   M.chartMeta = T.Text(panel, T.SIZE.small, "muted")
-  M.chartMeta:SetPoint("TOPRIGHT", -12, -14); M.chartMeta:SetJustifyH("RIGHT")
+  M.chartMeta:SetPoint("TOPRIGHT", -12, -85); M.chartMeta:SetJustifyH("RIGHT")
   -- Header data, in three lines with a clear hierarchy instead of a KPI grid:
   -- a big colored SIGNAL (the one thing to see), one calm market fact line,
   -- and one dimmed personal line that only exists when there is history.
@@ -5781,7 +5528,9 @@ function M.BuildCharts(panel)
   M.chartLine1:SetPoint("TOPLEFT", 206, -64); M.chartLine1:SetPoint("TOPRIGHT", -12, -64)
   M.chartLine1:SetJustifyH("LEFT")
   M.chartLine2 = T.Text(panel, T.SIZE.small, "sub")
-  M.chartLine2:SetPoint("TOPLEFT", 206, -84); M.chartLine2:SetPoint("TOPRIGHT", -12, -84)
+  -- ends where the category / qty / days read-out on its right begins
+  -- (that read-out sizes to its text; RefreshCharts lets it yield)
+  M.chartLine2:SetPoint("TOPLEFT", 206, -84); M.chartLine2:SetPoint("TOPRIGHT", M.chartMeta, "TOPLEFT", -16, 1)
   M.chartLine2:SetJustifyH("LEFT")
   -- invisible hover strips: FontStrings take no mouse, so each header line
   -- gets a thin button carrying its explanation (full math lives in Help)
@@ -5803,12 +5552,21 @@ function M.BuildCharts(panel)
     "The maths:  B = sum(w\194\183low) / sum(w) over the last 14 daily lows, w = 0.5^(age/half-life) - the half-life is yours to set (Settings > FAIR PRICE, default 7d); days with low > 1.5\194\183median are trimmed as no-demand spikes, and one-scan dips under median/1.5 that were gone by the day's last scan.",
     "P(sell at r) = sigmoid(a - 3\194\183ln(r/r0)) with r = price/floor7, fitted from your sold/expired record; r* is the r where P = 50%.",
     "Fair = B \194\183 clamp(floor7\194\183r*/B, 1, 1.10) - at most +10% over the base, and never past the prices your sales really cleared at.",
+    "Crafted - what it costs to make from its materials at the newest prices (each material bought or made, whichever is cheaper); the % is the distance to Current. Hover it for a peek at the tree, click to open the Crafting tab.",
     "Quick-sell - at/just under the current floor: sells near-certainly, with less margin.",
     "Sells - how fast it moves: your realized sales per day and the market's liquidity class.",
     "How these are computed, with examples: Help tab." })
-  hoverStrip(-84, 14, "Your record", {
+  -- the record line opens this item's trades (By Item, unfolded); it stops
+  -- short of the category/qty/days read-out on the right
+  local recStrip = hoverStrip(-84, 14, "Your record", {
     "Built purely from the AH mail you collect: auctions sold vs returned (last 75 days), the sell-through rating, your average sale and purchase price per unit, and the realized net after the AH cut.",
-    "The same numbers, per transaction, live in the Trades tab." })
+    "Click: every transaction of this item in the Trades tab." }, -240)
+  recStrip:SetScript("OnClick", function()
+    if not (M.chartKey and M.Go and M.ItemLinkInfo) then return end
+    if M.ItemLinkInfo(M.chartKey).trades then M.Go("trades", M.chartKey) end
+  end)
+  local recHl = recStrip:CreateTexture(nil, "HIGHLIGHT")
+  recHl:SetAllPoints(); recHl:SetColorTexture(C.green[1], C.green[2], C.green[3], 0.06)
   -- "why these numbers?" opens the Help-tab story rebuilt from THIS item's
   -- real data (its scan days, its own odds curve)
   local whyBtn = CreateFrame("Button", nil, panel)
@@ -5826,6 +5584,29 @@ function M.BuildCharts(panel)
     T.HelpTip(whyBtn, "Why these numbers?", {
       "Opens the Fair and odds explanation rebuilt from THIS item's own data: its real scan days with the trimmed ones marked, and its own sell-odds curve with Fair and the current price on it." }, "ANCHOR_CURSOR")
   end
+  -- the craft tree is a chip next to the item name now (M.chartLinks). The
+  -- "Crafted" value in the market line stays a live link too: an underline
+  -- shows it, hover peeks at the tree, click opens it
+  local chot = CreateFrame("Button", nil, panel)
+  chot:SetHeight(18)
+  chot:SetFrameLevel(panel:GetFrameLevel() + 12)
+  local cul = chot:CreateTexture(nil, "OVERLAY")
+  cul:SetColorTexture(C.mint[1], C.mint[2], C.mint[3], 0.55); cul:SetHeight(1)
+  cul:SetPoint("BOTTOMLEFT", 4, 2); cul:SetPoint("BOTTOMRIGHT", -4, 2)
+  chot:SetScript("OnEnter", function(self)
+    cul:SetColorTexture(C.mint[1], C.mint[2], C.mint[3], 1)
+    if M.chartKey and M.CraftPeek then M.CraftPeek(self, M.BaseID(M.chartKey)) end
+  end)
+  chot:SetScript("OnLeave", function()
+    cul:SetColorTexture(C.mint[1], C.mint[2], C.mint[3], 0.55)
+    if M.HideCraftPeek then M.HideCraftPeek() end
+  end)
+  chot:SetScript("OnClick", function()
+    if M.HideCraftPeek then M.HideCraftPeek() end
+    if M.chartKey and M.Go then M.Go("tree", M.chartKey) end
+  end)
+  chot:Hide()
+  M.chartCraftHot = chot
 
   local wy = CreateFrame("Frame", nil, panel)
   wy:SetAllPoints()
@@ -5995,10 +5776,12 @@ function M.BuildCharts(panel)
   dv.titleBtn:SetFrameLevel(dv:GetFrameLevel() + 5)
   dv.titleBtn:SetScript("OnEnter", function() if dv.key then ShowItemTip(dv.key) end end)
   dv.titleBtn:SetScript("OnLeave", HideTip)
+  dv.titleBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   dv.titleBtn:SetScript("OnClick", function()
     if not dv.key then return end
     if M.ModPostDown() then M.PostItemStats(dv.key)
-    elseif M.ModSearchDown() then M.ItemShiftAction(dv.key) end
+    elseif M.ModSearchDown() then M.ItemShiftAction(dv.key)
+    else HideTip(); if M.ItemMenu then M.ItemMenu(dv.key) end end
   end)
   dv.sub = T.Text(dv, T.SIZE.small, "sub")
   dv.sub:SetPoint("TOPLEFT", 2, -28); dv.sub:SetPoint("TOPRIGHT", -110, -28)
@@ -6021,6 +5804,13 @@ function M.BuildCharts(panel)
     T.HelpTip(dvSplit, "Split view", {
       "Shows the price chart on the left and a reduced offer book (the supply ladder) on the right.",
       "Midas remembers the choice." }, "ANCHOR_CURSOR")
+  end
+  -- the item's other pages as chips, growing leftwards from the buttons
+  -- (full view only: in split view the chart header above carries them)
+  if M.LinkBar then
+    dv.links = M.LinkBar(dv, { except = "book", watch = true })
+    dv.links:SetPoint("TOPRIGHT", dvSplit, "TOPLEFT", -10, -1)
+    dv.links:SetFrameLevel(dv:GetFrameLevel() + 6)
   end
   -- Offer book, designed for the eye: ONE question per area.
   -- Left, the ladder (elastic, fills the window): cheapest ask on top, one
@@ -6229,6 +6019,15 @@ function M.BuildCharts(panel)
     local icon = M.GetItemIcon and M.GetItemIcon((M.BaseID and M.BaseID(key)) or key)
     dv.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     dv.titleBtn:SetWidth(32 + (dv.title:GetStringWidth() or 120))
+    if dv.links then
+      if M.db and M.db.config and M.db.config.depthSplit then
+        dv.links:Hide()
+      else
+        -- the room between the name and the buttons on the right
+        local room = (dv:GetWidth() or 0) - 2 - 88 - 6 - 88 - 10 - (28 + (dv.title:GetStringWidth() or 120) + 20)
+        dv.links:SetItem(key, math.max(80, (room > 0) and room or 420))
+      end
+    end
     for _, row in ipairs(dv.rows) do
       row:Hide(); row.bar:Hide(); row.own:Hide(); row.ownLine:Hide(); row.ownLbl:Hide(); row.ghost:Hide()
       row.price:SetText(""); row.mark:SetText(""); row.qty:SetText("")
@@ -6855,11 +6654,17 @@ function M.BuildLedger(panel)
     btn:EnableMouseWheel(true); btn:SetScript("OnMouseWheel", wheel)
     btn:SetScript("OnEnter", function() if btn.itemKey then ShowItemTip(btn.itemKey) end end)
     btn:SetScript("OnLeave", HideTip)
-    btn:SetScript("OnClick", function()
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(_, mouse)
       local d = btn.data
       if not d then return end
       if d.itemKey then
-        M.SetChartKey(d.itemKey); M.SelectTab(TAB.Charts)
+        if ItemMenuClick(mouse, d.itemKey) then return end
+        if M.ModPostDown() then M.PostItemStats(d.itemKey); return end
+        if M.ModSearchDown() then M.ItemShiftAction(d.itemKey); return end
+        GoChart(d.itemKey)
+      elseif mouse == "RightButton" then
+        return
       elseif d.focus then
         lg.focus = d.focus; M.RefreshLedger()
       end
@@ -7016,7 +6821,7 @@ function M.BuildHelp(panel)
   local scroll = CreateFrame("ScrollFrame", "MidasHelpScroll", panel, "UIPanelScrollFrameTemplate")
   scroll:SetPoint("TOPLEFT", 0, 0); scroll:SetPoint("BOTTOMRIGHT", -24, 0)
   local content = CreateFrame("Frame", nil, scroll)
-  content:SetSize(880, 780)   -- room for section 4 (Discord) under the glossary
+  content:SetSize(880, 800)   -- room for section 4 (Discord) under the glossary
   scroll:SetScrollChild(content)
   T.StyleScrollbar("MidasHelpScroll")
 
@@ -7081,6 +6886,9 @@ function M.BuildHelp(panel)
     { "vs Fair", "current price vs Fair; the BUY/SELL signal fires at +/-15%." },
     { "Ledger (beta)", "every gold + item flow since install; gold counts when it lands in your bags (Trades dates sales by their mail)." },
     { "Gold timer", "right-click the minimap coin: gold + loot value from that moment on, per hour; hover it for the sources." },
+    { "Crafting (beta)", "what a recipe item costs from its materials, now (gold) and at Fair (purple), buy or make per level; also disenchant value." },
+    { "Item pages", "right-click any item: chart, tree, offer book, trades, stock." },
+    { "Back", "the header pill returns from a jump to another tab." },
   }
   for i, e in ipairs(GL) do
     local col = (i - 1) % 2
@@ -7208,8 +7016,27 @@ function M.RefreshCharts()
     local icon = M.GetItemIcon and M.GetItemIcon((M.BaseID and M.BaseID(key)) or key)
     M.chartTitleIcon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     M.chartTitleIcon:Show()
+    -- name, then the link chips right behind it: the name keeps its full
+    -- width unless name + chips overflow the row (then it ellipsizes)
+    local cpanel = M.panels[TAB.Charts]
+    local avail = ((cpanel and cpanel:GetWidth()) or 0) - 234 - 12
+    if avail < 300 then avail = 952 - 234 - 12 end
+    M.chartTitle:ClearAllPoints()
+    M.chartTitle:SetPoint("TOPLEFT", 234, -8)
+    M.chartTitle:SetWidth(0)
+    local nameW = math.floor((M.chartTitle:GetStringWidth() or 120) + 0.5)
+    local chipsW = 0
+    if M.chartLinks then
+      chipsW = M.chartLinks:SetItem(key, math.max(140, avail - math.min(nameW, 240) - 16))
+    end
+    local titleW = math.max(80, math.min(nameW, avail - ((chipsW > 0) and (chipsW + 16) or 0)))
+    M.chartTitle:SetWidth(titleW)
+    if M.chartLinks then
+      M.chartLinks:ClearAllPoints()
+      M.chartLinks:SetPoint("TOPLEFT", cpanel, "TOPLEFT", 234 + titleW + 16, -6)
+    end
     if M.chartTitleBtn then
-      M.chartTitleBtn:SetWidth(34 + (M.chartTitle:GetStringWidth() or 120))
+      M.chartTitleBtn:SetWidth(34 + titleW)
       M.chartTitleBtn:Show()
     end
     M.chartMeta:SetText(m and string.format("%s  \194\183  avg qty %d  \194\183  %d days",
@@ -7234,14 +7061,44 @@ function M.RefreshCharts()
       if m.oddsAtFair then fairTxt = fairTxt .. MUT .. string.format(" ~%.0f%%|r", m.oddsAtFair * 100) end
       if m.fairCapped then fairTxt = fairTxt .. MUT .. " oversupplied|r" end
       local sellsTxt = m.speed and string.format("~%.1f/day \194\183 %s", m.speed, m.liqLabel or "?") or (m.liqLabel or "?")
-      M.chartLine1:SetText(
-        MUT .. (gone and "Last seen|r  " or "Current|r  ") .. M.MoneyPlain(m.cur) ..
-        MUT .. "      Fair|r  " .. fairTxt ..
-        MUT .. "      Quick-sell|r  " .. M.MoneyPlain(m.quick) ..
-        MUT .. "      Sells|r  " .. sellsTxt)
+      local pre = MUT .. (gone and "Last seen|r  " or "Current|r  ") .. M.MoneyPlain(m.cur) ..
+        MUT .. "      Fair|r  " .. fairTxt .. "      "
+      -- what it costs to make, next to what it costs to buy (Crafting tab)
+      local craftTxt = ""
+      local cid = M.BaseID and M.BaseID(key)
+      local cc = cid and M.CraftCost and (not M.CraftingOn or M.CraftingOn()) and M.CraftCost(cid)
+      if cc and cc.now then
+        local mint = string.format("|cff%02x%02x%02x", C.mint[1] * 255, C.mint[2] * 255, C.mint[3] * 255)
+        craftTxt = mint .. "Crafted|r  " .. M.MoneyPlain(cc.now)
+        local ref = (not gone and m.cur and m.cur > 0) and m.cur or m.fair
+        if ref and ref > 0 then
+          local d = cc.now / ref - 1
+          craftTxt = craftTxt .. ((d <= 0) and GRN or RED) .. string.format(" %+.0f%%", d * 100) .. "|r"
+        end
+        if not cc.nowOk then craftTxt = craftTxt .. MUT .. " partial|r" end
+        craftTxt = craftTxt .. "      "
+      end
+      local post = MUT .. "Quick-sell|r  " .. M.MoneyPlain(m.quick) .. MUT .. "      Sells|r  " .. sellsTxt
+      -- measure where the Crafted value sits, so its hover zone covers just it
+      M.chartLine1:SetText(pre)
+      local w0 = M.chartLine1:GetStringWidth() or 0
+      M.chartLine1:SetText(pre .. craftTxt)
+      local w1 = M.chartLine1:GetStringWidth() or 0
+      M.chartLine1:SetText(pre .. craftTxt .. post)
+      if M.chartCraftHot then
+        if craftTxt ~= "" then
+          M.chartCraftHot:ClearAllPoints()
+          M.chartCraftHot:SetPoint("TOPLEFT", M.panels[TAB.Charts], "TOPLEFT", 206 + w0 - 4, -63)
+          M.chartCraftHot:SetWidth(math.max(40, w1 - w0 - 16))
+          M.chartCraftHot:Show()
+        else
+          M.chartCraftHot:Hide()
+        end
+      end
     else
       M.chartSignal:SetText(MUT .. "no price data yet|r")
       M.chartLine1:SetText("")
+      if M.chartCraftHot then M.chartCraftHot:Hide() end
     end
     -- 3) your own record, dimmed -- and simply absent when there is none
     local sid = (M.BaseID and M.BaseID(key) and tostring(M.BaseID(key))) or key
@@ -7273,6 +7130,15 @@ function M.RefreshCharts()
     else
       M.chartLine2:SetText("")
     end
+    -- the quiet category / qty / days read-out gives way when your own
+    -- record needs the room (narrow windows): the record matters more
+    do
+      local pw = ((M.frame and M.frame:GetWidth()) or 980) - 28
+      local need = M.chartLine2:GetStringWidth() or 0
+      if need > 0 and need > pw - 206 - 12 - 16 - (M.chartMeta:GetStringWidth() or 0) then
+        M.chartMeta:SetText("")
+      end
+    end
     -- alert fields follow the item (shown in the Charts-tab button row)
     if M.alertUI then
       M.alertUI.bar:Show()
@@ -7296,6 +7162,10 @@ function M.RefreshCharts()
     M.chartTitle:SetTextColor(T.Unpack(C.sub))
     if M.chartTitleIcon then M.chartTitleIcon:Hide() end
     if M.chartTitleBtn then M.chartTitleBtn:Hide() end
+    if M.chartLinks then M.chartLinks:SetItem(nil) end
+    if M.chartCraftHot then M.chartCraftHot:Hide() end
+    M.chartTitle:ClearAllPoints()
+    M.chartTitle:SetPoint("TOPLEFT", 234, -8); M.chartTitle:SetPoint("TOPRIGHT", -12, -8)
     M.chartMeta:SetText("")
     M.chartSignal:SetText(""); M.chartLine1:SetText(""); M.chartLine2:SetText("")
   end
@@ -7427,9 +7297,8 @@ M.NEWS = {
     id = "browse-1.2.8", version = "1.2.8", title = "Browse the whole archive",
     text = "The Watchlist tab's new \"all items\" view lists EVERY item your scans and "
       .. "syncs have touched - sortable by any column, searchable, right-click to watch "
-      .. "(a gold edge marks watched ones). The MARKET TODAY card on the start page "
-      .. "jumps straight into it, and your column sort now survives reloads.",
-    where = "Watchlist tab  \226\128\186  browse all items   \194\183   Start  \226\128\186  MARKET TODAY",
+      .. "(a gold edge marks watched ones), and your column sort now survives reloads.",
+    where = "Watchlist tab  \226\128\186  browse all items",
     preview = "watchlist",
     open = function()
       M.EnsureUI()
@@ -7513,6 +7382,51 @@ M.NEWS = {
     where = "minimap coin  \226\128\186  right-click   \194\183   /midas timer   \194\183   scan: shift + right-click",
     preview = "goldtimer", showLabel = "Open timer",
     open = function() if M.GoldTimerToggle then M.GoldTimerToggle(false) end end,
+  },
+  {
+    id = "crafting-1.2.20", version = "1.2.20", title = "Crafting tree (beta)",
+    text = "A new tab draws every recipe as a tech tree in its own scrollable field: the item on the right, its "
+      .. "materials fanning out to the left down to the raw goods, every step priced now (gold) and at Fair "
+      .. "(purple) with what making it saves over buying it. Charts and item tooltips show the craft cost too. "
+      .. "It is in beta: the \"Enable crafting\" switch in the tab turns all of it off.",
+    where = "Crafting (beta) tab   \194\183   Top crafts   \194\183   Charts  \226\128\186  Craft tree chip   \194\183   /midas tree <item>",
+    preview = "crafting",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Crafting)
+    end,
+  },
+  {
+    id = "links-1.2.20", version = "1.2.20", title = "Every item, every page",
+    text = "Items now link to everything Midas knows about them. Right-click an item anywhere - in a list, "
+      .. "on a card, in the tree - for its chart, craft tree, offer book, your trades and your stock, or to "
+      .. "watch it. Chips next to an item's name jump there in one click, and after a jump the Back pill "
+      .. "in the window header returns to where you came from.",
+    where = "right-click any item   \194\183   chips next to a name   \194\183   \226\128\185 Back in the header",
+    preview = "links",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      local key = demoItem()
+      if key then M.SetChartKey(key) end
+      M.SelectTab(TAB.Charts)
+    end,
+  },
+  {
+    id = "home-1.2.20", version = "1.2.20", title = "A new start page",
+    text = "The Start tab now answers four questions at a glance: what your net worth did this week and why "
+      .. "(market prices, stock, gold), what your trading earned, which watched items are cheap or ready to "
+      .. "sell - your watchlist as a tinted grid of item tiles - and what to do next: fresh price alerts, "
+      .. "listings a newer scan undercuts, and sell and buy ideas ranked by the gold they move. The switch "
+      .. "next to the tabs brings back the classic start page.",
+    where = "Start tab   \194\183   Dashboard | Classic next to the tabs",
+    preview = "home",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Start)
+    end,
   },
 }
 
@@ -7927,6 +7841,112 @@ local function drawGoldTimerPreview(f)
   end
 end
 
+-- tiny crafting tree: three materials feed one product, each priced now (gold)
+-- over Fair (purple); regions only, like every preview
+local function drawCraftingPreview(f)
+  local TL, PU, BL = C.teal or C.accent, C.purple, C.borderlt
+  local function box(x, y, w, h, q, now, fair, border)
+    local b = f:CreateTexture(nil, "BORDER")
+    b:SetColorTexture(border[1], border[2], border[3], 1)
+    b:SetPoint("TOPLEFT", x, y); b:SetSize(w, h)
+    local fill = f:CreateTexture(nil, "ARTWORK")
+    fill:SetColorTexture(C.bg1[1], C.bg1[2], C.bg1[3], 1)
+    fill:SetPoint("TOPLEFT", b, "TOPLEFT", 1, -1); fill:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
+    local ic = f:CreateTexture(nil, "OVERLAY")
+    ic:SetColorTexture(q[1], q[2], q[3], 1)
+    ic:SetPoint("TOPLEFT", b, "TOPLEFT", 4, -4); ic:SetSize(h - 8, h - 8)
+    local a = T.Text(f, T.SIZE.tiny, nil, T.FONT_MED); a:SetTextColor(TL[1], TL[2], TL[3])
+    a:SetPoint("TOPLEFT", ic, "TOPRIGHT", 4, 1); a:SetText(now)
+    local p = T.Text(f, T.SIZE.tiny, nil, T.FONT_MED); p:SetTextColor(PU[1], PU[2], PU[3])
+    p:SetPoint("TOPLEFT", ic, "TOPRIGHT", 4, -10); p:SetText(fair)
+  end
+  local function seg(x, y, w, h)
+    local t = f:CreateTexture(nil, "BORDER")
+    t:SetColorTexture(BL[1], BL[2], BL[3], 1)
+    t:SetPoint("TOPLEFT", x, y); t:SetSize(w, h)
+  end
+  local mats = { { -12, { 0.12, 1, 0 }, "1g 20s", "1g 10s" }, { -54, { 1, 1, 1 }, "4g 05s", "4g 30s" },
+                 { -96, { 0.12, 1, 0 }, "60s", "55s" } }
+  for _, m in ipairs(mats) do
+    box(6, m[1], 70, 30, m[2], m[3], m[4], C.border)
+    seg(76, m[1] - 15, 14, 2)
+  end
+  seg(90, -27, 2, 84)
+  seg(90, -68, 18, 2)
+  box(108, -50, 68, 38, { 0, 0.44, 0.87 }, "9g 40s", "9g 10s", C.accent)
+  local tag = T.Text(f, T.SIZE.tiny, "green", T.FONT_SEMI)
+  tag:SetPoint("TOPRIGHT", -6, -92); tag:SetText("+24%")
+end
+
+-- tiny item-links illustration: the Back pill, a name with its page chips and
+-- the right-click menu under it; regions only, like every preview
+-- tiny start-page illustration: the watchlist map's tinted tiles + a move
+local function drawHomePreview(f)
+  local G, R, N = C.green, C.red, C.bg2
+  local tint = { G, G, N, N, R, R, G, N, N, N, R, N, N, G, N, N, N, R }
+  for i, c in ipairs(tint) do
+    local col, row = (i - 1) % 6, math.floor((i - 1) / 6)
+    local t = f:CreateTexture(nil, "BORDER")
+    t:SetColorTexture(c[1], c[2], c[3], (c == N) and 1 or 0.5)
+    t:SetPoint("TOPLEFT", 14 + col * 26, -12 - row * 26); t:SetSize(22, 22)
+    local ic = f:CreateTexture(nil, "ARTWORK")
+    ic:SetColorTexture(C.sub[1], C.sub[2], C.sub[3], 0.35)
+    ic:SetPoint("TOP", t, "TOP", 0, -3); ic:SetSize(12, 12)
+  end
+  local pill = f:CreateTexture(nil, "BORDER")
+  pill:SetColorTexture(C.red[1], C.red[2], C.red[3], 0.18)
+  pill:SetPoint("TOPLEFT", 14, -96); pill:SetSize(34, 14)
+  local pv = T.Text(f, T.SIZE.tiny, "red", T.FONT_MED); pv:SetPoint("CENTER", pill, "CENTER", 0, 0); pv:SetText("SELL")
+  local nm = f:CreateTexture(nil, "ARTWORK")
+  nm:SetColorTexture(C.sub[1], C.sub[2], C.sub[3], 0.5)
+  nm:SetPoint("LEFT", pill, "RIGHT", 8, 0); nm:SetSize(64, 6)
+  local val = T.Text(f, T.SIZE.tiny, "accent", T.FONT_SEMI)
+  val:SetPoint("TOPRIGHT", f, "TOPLEFT", 166, -98); val:SetJustifyH("RIGHT"); val:SetText("\226\137\164 31g")
+  local TL = C.teal or C.accent
+  local fs = T.Text(f, T.SIZE.tiny, "text", T.FONT_SEMI); fs:SetTextColor(TL[1], TL[2], TL[3])
+  fs:SetPoint("TOPLEFT", 14, -124); fs:SetText("what to do next, at a glance")
+end
+
+local function drawLinksPreview(f)
+  local function pill(x, y, w, col, label, fillA)
+    local b = f:CreateTexture(nil, "BORDER")
+    b:SetColorTexture(col[1], col[2], col[3], 0.75)
+    b:SetPoint("TOPLEFT", x, y); b:SetSize(w, 16)
+    local fill = f:CreateTexture(nil, "ARTWORK")
+    fill:SetColorTexture(C.bg1[1], C.bg1[2], C.bg1[3], 1)
+    fill:SetPoint("TOPLEFT", b, "TOPLEFT", 1, -1); fill:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
+    local tint = f:CreateTexture(nil, "OVERLAY")
+    tint:SetColorTexture(col[1], col[2], col[3], fillA or 0.12)
+    tint:SetPoint("TOPLEFT", b, "TOPLEFT", 1, -1); tint:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
+    local t = T.Text(f, T.SIZE.tiny, "text", T.FONT_MED)
+    t:SetPoint("LEFT", b, "LEFT", 6, 0); t:SetText(label)
+  end
+  pill(4, -6, 88, C.accent, "\226\128\185 Back to Trades", 0.18)
+  local nm = T.Text(f, T.SIZE.small, "text", T.FONT_SEMI)
+  nm:SetPoint("TOPLEFT", 6, -32); nm:SetText("Arcanite Bar")
+  nm:SetTextColor(0.64, 0.21, 0.93)
+  pill(4, -50, 70, C.mint, "Craft tree \226\128\186")
+  pill(78, -50, 64, C.green, "Trades \226\128\186")
+  pill(146, -50, 32, C.accent, "+")
+  -- the right-click menu
+  local mb = f:CreateTexture(nil, "BORDER")
+  mb:SetColorTexture(C.borderlt[1], C.borderlt[2], C.borderlt[3], 1)
+  mb:SetPoint("TOPLEFT", 30, -74); mb:SetSize(130, 62)
+  local mf = f:CreateTexture(nil, "ARTWORK")
+  mf:SetColorTexture(C.bg1[1], C.bg1[2], C.bg1[3], 1)
+  mf:SetPoint("TOPLEFT", mb, "TOPLEFT", 1, -1); mf:SetPoint("BOTTOMRIGHT", mb, "BOTTOMRIGHT", -1, 1)
+  local rows = { { "Chart", C.accent }, { "Craft tree", C.mint }, { "Offer book", C.blue }, { "Your stock", C.purple } }
+  for i, r in ipairs(rows) do
+    local y = -79 - (i - 1) * 14
+    local dot = f:CreateTexture(nil, "OVERLAY")
+    dot:SetColorTexture(r[2][1], r[2][2], r[2][3], 1)
+    dot:SetPoint("TOPLEFT", 38, y - 4); dot:SetSize(5, 5)
+    local t = T.Text(f, T.SIZE.tiny, (i == 2) and "text" or "sub", T.FONT_MED)
+    t:SetPoint("TOPLEFT", 48, y); t:SetText(r[1])
+    if i == 2 then t:SetTextColor(r[2][1], r[2][2], r[2][3]) end
+  end
+end
+
 local newsFrame
 -- render the current entry of the stacked news window (f._list / f._idx)
 local function renderNews(f)
@@ -7960,7 +7980,10 @@ local function renderNews(f)
     elseif item.preview == "selldock" then drawSellDockPreview(f.preview)
     elseif item.preview == "discord" then drawDiscordPreview(f.preview)
     elseif item.preview == "ledger" then drawLedgerPreview(f.preview)
-    elseif item.preview == "goldtimer" then drawGoldTimerPreview(f.preview) end
+    elseif item.preview == "goldtimer" then drawGoldTimerPreview(f.preview)
+    elseif item.preview == "crafting" then drawCraftingPreview(f.preview)
+    elseif item.preview == "links" then drawLinksPreview(f.preview)
+    elseif item.preview == "home" then drawHomePreview(f.preview) end
   end
   f.pager:SetText(f._idx .. " / " .. n)
   local multi = n > 1

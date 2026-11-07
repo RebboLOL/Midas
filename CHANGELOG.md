@@ -1,5 +1,19 @@
 # Midas – Changelog
 
+## 1.2.20 – 2026-11-07
+- **A new start page.** The Start tab shows your net worth with what moved it this week, what your trading earned, your watchlist as a tinted grid of what is cheap and what you own that is ready to sell, and your next moves – fresh price alerts, undercut listings and sell and buy ideas ranked by the gold they move – and a switch next to the tabs brings back the classic start page.
+- **Crafting tab (beta).** Every recipe of your game version is drawn as a tech tree in its own scrollable field, the item on the right and its materials down to the raw goods on the left, every step with its total and unit price now and at Fair, what making it saves over buying it, the profit after the AH cut, what an item is used in and what gear disenchants into, and the "Enable crafting" switch in the tab or in Settings turns all of crafting off.
+- **Crafted price in Charts.** The Charts tab shows what an item costs to make next to Current and Fair and as a dashed Crafted line in the chart, and hovering the value shows a small preview of its craft tree.
+- **Craft cost in item tooltips.** Item tooltips show what an item costs to make now and at Fair with its profit, what gear disenchants into and how many recipes use a material, and Settings > Craft lines turns them off.
+- **Every item links to its pages.** Right-click any item in Midas for its chart, craft tree, offer book, your trades and your stock or to watch it, and chips next to an item's name open them in one click.
+- **Back to where you came from.** After a jump to another tab, a Back pill in the window header returns to the page you left, as you left it.
+- **Smoother chart lines.** Chart lines are drawn with soft anti-aliased edges, so slopes no longer show pixel steps.
+- **Forever scans wait for a slow server.** Fixed a bug where a full scan on WoW Forever gave up after 90 seconds with "no snapshot from the server", mostly in the evening - Midas now waits up to five minutes, asks again on its own and still stores a snapshot that arrives late.
+- **Minimap coin in button collectors.** Fixed a bug where the minimap coin showed as a plain white circle in Leatrix Plus's combined addon buttons and similar minimap button bags.
+- **Offer book at the AH: item tooltip on hover.** Fixed a bug where hovering the title of the offer book docked to the auction house showed no item tooltip.
+- **Settings fit the smallest window.** Fixed a bug where the sync status and the live log ran out of the Settings tab at the default window size - the left column now scrolls.
+- **Charts header fits.** Fixed a bug where your trade record in the Charts header ran into the item's category line in a narrow window.
+
 ## 1.2.19 – 2026-11-05
 - **Mailed gold is no longer postage.** Fixed a bug where gold you sent by mail was booked as Postage in the Ledger - it now counts as a transfer to your alt or as gold to another player, and the days already recorded are corrected once.
 - **Ledger diagram easier to read.** Sources and destinations sit under GOLD IN, GOODS IN, GOLD OUT and GOODS OUT headings, and every label shows its amount on the same line in its band's color.

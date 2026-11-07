@@ -25,9 +25,14 @@ local function annotate(tooltip, itemID)
   local owner = tooltip.GetOwner and tooltip:GetOwner()
   if owner and M.frame and owner == M.frame then return end
   local series = M.GetSeries(tostring(itemID))
-  if not series then return end
-  local m = M.Metrics(series, tostring(itemID))
-  if not m or not m.fair or m.fair <= 0 then return end
+  local m = series and M.Metrics(series, tostring(itemID))
+  if not m or not m.fair or m.fair <= 0 then
+    -- no market data: a craftable or disenchantable item still gets its lines
+    if M.CraftTipLines and not hasMidas(tooltip) and M.CraftTipLines(tooltip, itemID, mode, true) then
+      tooltip:Show()
+    end
+    return
+  end
   if hasMidas(tooltip) then return end
 
   local cur = m.cur
@@ -67,6 +72,7 @@ local function annotate(tooltip, itemID)
   tooltip:AddLine(" ")
   tooltip:AddDoubleLine("|cffE8B44AMidas|r", sig, 0.91, 0.70, 0.29, r, g, b)
   tooltip:AddDoubleLine(curTxt, fairTxt, r, g, b, 0.78, 0.76, 0.70)
+  if M.CraftTipLines then M.CraftTipLines(tooltip, itemID, mode) end
   if mode == "reduced" then tooltip:Show(); return end
   tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyPlain(m.quick), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)

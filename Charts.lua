@@ -2,6 +2,16 @@
 -- clean dark ground, value bounds on the right, current value at the line end.
 local ADDON, M = ...
 local WHITE = "Interface\\Buttons\\WHITE8X8"
+-- Smooth lines: the curves are drawn with a high-resolution line profile
+-- (Media\AALine: 64 texels across the thickness, solid core, soft edges)
+-- that the GPU scales down to the line's few screen pixels - the edge
+-- smoothing a supersampled render would give, which the UI API cannot do.
+-- The drawn quad is AA_PAD wider than the visible line so the soft edges
+-- sit outside the core; pixel snapping is off so slopes do not stair-step.
+-- Horizontal reference lines stay crisp (plain texture, snapped).
+local AA_LINE = "Interface\\AddOns\\" .. (ADDON or "Midas") .. "\\Media\\AALine"
+local AA_PAD = 1.5
+local aaOK = true          -- false once the texture failed to load: plain lines
 
 local function TC(key)
   local c = M.Theme and M.Theme.C[key]
@@ -39,7 +49,8 @@ local function GetFS(canvas)
   local s = canvas._fs[canvas._fsN]
   if not s then
     s = canvas:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); canvas._fs[canvas._fsN] = s
-    if M.Theme and M.Theme.RegFont then M.Theme.RegFont(s, M.Theme.FONT, 10) end
+    -- canvas._fontSize: a chart may ask for larger labels (the Start dashboard)
+    if M.Theme and M.Theme.RegFont then M.Theme.RegFont(s, M.Theme.FONT, canvas._fontSize or 10) end
   end
   s:SetText(""); s:Show()
   return s
@@ -54,9 +65,35 @@ local function ResetPools(canvas)
 end
 
 -- ===== Primitives (origin = BOTTOMLEFT of the canvas) =======================
-local function Seg(canvas, x1, y1, x2, y2, w, r, g, b, a)
+-- smooth = soft-edged line (curves, slanted dashes); otherwise a crisp plain
+-- line. "/midas lines" switches every chart to crisp lines (config.crispLines).
+local function lineMode(ln, smooth)
+  if smooth and aaOK and not (M.db and M.db.config and M.db.config.crispLines) then
+    if ln._aa ~= true then
+      if ln:SetTexture(AA_LINE) == false then
+        aaOK = false
+        ln:SetTexture(WHITE); ln._aa = false
+      else
+        ln._aa = true
+        if ln.SetSnapToPixelGrid then ln:SetSnapToPixelGrid(false) end
+        if ln.SetTexelSnappingBias then ln:SetTexelSnappingBias(0) end
+      end
+    end
+  elseif ln._aa ~= false then
+    ln:SetTexture(WHITE); ln._aa = false
+    if ln.SetSnapToPixelGrid then ln:SetSnapToPixelGrid(true) end
+  end
+  return ln._aa
+end
+
+local function Seg(canvas, x1, y1, x2, y2, w, r, g, b, a, smooth)
   local ln = GetLine(canvas)
-  ln:SetThickness(w or 1.5)
+  w = w or 1.5
+  if lineMode(ln, smooth) then
+    ln:SetThickness(w + AA_PAD)
+  else
+    ln:SetThickness(w)
+  end
   ln:SetVertexColor(r, g, b, a or 1)
   ln:SetStartPoint("BOTTOMLEFT", canvas, x1, y1)
   ln:SetEndPoint("BOTTOMLEFT", canvas, x2, y2)
@@ -93,7 +130,7 @@ local function Curve(canvas, pts, w, r, g, b, a, ylo, yhi)
   local n = #pts
   if n == 0 then return end
   if n == 1 then Dot(canvas, pts[1].x, pts[1].y, 3, r, g, b); return end
-  if n == 2 then Seg(canvas, pts[1].x, pts[1].y, pts[2].x, pts[2].y, w, r, g, b, a); return end
+  if n == 2 then Seg(canvas, pts[1].x, pts[1].y, pts[2].x, pts[2].y, w, r, g, b, a, true); return end
   local STEPS = 14
   local function P(i) if i < 1 then i = 1 elseif i > n then i = n end return pts[i] end
   local px, py
@@ -105,7 +142,7 @@ local function Curve(canvas, pts, w, r, g, b, a, ylo, yhi)
       local x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)
       local y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
       if y < ylo then y = ylo elseif y > yhi then y = yhi end
-      if px then Seg(canvas, px, py, x, y, w, r, g, b, a) end
+      if px then Seg(canvas, px, py, x, y, w, r, g, b, a, true) end
       px, py = x, y
     end
   end
@@ -120,9 +157,11 @@ local function DashSeg(canvas, x1, y1, x2, y2, w, r, g, b, a)
   local ux, uy = dx / len, dy / len
   local dash, gap = 5, 4
   local d = 0
+  -- level lines (Fair, alerts, Crafted) stay crisp; slanted bridges are smooth
+  local smooth = math.abs(dx) > 0.01 and math.abs(dy) > 0.01
   while d < len do
     local e = math.min(d + dash, len)
-    Seg(canvas, x1 + ux * d, y1 + uy * d, x1 + ux * e, y1 + uy * e, w, r, g, b, a)
+    Seg(canvas, x1 + ux * d, y1 + uy * d, x1 + ux * e, y1 + uy * e, w, r, g, b, a, smooth)
     d = e + gap
   end
 end
@@ -182,10 +221,10 @@ local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA)
       if y < ylo then y = ylo elseif y > yhi then y = yhi end
       if px then
         if dashed then
-          if (dist % (DASH + GAP)) < DASH then Seg(canvas, px, py, x, y, w, r, g, b, col) end
+          if (dist % (DASH + GAP)) < DASH then Seg(canvas, px, py, x, y, w, r, g, b, col, true) end
           dist = dist + math.sqrt((x - px) ^ 2 + (y - py) ^ 2)
         else
-          Seg(canvas, px, py, x, y, w, r, g, b, col)
+          Seg(canvas, px, py, x, y, w, r, g, b, col, true)
         end
       end
       px, py = x, y
@@ -639,6 +678,21 @@ function M.RenderAllTime(canvas, key)
       if fv then widen(fv / 10000) end
     end
   end
+  -- what it costs to MAKE (Crafting tab, newest prices, make or buy per
+  -- material): a dashed mint level line in the big chart. Settings "Craft
+  -- lines" turns it off together with the tooltip lines, the Crafting (beta)
+  -- switch together with everything crafting.
+  local craftNow
+  if not canvas._compact and not canvas._rangeOverride and M.CraftCost
+     and not (M.db and M.db.config and M.db.config.tooltipCraft == false)
+     and (not M.CraftingOn or M.CraftingOn()) then
+    local cid = (M.BaseID and M.BaseID(key)) or tonumber(key)
+    local cc = cid and M.CraftCost(cid)
+    if cc and cc.now and cc.now > 0 then
+      craftNow = cc.now
+      widen(craftNow / 10000)
+    end
+  end
   vmin, vmax = minSpan(vmin, vmax, 0.0001)
   local pad = (vmax - vmin) * 0.15
   vmin, vmax = math.max(0, vmin - pad), vmax + pad
@@ -942,6 +996,19 @@ function M.RenderAllTime(canvas, key)
     end
     if alertRec.below then local r2, g2, b2 = TC("green"); alertLine(alertRec.below, "below", r2, g2, b2) end
     if alertRec.above then local r2, g2, b2 = TC("accent"); alertLine(alertRec.above, "above", r2, g2, b2) end
+  end
+
+  -- crafting cost level (see the scale block): labelled "Crafted" at the right
+  if craftNow then
+    local cr, cg, cb = TC("mint")
+    local g = craftNow / 10000
+    if inScale(g) then
+      local cy = Y(g)
+      DashSeg(canvas, left, cy, left + pw, cy, 1.2, cr, cg, cb, 0.6)
+      sideLabel(cy, "Crafted", cr, cg, cb, NUDGE)
+    else
+      edgeNote("Crafted  " .. M.MoneyPlain(craftNow) .. "  \194\183  off scale", g > vmax, cr, cg, cb)
+    end
   end
 
   -- date labels (bottom), evenly spaced by TIME; on a capped (left-hugging)
@@ -1983,6 +2050,7 @@ function M.RenderWorthSpark(canvas)
     for i = #all - 44, #all do arr[#arr + 1] = all[i] end
   end
   local n = #arr
+  canvas._d0, canvas._d1 = nil, nil
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   if W < 10 or H < 10 then return end
   if n == 0 then
@@ -2006,6 +2074,7 @@ function M.RenderWorthSpark(canvas)
   local left, right, top, bottom = 4, 4, 10, 6
   local pw, ph = W - left - right, H - top - bottom
   local d0, d1 = arr[1].day, arr[n].day
+  canvas._d0, canvas._d1 = d0, d1       -- the Start hero labels the span
   local span = math.max(1, d1 - d0)
   local ar, ag, ab = TC("accent")
   local pts, hpts = {}, {}

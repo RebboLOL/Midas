@@ -85,12 +85,18 @@ function M.InitMinimap()
   discMask:SetAllPoints(disc); discMask:SetTexture(CIRCLE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
   disc:AddMaskTexture(discMask)
 
-  -- coin icon (clipped to a circle, no chunky default ring)
-  local icon = btn:CreateTexture(nil, "ARTWORK")
+  -- coin icon (clipped to a circle, no chunky default ring). Named
+  -- <button>Icon and kept on btn.icon: minimap button collectors (Leatrix Plus
+  -- "Combine addon buttons" and the like) take their copy of the icon from
+  -- there - without it they picked the circle mask and showed a white disc.
+  -- The mask is created first, so the coin is also the button's last region
+  -- (collectors without the name lookup take the last small texture).
+  local iconMask = btn:CreateMaskTexture()
+  local icon = btn:CreateTexture("MidasMinimapButtonIcon", "ARTWORK")
+  btn.icon = icon
   icon:SetTexture("Interface\\Icons\\INV_Misc_Coin_01")
   icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
   icon:SetSize(22, 22); icon:SetPoint("CENTER")
-  local iconMask = btn:CreateMaskTexture()
   iconMask:SetAllPoints(icon); iconMask:SetTexture(CIRCLE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
   icon:AddMaskTexture(iconMask)
 

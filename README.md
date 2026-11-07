@@ -45,6 +45,10 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
   answers the same person). The one-click answer to a guildmate's "price check?".
   The Alt/Shift shortcuts start switched off on a new install – turn them on in **Settings**
   ("Alt/Shift shortcuts") or bind them with `/midas keys`.
+- **Right-click any item inside Midas** – a list row, a card in the crafting tree, the name on the
+  chart – for the **item menu**: its chart, craft tree, offer book, your trades and your stock, plus
+  add to / remove from the watchlist, post its price to chat and (at the AH) search it. On the Start
+  page and in the Watchlist tab right-click keeps toggling the watchlist. See *Item pages and links*.
 - `/midas` – open/close the window (ESC closes too)
 - `/midas help` – print this command list in-game (any unknown command shows it too)
 - `/midas scan` – run a full AH scan now (must be at the auction house)
@@ -56,6 +60,8 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
   every booking live
 - `/midas timer` – open/close the gold timer; `timer start` / `pause` / `reset`, `timer report` prints the
   session to chat
+- `/midas tree [item]` – (beta) open the crafting tree (an item name, id or shift-clicked link)
+- `/midas lines` – chart lines smooth (soft anti-aliased edges, the default) or crisp plain pixel lines
 - `/midas share` – community sync on/off (on by default); `share on` / `share off` set it explicitly
 - `/midas trust` – accept shared data from everyone (default, with sanity guards) or guild only
 - `/midas vicinity` – cross-guild sharing with nearby players at the AH: `say` / `yell` / `off` (default `yell`)
@@ -69,19 +75,25 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
 - `/midas discord` – invite link to the Midas Discord (help, bugs, ideas) in a copy box
 
 ## Tabs
-1. **Start** – the dashboard that greets you, in three rows: your **net worth** (change since
-   yesterday / 7 days ago plus a sparkline) next to **MARKET TODAY** – the best BUY signals
-   (today's picks trading clearly under Fair, merged with the highest-scoring opportunities of your
-   whole archive) and the best SELL signals (liquid items clearly above Fair; vendor goods excluded);
-   your **watchlist across the full width** split into **BUY LOW / SELL HIGH** vs Fair (it grows with
-   the window – the focus of the page); and the **biggest character movers** since the last snapshot
-   next to your **trading highlights** (best sale ever, best bargain of the last 60 days, latest
-   trades). Cards jump to their tabs; item rows work like everywhere else – hover for the tooltip,
-   left-click for the full chart, and **right-click any item to put it on your watchlist**.
+1. **Start** – the command center, four cards: **NET WORTH** (the total, the change today and over
+   the week, and *why* it moved – market prices, stock bought or sold, gold – click the line for every
+   item that moved; a bar shows what the total is made of) next to **TRADING** (net P/L over the same
+   week, exactly as the Trades tab counts it, your sell-through and the latest trades, one line per
+   item and day); below, the **WATCHLIST MAP** – every watched item as a tile, cheapest first, green
+   when it trades under Fair, red when you own it and it trades clearly over Fair (ready to sell),
+   dimmed when it is not listed; right-click a tile to unwatch it (right-click again to undo) – next
+   to **NEXT MOVES**: price alerts that fired in the last 24 hours, your listings a newer scan
+   undercuts, then **SELL** ideas from your bags, bank and mail (with the price to list at) and
+   **BUY** ideas from your watchlist and the market, ranked by the gold they move, then alerts close
+   to their limit. Hover a card title for how its numbers are made; items work like everywhere else –
+   hover for the tooltip, left-click for the chart, right-click to watch or unwatch. Prefer the old
+   layout? The **Dashboard | Classic** switch next to the tabs brings back the earlier start page
+   (net worth, market today, buy low / sell high, movers with price alerts, your trades); Midas
+   remembers the choice.
 2. **Watchlist** – the heart of Midas: your **account-wide** watchlist as a full ranked table (shared
    across all your characters). **Type in the search box to find & add items**, **right-click a row to
    remove** it, click column headers to sort; **hover a row** for the mini price chart + stats on the
-   right, **left-click** for the full chart. Watched items feed the BUY LOW / SELL HIGH shortlists on
+   right, **left-click** for the full chart. Watched items fill the watchlist map and the BUY ideas on
    the Start page.
 3. **Net Worth** – your **account-wide** assets across all characters: **gold + item value + active auctions**,
    broken down by asset class (Money, Crafting, Consumables, Gear, Recipes, **Auctions**, Other) and per
@@ -129,11 +141,17 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
    cost of everything under Fair and what it takes to buy up to each marker (buyout only, no seller
    names; the AH has no buy orders). A **split** button next to the offer book shows the price
    chart on the left and the supply ladder on the right, and the chart / offer-book headers carry
-   the item's icon.
+   the item's icon. **Chips next to the item's name** open its craft tree, your trades and your
+   stock and put it on the watchlist; clicking the name opens the item menu.
    Bigger new features introduce themselves once after an update with a short what's-new note
    (`/midas news` shows it again).
 
-7. **Settings** – everything configurable in one place. **General:** the item-tooltip style
+7. **Crafting (beta)** – every recipe as a tech tree: the item on the right, its materials to the left down to
+   the raw goods, each priced **now** (gold) and at **Fair** (purple); next to it what the item is used in
+   and what gear disenchants into. The start view ranks the most profitable crafts. In beta: the
+   "Enable crafting" switch in the tab (or in Settings) turns crafting off. See *Crafting tree (beta)*.
+
+8. **Settings** – everything configurable in one place. **General:** the item-tooltip style
    (**Full / Reduced / Off**, with a live preview of exactly what each produces), the minimap
    button on/off, auto-scan on AH open, the default chart timeframe and a separate
    timeframe for the small preview cards. **Community sync:**
@@ -142,7 +160,7 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
    of each scan, beacon and backfill. (`/midas share on|off`, `/midas vicinity` and
    `/midas syncstatus` still work from chat.)
 
-8. **Help** – how the numbers are made, for humans: Fair and the sell odds explained with a
+9. **Help** – how the numbers are made, for humans: Fair and the sell odds explained with a
    worked example and two illustrative charts, plus a one-line glossary of every figure in the UI.
 
 Also: **item tooltips** show current price, the **Fair price** (with its sell odds), sell speed, a
@@ -151,6 +169,27 @@ item (from your logged buys), plus current and average quantity in the AH and ho
 (green = below Fair, red = above, the same rule as every table). Pick the style in **Settings** (Full / a two-line Reduced /
 Off). Inside the Midas window the tooltip stays vanilla – the table row and detail card already
 show those numbers.
+
+## Item pages and links
+Every item in Midas links to every page that has something on it:
+- **Chart** – price history, Fair and the signal, your trades as dots, the price alerts.
+- **Craft tree** – what it costs to make, or for a material what it is used in (while Crafting (beta) is on).
+- **Offer book** – every price it is listed at in your newest full scan.
+- **Your trades** – the Trades tab's By Item view searched for the item, its transactions unfolded.
+- **Your stock** – what your stock of it was worth day by day (Net Worth), with what you paid.
+
+The pages show up as **chips next to the item's name** – on the Charts tab, in the offer book, in Net
+Worth's holding view and in the Crafting tab's side column – and as short chips on the preview cards of
+the Watchlist and Trades tabs; each chip only appears when its page has something to show (the craft
+tree chip previews the tree on hover). **Right-click** any item row in Trades, Net Worth, Ledger, the
+Charts list or the crafting tree, or the offer-book dock at the AH, for the item menu with all of them.
+The *Crafted* value and the *Your trades* line in the chart header open their pages too; on the
+Start page the "market · stock · gold" line opens what moved your net worth, and the alert link the
+price alerts.
+
+After a jump to another tab, a **‹ Back** pill in the window header returns to exactly where you came
+from – the drill-down, the search and the item you had open. Picking a tab yourself or closing the
+window ends the trail.
 
 ## How prices are calculated (trimmed market value + real sell odds)
 **Fair is the short-term market value with the no-demand asks removed, checked against your real
@@ -250,6 +289,46 @@ result, so nothing counts twice; gold and items moved between your own character
 only hides it – the clock keeps going. Each character has its own timer; it survives reloads and logouts
 and pauses while you are offline. The timer uses the ledger's cause matching but works with
 "Record ledger" switched off too.
+
+## Crafting tree (beta)
+The **Crafting (beta)** tab knows every recipe of your game version – Classic Era, TBC Anniversary or WoW Forever,
+each from the game's own data tables, so changed Forever recipes show as they are there. Pick an item
+(search, **Top crafts**, the *Craft tree* chip on the Charts tab, any item's right-click menu or
+`/midas tree <item>`):
+- **The tree** – the item sits on the right, its materials fan out to the left, level by level. Every card
+  shows the quantity for one craft, what this step costs in total (big) and per unit (small), **now**
+  (cheapest listing of the newest scan, Fair when nothing is listed) in gold and **Fair** in purple below
+  it, and on its bottom line where it comes from (AH, vendor, CRAFT) and what making it **saves** over
+  buying it (or what it would cost extra). Hover a card for the step in numbers: needed, buy, make, saving.
+- **The field** – the tree sits in its own framed field with a scroll bar on the right and one at the
+  bottom: the mouse wheel scrolls up and down (sideways when the tree is not taller than the field), the
+  bars move it in every direction. A small tree sits in the middle, and a new item opens with the item
+  in view.
+- **Make or buy** – each material is bought or made from its own materials, whichever is cheaper right now
+  (a green *CRAFT* tag); **+** opens a material's recipe for reference even when buying is cheaper. Off, every
+  material is bought.
+- **Prices** – AH prices from your scans, vendor materials at what a merchant charged you (visit one once;
+  until then a marked estimate from the game data). A card without any price says so, and the totals are
+  flagged as partial.
+- **The footer** – the answer first: **MAKE IT** or **BUY IT** at today's prices and by how much, and what
+  crafting one to sell earns after the 5% AH cut. Next to it the numbers behind that for one item – make,
+  buy, making saves, sell after cut, profit each – now (gold) over Fair (purple), every column explained
+  on hover. Below it how much the materials you make yourself cut the cost and which of your characters
+  knows the recipe (Midas reads it when you open a profession window).
+- **Cards** – click a card to put that item at the root, right-click it for the item menu (chart, offer
+  book, your trades, your stock, watchlist).
+- **Side column** – on top the item's other pages as chips (chart, offer book, your trades, your stock,
+  watch), then what the item is **used in** (best profit first), what gear **disenchants into** with
+  the expected value and whether disenchanting, selling or vendoring pays most, and for dust, essences and
+  shards **which disenchants yield them**. Disenchant odds are the known approximate values.
+- **Tooltips** – items carry a *Craft* line (cost now and Fair with the profit), gear a *Disenchant* line
+  and materials a *Used in* count; Settings > *Craft lines* turns them off.
+- **Charts** – the market line shows **Crafted** (what it costs to make now, with its distance to Current)
+  next to Current and Fair, and the big chart draws it as a dashed mint line. Hover the underlined value
+  or the *Craft tree* chip next to the name for a small preview of the tree, click to open it.
+- **Beta switch** – crafting is in beta. **Enable crafting** next to the BETA plaque in the tab (or Settings >
+  *Crafting (beta)*) turns all of it off: the tree, the Crafted price and line in Charts, the tooltip craft
+  lines and the *Craft tree* links. The recipes your characters know keep being recorded meanwhile.
 
 ## Trading history & sellability
 The **Trades** tab needs no setup beyond **collecting your auction-house mail**. Whenever your mailbox is open,

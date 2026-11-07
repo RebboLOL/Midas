@@ -118,6 +118,58 @@ function T.Button(parent, text, w, h)
   return b
 end
 
+-- ---- Link chip: one page of an item ("Craft tree  ›") ----------------------
+-- A compact pill in the destination's color: dot, label, an optional muted
+-- count and the arrow. Tinted fill and hairline at rest, lit on hover. The
+-- caller sets OnClick (both mouse buttons are registered) and may hook
+-- OnEnter/OnLeave; chip:Set(label, extra, colorKey, noArrow) re-labels it and
+-- returns the new width. compact = no dot, tighter padding (narrow cards).
+local CHIP_DOT = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
+function T.Chip(parent, h, compact)
+  local b = CreateFrame("Button", nil, parent, "BackdropTemplate")
+  b:SetHeight(h or 20)
+  b:SetBackdrop(T.FLAT)
+  b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+  local dot = b:CreateTexture(nil, "OVERLAY")
+  dot:SetTexture(CHIP_DOT); dot:SetSize(7, 7); dot:SetPoint("LEFT", 8, 0)
+  local fs = b:CreateFontString(nil, "OVERLAY")
+  T.RegFont(fs, T.FONT_MED, T.SIZE.small)
+  if compact then dot:Hide(); fs:SetPoint("LEFT", 7, 0) else fs:SetPoint("LEFT", dot, "RIGHT", 6, 0) end
+  local ex = b:CreateFontString(nil, "OVERLAY")
+  T.RegFont(ex, T.FONT_MED, T.SIZE.tiny); ex:SetPoint("LEFT", fs, "RIGHT", 5, 0)
+  local ar = b:CreateFontString(nil, "OVERLAY")
+  T.RegFont(ar, T.FONT_SEMI, T.SIZE.body); ar:SetPoint("RIGHT", compact and -6 or -8, 1); ar:SetText("\226\128\186")
+  b.dot, b.fs, b.ex, b.ar, b.compact = dot, fs, ex, ar, compact
+  b.col = T.C.accent
+  function b:Paint(hot)
+    local c = self.col
+    self:SetBackdropColor(c[1], c[2], c[3], hot and 0.24 or (self.filled and 0.16 or 0.08))
+    self:SetBackdropBorderColor(c[1], c[2], c[3], hot and 1 or 0.5)
+    dot:SetVertexColor(c[1], c[2], c[3], 1)
+    if hot then fs:SetTextColor(c[1], c[2], c[3]) else fs:SetTextColor(u(T.C.text)) end
+    ex:SetTextColor(u(hot and T.C.sub or T.C.muted))
+    ar:SetTextColor(c[1], c[2], c[3], hot and 1 or 0.8)
+  end
+  function b:Set(label, extra, colorKey, noArrow)
+    self.col = T.C[colorKey or "accent"] or T.C.accent
+    fs:SetText(label or "")
+    ex:SetText(extra or "")
+    ex:SetShown(extra ~= nil and extra ~= "")
+    ar:SetShown(not noArrow)
+    local w = (self.compact and 7 or (8 + 7 + 6)) + (fs:GetStringWidth() or 0)
+    if extra and extra ~= "" then w = w + 5 + (ex:GetStringWidth() or 0) end
+    w = w + (noArrow and (self.compact and 7 or 10) or (self.compact and 17 or 20))
+    w = math.floor(w + 0.5)
+    self:SetWidth(w)
+    self.w = w
+    self:Paint(self:IsMouseOver())
+    return w
+  end
+  b:SetScript("OnEnter", function(self) self:Paint(true) end)
+  b:SetScript("OnLeave", function(self) self:Paint(false) end)
+  return b
+end
+
 -- ---- Flat checkbox ---------------------------------------------------------
 function T.Checkbox(parent, label, onToggle)
   local b = CreateFrame("Button", nil, parent)
@@ -214,7 +266,7 @@ function T.TabBar(parent, labels, onSelect)
     local ul = b:CreateTexture(nil, "OVERLAY")
     ul:SetColorTexture(u(T.C.accent)); ul:SetHeight(2)
     ul:SetPoint("BOTTOMLEFT", 5, 2); ul:SetPoint("BOTTOMRIGHT", -5, 2); ul:Hide()
-    b.fs, b.ul = fs, ul
+    b.fs, b.ul, b.textW = fs, ul, tw - 22
     b:SetScript("OnClick", function() onSelect(i) end)
     b:SetScript("OnEnter", function() if not b.active then fs:SetTextColor(u(T.C.text)) end end)
     b:SetScript("OnLeave", function() if not b.active then fs:SetTextColor(u(T.C.sub)) end end)
@@ -222,6 +274,23 @@ function T.TabBar(parent, labels, onSelect)
     x = x + tw + 8
   end
   frame:SetWidth(math.max(x - 8, 1))
+  -- squeeze the padding (never the labels) until the bar fits into maxW
+  function bar:Fit(maxW)
+    for _, pg in ipairs({ { 22, 8 }, { 18, 6 }, { 14, 5 }, { 12, 4 }, { 10, 3 } }) do
+      local w = 0
+      for _, b in ipairs(self.buttons) do w = w + b.textW + pg[1] end
+      w = w + pg[2] * (#self.buttons - 1)
+      if w <= maxW or pg[1] == 10 then
+        local bx = 0
+        for _, b in ipairs(self.buttons) do
+          b:SetWidth(b.textW + pg[1]); b:ClearAllPoints(); b:SetPoint("LEFT", bx, 0)
+          bx = bx + b.textW + pg[1] + pg[2]
+        end
+        self.frame:SetWidth(math.max(bx - pg[2], 1))
+        return w
+      end
+    end
+  end
   function bar:Select(i)
     self.current = i
     for j, b in ipairs(self.buttons) do

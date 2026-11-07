@@ -263,12 +263,13 @@ function M.CheckAlerts()
     local cur = rec and (rec.cur or rec.low)
     if cur then
       local name = (M.ItemName and M.ItemName(key)) or tostring(key)
+      -- bTs / aTs: when it fired (the Start page pins only fresh hits)
       if a.below and cur <= a.below then
-        if not a.bFired then a.bFired = true; M.AlertFire(name, cur, a.below, true) end
-      else a.bFired = nil end
+        if not a.bFired then a.bFired = true; a.bTs = time(); M.AlertFire(name, cur, a.below, true) end
+      else a.bFired, a.bTs = nil, nil end
       if a.above and cur >= a.above then
-        if not a.aFired then a.aFired = true; M.AlertFire(name, cur, a.above, false) end
-      else a.aFired = nil end
+        if not a.aFired then a.aFired = true; a.aTs = time(); M.AlertFire(name, cur, a.above, false) end
+      else a.aFired, a.aTs = nil, nil end
     end
   end
 end

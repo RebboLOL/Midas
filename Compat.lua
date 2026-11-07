@@ -11,6 +11,18 @@ M.MODERN_AH = (C_AuctionHouse ~= nil and C_AuctionHouse.ReplicateItems ~= nil
   and _G.QueryAuctionItems == nil
   and not (IsUsingLegacyAuctionClient and IsUsingLegacyAuctionClient())) or false
 
+-- Game version for the static recipe data (Recipes.lua): "forever" on the modern
+-- client, "tbc" on TBC Anniversary, "era" for Classic Era / Hardcore.
+local function clientFlavor()
+  if M.MODERN_AH then return "forever" end
+  local exp = GetClassicExpansionLevel and GetClassicExpansionLevel()
+  if type(exp) == "number" and exp >= 1 then return "tbc" end
+  if WOW_PROJECT_ID ~= nil and WOW_PROJECT_BURNING_CRUSADE_CLASSIC ~= nil
+     and WOW_PROJECT_ID == WOW_PROJECT_BURNING_CRUSADE_CLASSIC then return "tbc" end
+  return "era"
+end
+M.CLIENT_FLAVOR = clientFlavor()
+
 -- Register an event only if this client knows it (unknown events throw on the
 -- modern client instead of being ignored).
 function M.SafeRegister(frame, event)
