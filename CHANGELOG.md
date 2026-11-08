@@ -1,5 +1,8 @@
 # Midas – Changelog
 
+## 1.2.22 – 2026-11-08
+- **Full item tooltips on the start page.** Fixed a bug where hovering an item on the start page showed only the plain game tooltip - it now carries the Midas price lines and the price chart.
+
 ## 1.2.21 – 2026-11-08
 - **Current prices between scans.** Fixed a bug where Midas kept showing the price of its last full scan after an AH search or Auctionator had already shown a newer one - every price the auction house shows you now becomes the item's current price right away.
 - **Forever: characters sharing a first name.** Fixed a bug where two characters with the same first name shared one entry - every character is now kept under its full name.

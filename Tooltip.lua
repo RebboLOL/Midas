@@ -21,9 +21,10 @@ local function annotate(tooltip, itemID)
   local mode = (M.db.config and M.db.config.tooltipMode) or "full"
   if mode == "off" then return end
   -- inside the Midas window the table row and the detail card already show
-  -- these numbers -- the in-window item tooltip stays vanilla (no third copy)
+  -- these numbers -- the in-window item tooltip stays vanilla (no third copy),
+  -- unless the caller asked for the full tooltip (start page, M.ShowItemTip)
   local owner = tooltip.GetOwner and tooltip:GetOwner()
-  if owner and M.frame and owner == M.frame then return end
+  if owner and M.frame and owner == M.frame and not M.tipFull then return end
   local series = M.GetSeries(tostring(itemID))
   local m = series and M.Metrics(series, tostring(itemID))
   if not m or not m.fair or m.fair <= 0 then
@@ -153,8 +154,9 @@ local function showChart(tooltip, itemID)
   local rng = (M.db.config and M.db.config.tooltipRange) or "30"
   if rng == "off" or not itemID then if tt then tt:Hide() end return end
   -- inside the Midas window the big chart is one click away - keep it clean
+  -- (the start page asks for the full tooltip: its tiles carry no chart)
   local owner = tooltip.GetOwner and tooltip:GetOwner()
-  if owner and M.frame and owner == M.frame then if tt then tt:Hide() end return end
+  if owner and M.frame and owner == M.frame and not M.tipFull then if tt then tt:Hide() end return end
   local key = tostring(itemID)
   local series = M.GetSeries(key)
   local days = 0

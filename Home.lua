@@ -550,7 +550,7 @@ local function wireItem(b, tipFn)
   b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   b:SetScript("OnEnter", function(self)
     if not self.key then return end
-    if tipFn then tipFn(self) elseif M.ShowItemTip then M.ShowItemTip(self.key) end
+    if tipFn then tipFn(self) elseif M.ShowItemTip then M.ShowItemTip(self.key, true) end
   end)
   b:SetScript("OnLeave", function(self)
     if M.HideTip then M.HideTip() end
@@ -608,7 +608,7 @@ do
     local hh = panel and panel:GetHeight()
     return math.max(0, math.floor((hh or 426) - 426))
   end
-  local function ShowItemTip(key) if M.ShowItemTip then M.ShowItemTip(key) end end
+  local function ShowItemTip(key) if M.ShowItemTip then M.ShowItemTip(key, true) end end
   local function HideTip() if M.HideTip then M.HideTip() end end
   local function GoChart(key)
     if not key then return end
@@ -1563,7 +1563,8 @@ local function mapTip(self)
   local it = self.item
   if not it then return end
   local h = M.home
-  if M.ShowItemTip then M.ShowItemTip(it.key) end
+  -- the full tooltip (Midas lines + price chart): a tile shows only a percent
+  if M.ShowItemTip then M.ShowItemTip(it.key, true) end
   -- the card header reads the hovered item, names without the tooltip
   local card = h.cards.map
   local qc = M.ItemQualityColor(it.key)

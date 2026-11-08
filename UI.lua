@@ -46,11 +46,15 @@ local function vline(parent, x)
   return t
 end
 
--- Show the real item tooltip (with the Midas line) just outside the window.
-local function ShowItemTip(key)
+-- Show the real item tooltip just outside the window. Table rows and detail
+-- cards already show the Midas numbers, so their tooltip stays plain; `full`
+-- adds the Midas lines and the price chart (the start page's tiles and short
+-- rows show no more than a percent). Tooltip.lua reads M.tipFull.
+local function ShowItemTip(key, full)
   local id = M.BaseID and M.BaseID(key)
   if not id or not M.frame then GameTooltip:Hide(); return end
   GameTooltip:SetOwner(M.frame, "ANCHOR_NONE")
+  M.tipFull = full and true or nil
   GameTooltip:ClearAllPoints()
   if (M.frame:GetRight() or 0) + 300 > GetScreenWidth() then
     GameTooltip:SetPoint("TOPRIGHT", M.frame, "TOPLEFT", -6, -2)
@@ -61,7 +65,7 @@ local function ShowItemTip(key)
   GameTooltip:Show()
 end
 M.ShowItemTip = ShowItemTip
-local function HideTip() GameTooltip:Hide() end
+local function HideTip() M.tipFull = nil; GameTooltip:Hide() end
 M.HideTip = HideTip
 
 -- Right-click on an item row: the item menu with every page Midas has for it
