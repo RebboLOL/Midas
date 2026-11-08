@@ -28,6 +28,10 @@ snapshot scan, commodities included):
 - You can also scan with `/midas scan`, the window's "Scan AH" button, or Shift + right-click on the minimap coin.
 - Automatic scanning on AH open is **off by default** – turn it on in the **Settings** tab or with `/midas auto`.
 - Every scan is stored permanently, so your history keeps growing.
+- **Between two scans** the current price follows what the auction house shows you: every search in
+  the AH window (and every price Auctionator records, if installed) updates the item's current price,
+  tooltip and alerts right away. The history and the community sync stay scan-based, and the next full
+  scan replaces these prices. Weapons and armor wait for the next scan (random suffixes).
 - **Already scanning with Auctionator or aux?** Midas imports their price history
   automatically at login (up to 21 days from Auctionator) – a fresh install starts with
   populated tabs, and their scans keep flowing in. Your own scans always stay authoritative;

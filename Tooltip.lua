@@ -45,6 +45,8 @@ local function annotate(tooltip, itemID)
   local st = ist and ist[tostring(itemID)]
   local lp = st and st[#st]
   if lp and math.floor((lp.ts - M.C.SCAN_DAY_0) / 86400) == m.lastDay then curQty = lp.qty or 0 end
+  -- a newer live price from the AH brings its own count (when the source had one)
+  if m.liveTs and m.liveQty then curQty = m.liveQty end
   if notListed then curQty = 0 end
   local avgQty = math.floor(m.avgQty + 0.5)
   -- the signal colors like everywhere else (under Fair = buy green, over Fair =
@@ -60,7 +62,7 @@ local function annotate(tooltip, itemID)
   if sc then r, g, b = sc[1], sc[2], sc[3] end
   local curTxt = "Current  " .. M.MoneyPlain(cur)
   if notListed then
-    sig = "last seen " .. M.DayLabel(m.lastDay)
+    sig = "last seen " .. M.DayLabel(M.SeenDay(m))
     curTxt = "Not listed  \194\183  last " .. M.MoneyPlain(cur)
   end
   local liqTxt = m.liqLabel or ""
@@ -78,7 +80,9 @@ local function annotate(tooltip, itemID)
   tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   -- supply ladder of the newest scan: how much sits within 10% of the floor
   local dp = M.GetDepth and M.GetDepth(itemID)
-  if dp and dp.levels[1] and (time() - (dp.ts or 0)) < 86400 then
+  -- (left out once a live price moved the floor away from that scan's ladder)
+  if dp and dp.levels[1] and (time() - (dp.ts or 0)) < 86400
+     and not (m.liveTs and dp.levels[1].price ~= cur) then
     local cap, near = dp.levels[1].price * 1.10, 0
     for _, l in ipairs(dp.levels) do
       if l.price <= cap then near = l.qty + near end

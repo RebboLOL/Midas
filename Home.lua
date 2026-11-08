@@ -144,6 +144,16 @@ local function newestRec(key, lastDay)
   return s and lastDay and s[lastDay]
 end
 
+-- price + timestamp in the newest scan, or a newer live price the AH showed
+-- since (Data.lua) while it is listed
+local function newestCur(key, lastDay)
+  local rec = newestRec(key, lastDay)
+  local cur, ts = rec and (rec.cur or rec.low), rec and rec.ts
+  local lv = M.FreshLive and M.FreshLive(key, rec, lastDay)
+  if lv and M.LiveListed(lv) then cur, ts = lv.p, lv.ts end
+  return cur, ts
+end
+
 -- SELL: held, not listed, >= PICK_DELTA over Fair, listed in the newest scan,
 -- enough history, a real market item. Suggested ask X = min(cur - 1c, Fair x
 -- (1 + PICK_DELTA)); margin = (X x 0.95 - Fair) x min(qty, avgQty)
@@ -221,8 +231,7 @@ local function alertState(realm, lastDay, now)
   local al = M.db and M.db.alerts and M.db.alerts[realm]
   for key, a in pairs(al or {}) do
     if type(a) == "table" and (a.below or a.above) then
-      local rec = newestRec(key, lastDay)
-      local cur = rec and (rec.cur or rec.low)
+      local cur = newestCur(key, lastDay)
       local e = { kind = "alert", key = key, below = a.below, above = a.above, cur = cur, listed = cur ~= nil }
       local fired = (a.bFired and "below") or (a.aFired and "above") or nil
       if fired then
@@ -272,11 +281,10 @@ local function undercuts(lastDay, now)
         for u in pairs(a.lv or {}) do if not ask or u < ask then ask = u end end
         if not ask and (a.qty or 0) > 0 then ask = floor((a.gold or 0) / a.qty) end
         local key = tostring(id)
-        local rec = newestRec(key, lastDay)
-        local cur = rec and (rec.cur or rec.low)
+        local cur, curTs = newestCur(key, lastDay)
         local units = ask and ((a.lv and a.lv[ask]) or a.qty or 1) or 0
         -- a newer scan, a cheaper ask, and enough at stake to be worth a repost
-        if ask and cur and rec.ts and rec.ts > c.auctionsTs and cur < ask and (ask - cur) * units >= 1000
+        if ask and cur and curTs and curTs > c.auctionsTs and cur < ask and (ask - cur) * units >= 1000
            and ask * units >= 10000 then
           local e = byKey[key]
           if not e or (ask - cur) * units > e.margin then

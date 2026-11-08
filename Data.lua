@@ -86,6 +86,8 @@ function M.CommitScan(acc)
     end
   end
   M.db.config.lastIngest = now
+  -- a full scan is newer than every price the AH showed before it
+  if M.db.live then M.db.live[rk] = nil end
   M.CommitDepth(acc, now)
   M.DirtyAnalysis()
   M.Print(string.format("Full scan stored: %d items, day %s.", items, M.DayLabel(day)))
@@ -95,6 +97,84 @@ function M.CommitScan(acc)
   if M.OnScanCommitted then M.OnScanCommitted(day, changed, now) end
   if M.FireAPIEvent then M.FireAPIEvent("SCAN_COMPLETE", { day = day, items = items, ts = now, market = M.MarketInfo() }) end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+end
+
+-- ===== Live prices ==========================================================
+-- What the auction house itself showed after the newest full scan: the default
+-- AH's search results and Auctionator's searches and scans (Live.lua). One
+-- entry per item, the newest observation wins. Metrics (Logic.lua) takes it as
+-- the current price whenever it is newer than the item's newest daily row; the
+-- daily archive and the community sync stay scan-only, and the next own full
+-- scan replaces every entry (CommitScan clears the realm's table).
+-- MidasDB.live[realmKey][key] = { p = unit copper, q = units listed or nil, ts }
+local LIVE_KEEP = 3 * 86400   -- older entries are dropped at login
+local LIVE_SETTLE = 4         -- seconds of quiet before the whole-archive refresh
+
+function M.LivePrice(key)
+  local ls = M.db and M.db.live and M.db.live[M.RealmKey()]
+  return ls and ls[tostring(key)] or nil
+end
+
+-- The live entry of an item when it is newer than the daily row `rec` of `day`
+-- (rows without a timestamp - imports - count from the start of their day).
+function M.FreshLive(key, rec, day)
+  local e = M.LivePrice(key)
+  if not (e and e.ts) then return nil end
+  local rts = (rec and rec.ts) or (day and (M.C.SCAN_DAY_0 + day * 86400)) or 0
+  if e.ts > rts then return e end
+  return nil
+end
+
+-- scan day of a timestamp
+function M.DayOf(ts)
+  return math.floor((ts - M.C.SCAN_DAY_0) / 86400)
+end
+
+-- A live price is "listed now" unless a newer scan day went by without the item.
+function M.LiveListed(e)
+  return (e and e.ts and M.DayOf(e.ts) >= M.LastScanDay()) and true or false
+end
+
+local liveTimer = false
+local function liveSettled()
+  liveTimer = false
+  M.DirtyAnalysis()
+  if M.CheckAlerts then M.CheckAlerts() end
+  if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+end
+
+-- One observation: cheapest unit buyout the AH shows right now (+ units listed
+-- when the source knows them). The item's own numbers update at once; lists,
+-- alerts and the open window follow after a few quiet seconds.
+function M.ObserveLive(itemID, unit, qty)
+  if not M.db or type(unit) ~= "number" or unit <= 0 or unit > 5e9 then return end
+  local id = tonumber(itemID)
+  if not id then return end
+  local rk = M.RealmKey()
+  M.db.live = M.db.live or {}
+  local ls = M.db.live[rk]; if not ls then ls = {}; M.db.live[rk] = ls end
+  local key = tostring(id)
+  unit = unitPrice(math.floor(unit))
+  if type(qty) ~= "number" or qty < 0 then qty = nil end
+  local old = ls[key]
+  ls[key] = { p = unit, q = qty, ts = time() }
+  if M._mCache and M._mCache.items then M._mCache.items[key] = nil end
+  if old and old.p == unit and old.q == qty then return end
+  if not liveTimer then
+    liveTimer = true
+    C_Timer.After(LIVE_SETTLE, liveSettled)
+  end
+end
+
+function M.PruneLive()
+  if not (M.db and M.db.live) then return end
+  local cut = time() - LIVE_KEEP
+  for rk, ls in pairs(M.db.live) do
+    for key, e in pairs(ls) do
+      if type(e) ~= "table" or not e.ts or e.ts < cut then ls[key] = nil end
+    end
+    if next(ls) == nil then M.db.live[rk] = nil end
+  end
 end
 
 -- Supply ladder of the NEWEST scan only (no history, keeps the SV small):
@@ -261,6 +341,9 @@ function M.CheckAlerts()
     end
     local rec = lastDay and lastDay >= newest and it[lastDay]
     local cur = rec and (rec.cur or rec.low)
+    -- a newer price the AH showed since (Live.lua) counts while it is listed
+    local lv = M.FreshLive(key, it and lastDay and it[lastDay], lastDay)
+    if lv and M.LiveListed(lv) then cur = lv.p end
     if cur then
       local name = (M.ItemName and M.ItemName(key)) or tostring(key)
       -- bTs / aTs: when it fired (the Start page pins only fresh hits)
@@ -421,5 +504,8 @@ boot:RegisterEvent("PLAYER_LOGIN")
 boot:SetScript("OnEvent", function(self)
   self:UnregisterEvent("PLAYER_LOGIN")
   -- one frame later: M.db is created by Core's own PLAYER_LOGIN handler
-  C_Timer.After(0, M.RepairZeroPrices)
+  C_Timer.After(0, function()
+    M.RepairZeroPrices()
+    M.PruneLive()
+  end)
 end)

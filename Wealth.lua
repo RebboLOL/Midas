@@ -167,6 +167,10 @@ end
 function M.MergeForkedChars()
   local chars = M.db and M.db.chars
   if not chars then return end
+  -- a client that reports surnames keys every character by its full name
+  -- (M.CharKey): a first-name entry is then no fork but an old record --
+  -- M.ClaimShortChar hands it to the character it belongs to
+  if M.SurnameClient and M.SurnameClient() then return end
   local moves = {}
   for sk in pairs(chars) do
     local sn, sr = sk:match("^(.-)%-(.*)$")
@@ -193,18 +197,63 @@ function M.MergeForkedChars()
     end
   end
   if next(moves) == nil then return end
+  M.FoldChars(moves, false)
+end
+
+-- WoW Forever: up to 1.2.20 Midas keyed characters by their first name alone,
+-- so two characters sharing a first name shared ONE entry. Every character
+-- now has its full-name key; the old first-name entry moves to the character
+-- it belongs to, recognized by its gold (which cannot change while the
+-- character is offline). Another character's entry stays where it is until
+-- its owner logs in.
+function M.ClaimShortChar()
+  if not (M.PlayerFullName and M.db and M.db.chars) then return end
+  local full, first = M.PlayerFullName()
+  if not first then return end
+  local realm = GetRealmName() or "?"
+  local fk, sk = full .. "-" .. realm, first .. "-" .. realm
+  local sc = M.db.chars[sk]
+  if fk == sk or type(sc) ~= "table" then return end
+  local money = GetMoney and GetMoney()
+  if type(sc.money) == "number" and money ~= sc.money then return end
+  M.FoldChars({ [sk] = fk }, true)
+end
+
+-- Fold character entries into others: moves[from] = to. Trade log, ledger,
+-- recipes and daily snapshots follow. keepTarget = the TARGET is the live
+-- entry (its balances win; on days where both were counted the source was
+-- the double). Otherwise the SOURCE is the live one (the 1.2.4 fork merge).
+function M.FoldChars(moves, keepTarget)
+  local chars = M.db.chars
   for sk, fk in pairs(moves) do
     local sc, fc = chars[sk], chars[fk]
-    -- the short entry is the one the client writes NOW, so its balances are
-    -- current; the full entry keeps its display name and everything the
-    -- short one never recorded
-    for _, f in ipairs({ "money", "bags", "bank", "mail", "auctions",
-                         "bagsTs", "bankTs", "mailTs", "scope",
-                         "dead", "deadTs", "deadWorth" }) do
-      if sc[f] ~= nil then fc[f] = sc[f] end
+    if sc and not fc then
+      chars[fk] = sc
+    elseif sc then
+      -- 1.2.4: the short entry is the one the client writes NOW, so its
+      -- balances are current; the full entry keeps its display name and
+      -- everything the short one never recorded. Claim: the other way round,
+      -- and a living character never takes over a graveyard flag.
+      for _, f in ipairs({ "money", "bags", "bank", "mail", "auctions",
+                           "bagsTs", "bankTs", "mailTs", "auctionsTs", "mailGold",
+                           "pending", "pendingTs", "scope",
+                           "dead", "deadTs", "deadWorth" }) do
+        if sc[f] ~= nil then
+          if not keepTarget then fc[f] = sc[f]
+          elseif fc[f] == nil and f ~= "dead" and f ~= "deadTs" and f ~= "deadWorth" then fc[f] = sc[f] end
+        end
+      end
     end
     chars[sk] = nil
-    if M.Print then M.Print("merged duplicate character '" .. sk .. "' into '" .. fk .. "'.") end
+    local cr = M.db.crafts
+    if type(cr) == "table" and cr[sk] ~= nil then
+      if cr[fk] == nil then cr[fk] = cr[sk] end
+      cr[sk] = nil
+    end
+    if M.Print then
+      M.Print(keepTarget and ("this character's data moved from '" .. sk .. "' to its full name '" .. fk .. "'.")
+        or ("merged duplicate character '" .. sk .. "' into '" .. fk .. "'."))
+    end
   end
   if M.db.trade and M.db.trade.log then
     for _, e in ipairs(M.db.trade.log) do
@@ -258,9 +307,9 @@ function M.MergeForkedChars()
       if e.ck and moves[e.ck] then e.ck = moves[e.ck] end
     end
   end
-  -- daily snapshots: on days where BOTH keys were counted, the frozen full
-  -- value was pure double counting -- remove it from the totals, then point
-  -- the full key at the live (short) reading
+  -- daily snapshots: on days where BOTH keys were counted, the stale one was
+  -- pure double counting -- remove it from the totals, then point the target
+  -- key at the live reading (fork merge: the source; claim: the target)
   for _, hist in pairs(M.db.nw or {}) do
     for _, s in pairs(hist) do
       if type(s) == "table" and type(s.chars) == "table" then
@@ -268,24 +317,25 @@ function M.MergeForkedChars()
           local sv = s.chars[sk]
           if sv ~= nil then
             local fv = s.chars[fk]
+            local dropK = keepTarget and sk or fk
             if fv ~= nil then
-              s.t = math.max(0, (s.t or 0) - fv)
-              local fcc = type(s.cc) == "table" and type(s.cc[fk]) == "table" and s.cc[fk] or nil
-              if fcc and type(s.c) == "table" then
-                for cls, v in pairs(fcc) do
+              s.t = math.max(0, (s.t or 0) - (keepTarget and sv or fv))
+              local dcc = type(s.cc) == "table" and type(s.cc[dropK]) == "table" and s.cc[dropK] or nil
+              if dcc and type(s.c) == "table" then
+                for cls, v in pairs(dcc) do
                   if s.c[cls] then s.c[cls] = math.max(0, s.c[cls] - v) end
                 end
               end
               -- the per-item quantities (iq) carry no per-character split and
               -- stay as recorded; the gold total can be corrected exactly
-              if fcc and type(s.m) == "number" and fcc.Money then
-                s.m = math.max(0, s.m - fcc.Money)
+              if dcc and type(s.m) == "number" and dcc.Money then
+                s.m = math.max(0, s.m - dcc.Money)
               end
             end
-            s.chars[fk] = sv
+            if not (keepTarget and fv ~= nil) then s.chars[fk] = sv end
             s.chars[sk] = nil
             if type(s.cc) == "table" then
-              if fv ~= nil then s.cc[fk] = nil end
+              if fv ~= nil then s.cc[dropK] = nil end
               if s.cc[sk] ~= nil then s.cc[fk] = s.cc[sk]; s.cc[sk] = nil end
             end
           end
@@ -415,6 +465,7 @@ local IQ_MAX, IQ_GATE = 200, 5000
 -- Refresh the CURRENT character's bags + money first, so the live character is
 -- always accurate (other characters are as fresh as you last played them).
 function M.RecordNetWorth()
+  M.ClaimShortChar()    -- before today's snapshot can count an old first-name entry twice
   if M.CacheBags then M.CacheBags() end
   if M.CacheMoney then M.CacheMoney() end
   local nw = M.NetWorth()
@@ -470,6 +521,29 @@ function M.GraveyardChar(ck)
   if M.NWNavReset then M.NWNavReset() end   -- close the whole drill-down stack
   if M.frame and M.frame:IsShown() and M.RefreshWealth then M.RefreshWealth() end
   return true
+end
+
+-- Delete daily net-worth snapshots of this realm: one day, or that day and
+-- every earlier one (e.g. WoW Forever beta days that ended up in the live
+-- history). Characters, items, trades and the ledger stay as they are.
+-- Today's snapshot comes straight back with the next refresh.
+function M.ForgetWorthDays(day, andBefore)
+  if not (M.db and type(day) == "number") then return 0 end
+  local hist, n = M.NWHist(), 0
+  for d in pairs(hist) do
+    if d == day or (andBefore and d < day) then hist[d] = nil; n = n + 1 end
+  end
+  local ni = M.NWIntra()
+  for i = #ni, 1, -1 do
+    local d = M.DayOf and ni[i].ts and M.DayOf(ni[i].ts)
+    if d and (d == day or (andBefore and d < day)) then table.remove(ni, i) end
+  end
+  M._nwAttrib = nil
+  M.Print(string.format("deleted %d day%s of net worth history%s.", n, n == 1 and "" or "s",
+    andBefore and (" up to " .. M.DayLabel(day)) or (" (" .. M.DayLabel(day) .. ")")))
+  if M.NWNavReset then M.NWNavReset() end
+  if M.frame and M.frame:IsShown() and M.RefreshWealth then M.RefreshWealth() end
+  return n
 end
 
 function M.ReviveChar(ck)

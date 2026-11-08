@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.20"
+M.version = "1.2.21"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -168,18 +168,41 @@ function M.RealmKey()
   return realm
 end
 
--- One canonical "<Name>-<Realm>" key per character. WoW Forever allows
--- two-part names ("Deputy Willem"), and a beta client patch made UnitName
--- report only the first word -- which forked such characters into a second,
--- history-less entry. If the reported name and exactly ONE stored character
--- of this realm are the same name in short and long form, reuse the stored
--- key instead of minting a new one.
+-- WoW Forever characters carry a surname, which UnitName hands back as its
+-- SECOND value (Era: the realm, nil for yourself). UnitNameUnmodified ignores
+-- the "show my surname" display setting. Returns the full name and, when a
+-- surname was found, the first name alone.
+local function secret(v) return issecretvalue and issecretvalue(v) end
+function M.PlayerFullName()
+  local name, sur = (UnitNameUnmodified or UnitName)("player")
+  if type(name) ~= "string" or name == "" or secret(name) then
+    return UnitName("player") or "?", nil
+  end
+  if type(sur) ~= "string" or sur == "" or secret(sur)
+     or sur == GetRealmName() or (GetNormalizedRealmName and sur == GetNormalizedRealmName()) then
+    return name, nil
+  end
+  local tail = " " .. sur
+  if name:sub(-#tail) == tail then return name, name:sub(1, #name - #tail) end
+  return name .. tail, name
+end
+
+-- The client speaks surnames (WoW Forever): first names alone are not unique.
+function M.SurnameClient()
+  return (C_PlayerInfo and C_PlayerInfo.ShouldDisplaySurname) and true
+    or (Constants and Constants.CharacterNameSeparatorConsts) and true or false
+end
+
+-- One canonical "<Name>-<Realm>" key per character, with the full two-part
+-- name on WoW Forever. Without a surname from the client, a reported first
+-- name that matches exactly ONE stored two-part character of this realm
+-- reuses that key (the 1.2.4 beta-client fork guard).
 function M.CharKey()
-  local name = UnitName("player") or "?"
+  local name, first = M.PlayerFullName()
   local realm = GetRealmName() or "?"
   local exact = name .. "-" .. realm
   local chars = M.db and M.db.chars
-  if not chars or chars[exact] then return exact end
+  if not chars or chars[exact] or first then return exact end
   local suffix, hit, n = "-" .. realm, nil, 0
   for key in pairs(chars) do
     if key:sub(-#suffix) == suffix then

@@ -612,6 +612,9 @@ function M.RenderAllTime(canvas, key)
   -- day already ends on its own last scan.
   for i = 1, n do arr[i].px = arr[i].low end
   if arr[n].cur and not (lastOf and lastOf[arr[n].day]) then arr[n].px = arr[n].cur end
+  -- a newer live price from the same day (Data.lua) is what the headers show
+  local lv = M.FreshLive and not (lastOf and lastOf[arr[n].day]) and M.FreshLive(key, series[arr[n].day], arr[n].day)
+  if lv and M.DayOf(lv.ts) == arr[n].day then arr[n].px = lv.p end
 
   local vmin, vmax = math.huge, -math.huge
   for _, p in ipairs(arr) do

@@ -1,5 +1,10 @@
 # Midas – Changelog
 
+## 1.2.21 – 2026-11-08
+- **Current prices between scans.** Fixed a bug where Midas kept showing the price of its last full scan after an AH search or Auctionator had already shown a newer one - every price the auction house shows you now becomes the item's current price right away.
+- **Forever: characters sharing a first name.** Fixed a bug where two characters with the same first name shared one entry - every character is now kept under its full name.
+- **Delete net worth days.** Click a day in the Net Worth chart and Delete removes that day, or that day and every day before it.
+
 ## 1.2.20 – 2026-11-07
 - **A new start page.** The Start tab shows your net worth with what moved it this week, what your trading earned, your watchlist as a tinted grid of what is cheap and what you own that is ready to sell, and your next moves – fresh price alerts, undercut listings and sell and buy ideas ranked by the gold they move – and a switch next to the tabs brings back the classic start page.
 - **Crafting tab (beta).** Every recipe of your game version is drawn as a tech tree in its own scrollable field, the item on the right and its materials down to the raw goods on the left, every step with its total and unit price now and at Fair, what making it saves over buying it, the profit after the AH cut, what an item is used in and what gear disenchants into, and the "Enable crafting" switch in the tab or in Settings turns all of crafting off.

@@ -156,7 +156,7 @@ end
 function M.CacheMoney()
   local c = CharCache(); if not c then return end
   -- keep the stored two-part name when the client reports only its first word
-  local nm = UnitName("player")
+  local nm = (M.PlayerFullName and M.PlayerFullName()) or UnitName("player")
   if nm and not (c.name and c.name ~= nm and c.name:sub(1, #nm + 1) == nm .. " ") then c.name = nm end
   local m = GetMoney() or 0
   -- GetMoney() can read 0 during logout/loading; keep the known balance instead

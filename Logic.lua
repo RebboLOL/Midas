@@ -350,6 +350,10 @@ function M.Metrics(series, key)
   local score = math.min(margin, C.MARGIN_CAP) * liq * conf
   local lastRec = series[lastDay]
   local cur = (lastRec and (lastRec.cur or lastRec.low)) or lows[#lows]
+  -- the AH showed a newer price since the newest scan (search results,
+  -- Auctionator; Data.lua live prices): that one is current
+  local live = key and M.FreshLive and M.FreshLive(key, lastRec, lastDay)
+  if live then cur = live.p end
 
   -- Fair price v2: invert the sell-odds curve at the class anchor (see header).
   local liqLabel = liqLabelOf(avgQty)
@@ -418,6 +422,7 @@ function M.Metrics(series, key)
     avgQty = avgQty, days = days, lastDay = lastDay,
     margin = margin, liq = liq, conf = conf, score = score,
     cur = cur, delta = (fair > 0) and (cur / fair - 1) or 0,
+    liveTs = live and live.ts or nil, liveQty = live and live.q or nil,
   }
   if memo then memo.items[key] = m end
   return m
@@ -468,7 +473,16 @@ end
 
 -- The item is missing from the newest scan day: its Current is a last-seen price.
 function M.NotListed(m)
-  return (m and m.lastDay and m.lastDay < M.LastScanDay()) and true or false
+  if not (m and m.lastDay) then return false end
+  -- a live price (seen in the AH after the item's newest scan) decides by its own day
+  if m.liveTs then return M.DayOf(m.liveTs) < M.LastScanDay() end
+  return m.lastDay < M.LastScanDay()
+end
+
+-- Day the item was last seen in the AH (scan or live price), for "last seen" labels.
+function M.SeenDay(m)
+  if m and m.liveTs then return M.DayOf(m.liveTs) end
+  return m and m.lastDay
 end
 
 -- Newest days first: list {day, low, qty}, optionally capped at n

@@ -1516,7 +1516,7 @@ function M.FillChartCard(obj, key)
   if m.speed then sells = string.format("~%.1f/day \194\183 %s", m.speed, m.liqLabel or "?") end
   local gone = M.NotListed and M.NotListed(m)
   if gone then
-    setStat(obj, 1, "Last seen", M.MoneyPlain(cur) .. "  \194\183  " .. M.DayLabel(m.lastDay), C.muted)
+    setStat(obj, 1, "Last seen", M.MoneyPlain(cur) .. "  \194\183  " .. M.DayLabel(M.SeenDay(m)), C.muted)
   else
     setStat(obj, 1, "Current", M.MoneyPlain(cur))
   end
@@ -3849,6 +3849,18 @@ StaticPopupDialogs["MIDAS_GRAVEYARD_CHAR"] = {
   end,
 }
 
+-- Deleting net-worth days cannot be undone: the popup names the day and offers
+-- both scopes -- this day only, or this day and every earlier one.
+StaticPopupDialogs["MIDAS_FORGET_WORTH"] = {
+  text = "Delete net worth history?\n\n%s only, or %s and every day before it - for example beta days that ended up in your live history. Characters, items and trades stay. This cannot be undone.",
+  button1 = "This day",
+  button3 = "And all before",
+  button2 = CANCEL or "Cancel",
+  timeout = 0, whileDead = 1, hideOnEscape = 1, preferredIndex = 3,
+  OnAccept = function(self) if M.ForgetWorthDays then M.ForgetWorthDays(self.data, false) end end,
+  OnAlt = function(self) if M.ForgetWorthDays then M.ForgetWorthDays(self.data, true) end end,
+}
+
 function M.BuildWealth(panel)
   local w = {}; M.wealth = w
   local lbl = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
@@ -4409,6 +4421,18 @@ function M.BuildWealth(panel)
   if T.HelpTip then
     T.HelpTip(dvMoved, "What moved since this day?", {
       "Opens the account-wide item breakdown attributed against THIS day's snapshot: every item's quantity and market effect plus realized trading between then and now." })
+  end
+  -- drop a wrong day -- or this day and everything before it (beta leftovers)
+  local dvDel = T.Button(dv, "Delete\226\128\166", 80, 22)
+  dvDel:SetPoint("TOPRIGHT", dvMoved, "TOPLEFT", -8, 0)
+  dvDel:SetScript("OnClick", function()
+    if not dv.day then return end
+    local lbl = M.DayLabel(dv.day)
+    StaticPopup_Show("MIDAS_FORGET_WORTH", lbl, lbl, dv.day)
+  end)
+  if T.HelpTip then
+    T.HelpTip(dvDel, "Delete history", {
+      "Deletes this day's net worth snapshot - or this day and every earlier one, for example beta days that ended up in your live history. Characters, items and trades are not touched." })
   end
   local ca = T.Text(dv, T.SIZE.tiny, "muted", T.FONT_MED)
   ca:SetPoint("TOPLEFT", 2, -56); ca:SetText("BY ASSET CLASS \194\183 that day \194\183 change to now")
@@ -7051,7 +7075,7 @@ function M.RefreshCharts()
       else word, col = "NEUTRAL", SUBC end
       local sig = col .. word .. string.format("  %+.0f%%|r " .. MUT .. "vs Fair|r", m.delta * 100)
       if gone then
-        sig = col .. word .. "|r" .. MUT .. "   in the newest scan  \194\183  last seen " .. M.DayLabel(m.lastDay) .. "|r"
+        sig = col .. word .. "|r" .. MUT .. "   in the newest scan  \194\183  last seen " .. M.DayLabel(M.SeenDay(m)) .. "|r"
       elseif m.odds then
         sig = sig .. MUT .. string.format("    \194\183    ~%.0f%% odds at this price", m.odds * 100) .. "|r"
       end
