@@ -1028,6 +1028,8 @@ function M.ShowAHBook(id)
   if M.db.config and M.db.config.ahBook == false then if ahb then ahb:Hide() end return end
   if ahb and ahb._dismissed then return end   -- X-ed away for this AH visit
   if not M.AHOpen then return end
+  -- the book is your own market's last scan: wrong at a neutral AH
+  if M.AtNeutralAH() then if ahb then ahb:Hide() end return end
   local f = ahBookPanel()
   if not f then return end
   f._id = id
@@ -1336,7 +1338,8 @@ function M.ShowSellDock()
   if not M.db then return end
   if M.db.config and M.db.config.sellDock == false then if sdk then sdk:Hide() end return end
   if sdk and sdk._dismissed then return end   -- X-ed away for this AH visit
-  if not M.AHOpen then if sdk then sdk:Hide() end return end
+  -- its ranking and prices are your own market's: wrong at a neutral AH
+  if not M.AHOpen or M.AtNeutralAH() then if sdk then sdk:Hide() end return end
   local host = sdAnchor()
   if not host then if sdk then sdk:Hide() end return end
   -- Blizzard classic UI IN USE = one of its tab panels is on screen: dock only

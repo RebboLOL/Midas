@@ -168,6 +168,43 @@ function M.RealmKey()
   return realm
 end
 
+-- Neutral auction houses (Booty Bay, Gadgetzan, Everlook) are a market of their
+-- own: other prices and a 15% cut instead of 5%. Their scans and prices are kept
+-- under a separate key that no list, chart or sync ever reads. Detected by the
+-- zone the player stands in while the AH is open - no faction AH shares one.
+local NEUTRAL_MAPS = {
+  [1434] = true, [1446] = true, [1452] = true,               -- Era: Stranglethorn Vale, Tanaris, Winterspring
+  [224] = true, [210] = true, [71] = true, [83] = true,      -- modern maps: Stranglethorn, Cape, Tanaris, Winterspring
+}
+function M.InNeutralZone()
+  if not (C_Map and C_Map.GetBestMapForUnit) then return false end
+  local ok, id = pcall(C_Map.GetBestMapForUnit, "player")
+  local hops = 0
+  while ok and type(id) == "number" and hops < 6 do
+    if NEUTRAL_MAPS[id] then return true end
+    local info = C_Map.GetMapInfo and C_Map.GetMapInfo(id)
+    id = info and info.parentMapID
+    hops = hops + 1
+  end
+  return false
+end
+
+-- true while a neutral auction house is open (zone looked up once per visit)
+function M.AtNeutralAH()
+  if not M.AHOpen then return false end
+  if M._ahNeutral == nil then M._ahNeutral = M.InNeutralZone() end
+  return M._ahNeutral
+end
+
+function M.NeutralKey() return (GetRealmName() or "Realm") .. " Neutral" end
+function M.IsNeutralKey(k) return type(k) == "string" and k:sub(-8) == " Neutral" end
+
+-- An auction sale that paid the neutral 15% cut (the faction AH keeps 5%).
+-- Below 1s the 1c rounding of the cut blurs the two rates.
+function M.NeutralSale(e)
+  return e.kind == "sold" and (e.gross or 0) >= 100 and (e.fee or 0) > e.gross * 0.10
+end
+
 -- WoW Forever characters carry a surname, which UnitName hands back as its
 -- SECOND value (Era: the realm, nil for yourself). UnitNameUnmodified ignores
 -- the "show my surname" display setting. Returns the full name and, when a
@@ -239,11 +276,25 @@ end
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
 f:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+f:RegisterEvent("AUCTION_HOUSE_SHOW")
+f:RegisterEvent("AUCTION_HOUSE_CLOSED")
 f:SetScript("OnEvent", function(_, event, ...)
   if event == "PLAYER_LOGIN" then
     M.OnLogin()
   elseif event == "GET_ITEM_INFO_RECEIVED" then
     M.OnItemInfo(...)
+  elseif event == "AUCTION_HOUSE_SHOW" or event == "AUCTION_HOUSE_CLOSED" then
+    M._ahNeutral = nil
+    -- once per session: say why the Midas numbers don't follow this AH
+    if event == "AUCTION_HOUSE_SHOW" and not M._neutralNoted then
+      C_Timer.After(1, function()
+        if M.AtNeutralAH() and not M._neutralNoted then
+          M._neutralNoted = true
+          M.Print("Neutral auction house: Midas keeps its prices apart - a scan here is stored separately and never changes your "
+            .. (UnitFactionGroup("player") or "faction") .. " prices.")
+        end
+      end)
+    end
   end
 end)
 
@@ -364,7 +415,7 @@ function M.OnLogin()
     if rk and young then
       local others = false
       for k, st in pairs(MidasDB.realms) do
-        if k ~= rk and type(st) == "table" and next(st) then others = true; break end
+        if k ~= rk and not M.IsNeutralKey(k) and type(st) == "table" and next(st) then others = true; break end
       end
       MidasDB.config.realmHint = MidasDB.config.realmHint or {}
       if others and not MidasDB.config.realmHint[rk] then
@@ -473,6 +524,7 @@ function M.MergeRealm(old)
   local oldKey = resolve(db.realms) or resolve(db.nw) or resolve(db.depth) or resolve(db.alerts)
   if not oldKey then return false, "notfound" end
   if oldKey == new then return false, "same" end
+  if M.IsNeutralKey(oldKey) then return false, "neutral" end   -- kept apart on purpose
   local moved = { items = 0, trades = 0, days = 0 }
   -- price archive: fill gaps; on a day collision keep min low / max qty, newer cur
   if db.realms and db.realms[oldKey] then
@@ -570,7 +622,8 @@ SlashCmdList["MIDAS"] = function(msg)
         local n = 0
         for _ in pairs(st) do n = n + 1 end
         any = true
-        M.Print(string.format("%s%s   \194\183   %d items", k, (k == rk) and "  (current)" or "", n))
+        M.Print(string.format("%s%s   \194\183   %d items", k,
+          (k == rk) and "  (current)" or (M.IsNeutralKey(k) and "  (neutral auction houses, kept apart)" or ""), n))
       end
     end
     if not any then M.Print("No stored realms yet.") end
@@ -586,6 +639,8 @@ SlashCmdList["MIDAS"] = function(msg)
           oldKey, M.RealmKey(), info.items or 0, info.trades or 0, info.days or 0))
       elseif info == "same" then
         M.Print("That IS the current realm - nothing to merge.")
+      elseif info == "neutral" then
+        M.Print("Neutral auction house prices stay apart - they would distort your own market.")
       else
         M.Print('No stored realm called "' .. arg .. '" - "/midas realms" lists them.')
       end

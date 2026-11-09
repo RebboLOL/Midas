@@ -16,13 +16,71 @@ local function unitPrice(c)
   return c
 end
 
+-- ===== Neutral auction houses =================================================
+-- Scans and prices seen at a neutral AH (Core.lua M.AtNeutralAH) land in
+-- M.db.realms[M.NeutralKey()] - same daily rows (low = MIN, qty = MAX, cur/ts =
+-- newest), but no list, chart, alert or sync reads that key. It also keeps
+-- neutral day lows out of the Auctionator/aux import (M.NeutralBlocks): both
+-- addons file the neutral AH under the faction's key.
+local NEUTRAL_KEEP = 60   -- days
+
+local function noteNeutral(id, unit, qty, day, now)
+  local store = Store(M.NeutralKey())
+  local key = tostring(id)
+  local it = store[key]; if not it then it = {}; store[key] = it end
+  local rec = it[day]
+  if not rec then
+    it[day] = { low = unit, qty = qty or 0, cur = unit, ts = now }
+  else
+    if unit < rec.low then rec.low = unit end
+    if (qty or 0) > (rec.qty or 0) then rec.qty = qty end
+    rec.cur, rec.ts = unit, now
+  end
+end
+
+-- An imported day low that is not below what the neutral AH showed on that day
+-- may well be the neutral price itself: it stays out.
+function M.NeutralBlocks(key, day, low)
+  local ns = M.db and M.db.realms and M.db.realms[M.NeutralKey()]
+  if not ns or type(low) ~= "number" then return false end
+  local it = ns[tostring(key)]
+  if not it then
+    local base = tostring(key):match("^%a+:(%d+)")
+    it = base and ns[base]
+  end
+  local rec = it and it[day]
+  return (rec and rec.low and low >= rec.low) and true or false
+end
+
+function M.PruneNeutral()
+  local ns = M.db and M.db.realms and M.db.realms[M.NeutralKey()]
+  if not ns then return end
+  local cut = M.GetScanDay() - NEUTRAL_KEEP
+  for key, it in pairs(ns) do
+    for day in pairs(it) do
+      if type(day) ~= "number" or day < cut then it[day] = nil end
+    end
+    if next(it) == nil then ns[key] = nil end
+  end
+end
+
 -- Commit a scan snapshot {itemID = {low=copper, qty=n}} into MidasDB.
 -- One bucket per scan day; idempotent merge (low = MIN, qty = MAX). Each record
 -- also carries cur (latest scan price, last-write-wins) and ts (scan timestamp,
 -- the tie-breaker that keeps cur consistent across community sync). Rows the
 -- scan actually changed are handed to Comm.lua for broadcasting.
+-- A scan at a neutral AH is stored apart and touches nothing else.
 function M.CommitScan(acc)
   if not M.db or type(acc) ~= "table" then return end
+  if M.AtNeutralAH() then
+    local day, now, items = M.GetScanDay(), time(), 0
+    for itemID, a in pairs(acc) do
+      if a.low then items = items + 1; noteNeutral(itemID, unitPrice(a.low), a.qty, day, now) end
+    end
+    M.Print(string.format("Neutral auction house scan stored apart: %d items, day %s - your %s prices stay as they were.",
+      items, M.DayLabel(day), UnitFactionGroup("player") or "faction"))
+    return
+  end
   local day = M.GetScanDay()
   local now = time()
   local store = Store()
@@ -150,12 +208,14 @@ function M.ObserveLive(itemID, unit, qty)
   if not M.db or type(unit) ~= "number" or unit <= 0 or unit > 5e9 then return end
   local id = tonumber(itemID)
   if not id then return end
+  unit = unitPrice(math.floor(unit))
+  if type(qty) ~= "number" or qty < 0 then qty = nil end
+  -- the neutral AH's own prices never become the current price
+  if M.AtNeutralAH() then noteNeutral(id, unit, qty, M.GetScanDay(), time()); return end
   local rk = M.RealmKey()
   M.db.live = M.db.live or {}
   local ls = M.db.live[rk]; if not ls then ls = {}; M.db.live[rk] = ls end
   local key = tostring(id)
-  unit = unitPrice(math.floor(unit))
-  if type(qty) ~= "number" or qty < 0 then qty = nil end
   local old = ls[key]
   ls[key] = { p = unit, q = qty, ts = time() }
   if M._mCache and M._mCache.items then M._mCache.items[key] = nil end
@@ -230,6 +290,7 @@ end
 -- snapshot itself is only replaced by the next full scan. Returns true when
 -- the bought price level was found and reduced (then the open books refresh).
 function M.DepthBuyout(itemID, unit, units)
+  if M.AtNeutralAH() then return false end   -- the stored ladder is your own market's
   local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
   local id = tonumber(itemID)
   local flat = d and d.items and id and d.items[id]
@@ -507,5 +568,6 @@ boot:SetScript("OnEvent", function(self)
   C_Timer.After(0, function()
     M.RepairZeroPrices()
     M.PruneLive()
+    M.PruneNeutral()
   end)
 end)

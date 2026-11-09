@@ -180,14 +180,19 @@ local function runImport(src, handle, fp, force)
       local touched = false
       for day, lq in pairs(days) do
         local rec = it[day]
-        if not rec then
-          it[day] = { low = lq[1], qty = lq[2] }
-          rows = rows + 1; touched = true
-        else
-          local ch = false
-          if lq[1] < rec.low then rec.low = lq[1]; ch = true end
-          if lq[2] > (rec.qty or 0) then rec.qty = lq[2]; ch = true end
-          if ch then rows = rows + 1; touched = true end
+        -- both addons file the neutral AH under the faction's key: a day low
+        -- the neutral AH may have set stays out
+        local neutral = M.NeutralBlocks and M.NeutralBlocks(itemKey, day, lq[1])
+        if not neutral then
+          if not rec then
+            it[day] = { low = lq[1], qty = lq[2] }
+            rows = rows + 1; touched = true
+          else
+            local ch = false
+            if lq[1] < rec.low then rec.low = lq[1]; ch = true end
+            if lq[2] > (rec.qty or 0) then rec.qty = lq[2]; ch = true end
+            if ch then rows = rows + 1; touched = true end
+          end
         end
       end
       if touched then items = items + 1 end

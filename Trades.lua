@@ -331,9 +331,11 @@ function M.ScanTradeMail()
           -- counts while the listings cache could also have priced an expiry of
           -- this item -- same observability for both outcomes keeps the measured
           -- sell-through honest (else sales would be over-counted).
+          -- (a sale at a neutral AH says nothing about your own market)
           local calPrice
           if kind == "sold" then
-            if t.listings and id and t.listings[id] and #t.listings[id] > 0 then calPrice = gross end
+            if t.listings and id and t.listings[id] and #t.listings[id] > 0
+               and not M.NeutralSale({ kind = kind, gross = gross, fee = fee }) then calPrice = gross end
           elseif kind == "returned" then
             calPrice = listPrice
           end
@@ -581,7 +583,7 @@ function M.SeedCurve()
   if not t0 then return 0 end
   local n = 0
   for _, e in ipairs(t.log) do
-    if e.realm == realm and e.id and (e.day or 0) >= t0 and e.src ~= "trade"
+    if e.realm == realm and e.id and (e.day or 0) >= t0 and e.src ~= "trade" and not M.NeutralSale(e)
        and (e.kind == "sold" or (e.kind == "returned" and (e.listPrice or 0) > 0)) then
       local cnt = (e.count and e.count > 0) and e.count or 1
       local unit = ((e.kind == "sold") and (e.gross or 0) or e.listPrice) / cnt
@@ -612,8 +614,8 @@ function M.OutcomeCounts(key, realm)
       local cutoff = M.GetScanDay() - (M.C.SELL_WINDOW or 60)
       for _, e in ipairs(t.log) do
         -- auction outcomes only: a trade-window sale says nothing about how
-        -- an ask fares at the AH
-        if e.realm == realm and e.id and (e.day or 0) >= cutoff and e.src ~= "trade" then
+        -- an ask fares at the AH, nor does a sale at a neutral AH
+        if e.realm == realm and e.id and (e.day or 0) >= cutoff and e.src ~= "trade" and not M.NeutralSale(e) then
           if e.kind == "sold" or e.kind == "returned" then
             local r = cache[e.id]
             if not r then r = { s = 0, n = 0 }; cache[e.id] = r end
@@ -690,7 +692,8 @@ function M.RealizedSell(key, realm)
       local tmp, oldest = {}, nil
       for _, e in ipairs(t.log) do
         if e.realm == realm and e.day and (not oldest or e.day < oldest) then oldest = e.day end
-        if e.kind == "sold" and e.src ~= "trade" and e.realm == realm and e.id and (e.day or 0) >= cutoff then
+        if e.kind == "sold" and e.src ~= "trade" and e.realm == realm and e.id and (e.day or 0) >= cutoff
+           and not M.NeutralSale(e) then
           local cnt = (e.count and e.count > 0) and e.count or 1
           local unit = (e.gross or 0) / cnt
           if unit > 0 then

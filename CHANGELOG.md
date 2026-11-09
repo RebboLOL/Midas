@@ -2,6 +2,7 @@
 
 ## 1.2.22 – 2026-11-08
 - **Full item tooltips on the start page.** Fixed a bug where hovering an item on the start page showed only the plain game tooltip - it now carries the Midas price lines and the price chart.
+- **Neutral auction houses kept apart.** Fixed a bug where a scan or search at the Booty Bay, Gadgetzan or Everlook auction house mixed its higher prices into your own market - they are now stored separately and never shown, shared or used for Fair prices.
 
 ## 1.2.21 – 2026-11-08
 - **Current prices between scans.** Fixed a bug where Midas kept showing the price of its last full scan after an AH search or Auctionator had already shown a newer one - every price the auction house shows you now becomes the item's current price right away.
