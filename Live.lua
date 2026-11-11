@@ -94,6 +94,7 @@ local function browseIsUnit(id)
   end
   return false
 end
+M.BrowseIsUnit = browseIsUnit   -- the quick scan (ScannerModern) asks for item lists otherwise
 
 local function onBrowse()
   if not (AH and AH.GetBrowseResults) then return end

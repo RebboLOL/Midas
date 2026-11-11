@@ -252,7 +252,8 @@ local function LocalManifest()
     local id = tonumber(key)
     if id then
       for day, rec in pairs(it) do
-        if day >= horizon and day <= today then
+        -- quick-scan rows (Data.lua M.CommitQuick) are never on offer
+        if day >= horizon and day <= today and not rec.quick then
           local e = per[day]
           if not e then e = { cnt = 0, ck = 0 }; per[day] = e end
           e.cnt = e.cnt + 1
@@ -264,6 +265,7 @@ local function LocalManifest()
   manCache, manCacheT = per, GetTime()
   return per
 end
+M._commManifest = LocalManifest   -- offline tests
 
 local lastManifestTx, lastManifestVicinityTx = 0, 0
 local function SendManifest(force)
@@ -332,7 +334,7 @@ local function SendDayData(day, chan)
   for key, it in pairs(M.IterItems()) do
     local id = tonumber(key)
     local rec = id and it[day]
-    if rec then
+    if rec and not rec.quick then
       rows[#rows + 1] = { id = id, low = rec.low, qty = rec.qty,
         cur = (rec.ts and rec.cur) or nil, ts = rec.ts }
     end

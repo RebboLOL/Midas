@@ -139,17 +139,24 @@ local function ownership()
   return hold, listed
 end
 
+-- row of the newest scan day - or a newer quick-scan row of the item (those
+-- never move the newest scan day, Data.lua M.CommitQuick) - and its day
 local function newestRec(key, lastDay)
   local s = M.GetSeries(key)
-  return s and lastDay and s[lastDay]
+  if not (s and lastDay) then return nil end
+  local today = M.GetScanDay()
+  for d = today, math.max(lastDay + 1, today - 14), -1 do
+    if s[d] then return s[d], d end
+  end
+  return s[lastDay], lastDay
 end
 
 -- price + timestamp in the newest scan, or a newer live price the AH showed
 -- since (Data.lua) while it is listed
 local function newestCur(key, lastDay)
-  local rec = newestRec(key, lastDay)
+  local rec, day = newestRec(key, lastDay)
   local cur, ts = rec and (rec.cur or rec.low), rec and rec.ts
-  local lv = M.FreshLive and M.FreshLive(key, rec, lastDay)
+  local lv = M.FreshLive and M.FreshLive(key, rec, day or lastDay)
   if lv and M.LiveListed(lv) then cur, ts = lv.p, lv.ts end
   return cur, ts
 end

@@ -64,6 +64,29 @@ function M.PruneNeutral()
   end
 end
 
+-- intraday tail (1W chart): last scans per item, own top-level store so the
+-- daily rows (and the community sync built on them) stay byte-identical.
+-- A repeat of the same low+qty only slides the newest point's ts forward.
+local function intraStore()
+  M.db.intra = M.db.intra or {}
+  local rk = M.RealmKey()
+  local istore = M.db.intra[rk]; if not istore then istore = {}; M.db.intra[rk] = istore end
+  return istore
+end
+
+local function pushIntra(istore, key, low, qty, now)
+  local st = istore[key]
+  if not st then st = {}; istore[key] = st end
+  local lp = st[#st]
+  if lp and lp.low == low and lp.qty == qty then
+    lp.ts = now
+  else
+    st[#st + 1] = { ts = now, low = low, qty = qty }
+  end
+  local icut = now - 8 * 86400
+  while st[1] and (st[1].ts < icut or #st > 16) do table.remove(st, 1) end
+end
+
 -- Commit a scan snapshot {itemID = {low=copper, qty=n}} into MidasDB.
 -- One bucket per scan day; idempotent merge (low = MIN, qty = MAX). Each record
 -- also carries cur (latest scan price, last-write-wins) and ts (scan timestamp,
@@ -84,12 +107,8 @@ function M.CommitScan(acc)
   local day = M.GetScanDay()
   local now = time()
   local store = Store()
-  -- intraday tail (1W chart): last scans per item, own top-level store so the
-  -- daily rows (and the community sync built on them) stay byte-identical
-  M.db.intra = M.db.intra or {}
   local rk = M.RealmKey()
-  local istore = M.db.intra[rk]; if not istore then istore = {}; M.db.intra[rk] = istore end
-  local icut = now - 8 * 86400
+  local istore = intraStore()
   M.db.names = M.db.names or {}
   local names = M.db.names
   local items, changed = 0, {}
@@ -106,17 +125,7 @@ function M.CommitScan(acc)
       local key = tostring(itemID)
       local low = unitPrice(a.low)
       local it = store[key]; if not it then it = {}; store[key] = it end
-      -- a repeat of the same low+qty only slides the newest point's ts forward
-      -- (a flat stretch needs no extra point)
-      local st = istore[key]
-      if not st then st = {}; istore[key] = st end
-      local lp = st[#st]
-      if lp and lp.low == low and lp.qty == (a.qty or 0) then
-        lp.ts = now
-      else
-        st[#st + 1] = { ts = now, low = low, qty = a.qty or 0 }
-      end
-      while st[1] and (st[1].ts < icut or #st > 16) do table.remove(st, 1) end
+      pushIntra(istore, key, low, a.qty or 0, now)
       local rec = it[day]
       if not rec then
         it[day] = { low = low, qty = a.qty or 0, cur = low, ts = now }
@@ -126,6 +135,8 @@ function M.CommitScan(acc)
         if low < rec.low then rec.low = low; ch = true end
         if (a.qty or 0) > (rec.qty or 0) then rec.qty = a.qty; ch = true end
         if rec.cur ~= low then rec.cur = low; ch = true end -- latest scan wins
+        -- a quick-scan row of today is a full-scan row now (and may be shared)
+        if rec.quick then rec.quick = nil; ch = true end
         rec.ts = now
         if ch then changed[#changed + 1] = { id = itemID, low = rec.low, qty = rec.qty, cur = rec.cur } end
       end
@@ -155,6 +166,52 @@ function M.CommitScan(acc)
   if M.OnScanCommitted then M.OnScanCommitted(day, changed, now) end
   if M.FireAPIEvent then M.FireAPIEvent("SCAN_COMPLETE", { day = day, items = items, ts = now, market = M.MarketInfo() }) end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+end
+
+-- Commit a quick scan (ScannerModern: only YOUR items, while the full snapshot
+-- is slow or on cooldown) {itemID = {low, qty}}. The items it found get today's
+-- daily row just like a full scan's - charts, Fair price, alerts and the 1W
+-- intraday line all see them. A row only a quick scan wrote carries quick =
+-- true: it never moves the newest scan day (M.LastScanDay), so every item the
+-- quick scan did not reach counts as "not scanned" instead of "not listed", and
+-- the community sync never offers it (a peer's newest day would jump the same
+-- way). The next full scan - own or synced - of that day drops the mark.
+-- Returns the number of items stored.
+function M.CommitQuick(acc)
+  if not M.db or type(acc) ~= "table" then return 0 end
+  local day, now, items = M.GetScanDay(), time(), 0
+  if M.AtNeutralAH() then
+    for itemID, a in pairs(acc) do
+      if a.low then items = items + 1; noteNeutral(itemID, unitPrice(a.low), a.qty, day, now) end
+    end
+    return items
+  end
+  local store = Store()
+  local istore = intraStore()
+  for itemID, a in pairs(acc) do
+    if type(a) == "table" and type(a.low) == "number" and a.low > 0 then
+      items = items + 1
+      local key = tostring(itemID)
+      local low, qty = unitPrice(math.floor(a.low)), a.qty or 0
+      local it = store[key]; if not it then it = {}; store[key] = it end
+      pushIntra(istore, key, low, qty, now)
+      local rec = it[day]
+      if not rec then
+        it[day] = { low = low, qty = qty, cur = low, ts = now, quick = true }
+      else
+        -- a full-scan row of today stays one: same merge rules, no mark
+        if low < rec.low then rec.low = low end
+        if qty > (rec.qty or 0) then rec.qty = qty end
+        rec.cur, rec.ts = low, now
+      end
+    end
+  end
+  if items == 0 then return 0 end
+  M.DirtyAnalysis()
+  if M.CheckAlerts then M.CheckAlerts() end
+  if M.ShowSellDock then M.ShowSellDock() end
+  if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
+  return items
 end
 
 -- ===== Live prices ==========================================================
@@ -345,6 +402,8 @@ function M.MergeSharedRows(day, rows, fromGuild)
           if rec.cur ~= cur then ch = true end
           rec.cur, rec.ts = cur, r.ts
         end
+        -- a peer's full scan covered this item on that day: no quick row any more
+        if rec.quick then rec.quick = nil; ch = true end
         if ch then improved = improved + 1 end
       end
     end
@@ -530,15 +589,17 @@ function M.IterItems(realm)             -- returns the store table
   return (M.db and M.db.realms[realm or M.RealmKey()]) or {}
 end
 
-function M.LastScanDay(realm)           -- highest day in the archive (cached)
+-- highest day in the archive (cached). Quick-scan rows (M.CommitQuick) do not
+-- count: a day only a quick scan reached is no scan day for the other items.
+function M.LastScanDay(realm)
   realm = realm or M.RealmKey()
   M._lastDayCache = M._lastDayCache or {}
   local cached = M._lastDayCache[realm]
   if cached ~= nil then return cached end
   local last = -1
   for _, it in pairs(M.IterItems(realm)) do
-    for day in pairs(it) do
-      if day > last then last = day end
+    for day, rec in pairs(it) do
+      if day > last and not (type(rec) == "table" and rec.quick) then last = day end
     end
   end
   M._lastDayCache[realm] = last        -- invalidated by M.DirtyAnalysis on any archive change

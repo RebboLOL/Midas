@@ -1,6 +1,10 @@
 # Midas – Changelog
 
-## 1.2.22 – 2026-11-08
+## 1.2.23 – 2026-11-10
+- **Forever: quick scan of your items.** When the full scan is slow or on cooldown, Midas scans your auctions, alerts, watchlist and stock on its own and adds today's prices to the charts.
+- **The window opens on the first click.** Fixed a bug where the first click on the minimap coin or /midas after logging in did not open the window - it now opens right away.
+
+## 1.2.22 – 2026-11-09
 - **Full item tooltips on the start page.** Fixed a bug where hovering an item on the start page showed only the plain game tooltip - it now carries the Midas price lines and the price chart.
 - **Neutral auction houses kept apart.** Fixed a bug where a scan or search at the Booty Bay, Gadgetzan or Everlook auction house mixed its higher prices into your own market - they are now stored separately and never shown, shared or used for Fair prices.
 

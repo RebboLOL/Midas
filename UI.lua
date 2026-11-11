@@ -314,8 +314,13 @@ function M.EnsureUI()
   if M.BuildCrafting then M.BuildCrafting(M.panels[TAB.Crafting]) end
   M.BuildSettings(M.panels[TAB.Settings])
   M.BuildHelp(M.panels[TAB.Help])
+  -- start on tab 1 WITHOUT filling it: the window is still hidden here and
+  -- every caller shows it and fills it right after (Toggle, SelectTab, Go).
+  -- Filling the hidden window doubled the work of the first open.
   M.curTab = 1
-  M.SelectTab(1)
+  for j, p in ipairs(M.panels) do p:SetShown(j == 1) end
+  M.tabBar:Select(1)
+  M.UpdateChartToggles()
 end
 
 function M.SelectTab(i)
@@ -447,8 +452,21 @@ function M.RerenderCharts()
 end
 
 function M.Toggle()
+  if M.frame and M.frame:IsShown() then M.frame:Hide(); return end
+  local first = not M.frame
   M.EnsureUI()
-  if M.frame:IsShown() then M.frame:Hide() else M.frame:Show(); M.RefreshUI() end
+  M.frame:Show()
+  if first then
+    -- the first open has just built all nine tabs: the window shows now and
+    -- its content fills one frame later, as a script run of its own. Build
+    -- and fill in ONE run could hit the client's script time limit, which
+    -- aborts silently - the window then stayed shut until the second click.
+    C_Timer.After(0, function()
+      if M.frame:IsShown() then M.RefreshUI() end
+    end)
+  else
+    M.RefreshUI()
+  end
 end
 
 -- ===== Chart timeframe (1W / 1M / 3M / All) =================================

@@ -283,7 +283,11 @@ function M.Go(dest, key, arg)
   if M.HideCraftPeek then M.HideCraftPeek() end
   GameTooltip:Hide()
   M.frame:Show()
-  if openDest(dest, key, arg) == false then return end
+  if openDest(dest, key, arg) == false then
+    -- opened, but nowhere to go: fill the tab it shows instead
+    if not from then M.RefreshUI() end
+    return
+  end
   if from and not same(from, capture()) then
     stack[#stack + 1] = from
     while #stack > MAX_STACK do table.remove(stack, 1) end

@@ -39,6 +39,13 @@ snapshot scan, commodities included):
 
 The full scan is server-throttled to roughly once every ~15 minutes – that's a game limit, not the addon.
 
+**Quick scan (WoW Forever).** When the server takes longer than 45 seconds to send the full scan, or a
+click hits the 15-minute cooldown, Midas scans your own items on its own: your auctions, price alerts,
+watchlist and the stock in your bags, bank and mail (up to 200 items). Their prices land in today's
+chart point like a full scan's; every other item keeps its last full scan and is never marked as not
+listed because of it. The full scan still comes in when the server sends it. `/midas quick` turns the
+quick scan off and on.
+
 ## Usage
 - **Minimap button** (gold coin) – mouseover shows the best sells from your holdings;
   left-click opens the window, right-click opens the **gold timer**, Shift + right-click runs a scan,
@@ -57,6 +64,7 @@ The full scan is server-throttled to roughly once every ~15 minutes – that's a
 - `/midas help` – print this command list in-game (any unknown command shows it too)
 - `/midas scan` – run a full AH scan now (must be at the auction house)
 - `/midas auto` – toggle automatic scan on AH open (off by default; the Midas Scan button is the normal way)
+- `/midas quick` – toggle the quick scan of your own items while the full scan is slow or on cooldown (WoW Forever, on by default)
 - `/midas sells` – print sell tips from your holdings to chat
 - `/midas trades` – print your trading summary (net P/L, sell-through) to chat
 - `/midas ledger` – (beta) gold in/out of today and the last 7 days; `ledger recent` lists the last bookings,

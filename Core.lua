@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.22"
+M.version = "1.2.23"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -466,6 +466,7 @@ function M.PrintHelp()
     "/midas  -  open / close the window",
     "/midas scan  -  full AH scan (auction house must be open)",
     "/midas auto  -  toggle auto-scan when the AH opens",
+    "/midas quick  -  toggle the quick scan of your items while the full scan is slow (WoW Forever)",
     "/midas status  -  archive status (items, days, last scan)",
     "/midas import  -  re-check the Auctionator / aux price databases",
     "/midas sells  -  top sell tips from your bags, bank & mail",
@@ -599,6 +600,10 @@ SlashCmdList["MIDAS"] = function(msg)
   elseif msg == "auto" then
     M.db.config.autoScan = not (M.db.config.autoScan == true)
     M.Print("Auto-scan on AH open: " .. (M.db.config.autoScan and "ON" or "OFF") .. " (default OFF - use the Midas Scan button)")
+  elseif msg == "quick" then
+    if M.db.config.quickScan == false then M.db.config.quickScan = nil else M.db.config.quickScan = false end
+    M.Print("Quick scan of your items while the full scan is slow or on cooldown (WoW Forever): "
+      .. (M.db.config.quickScan == false and "OFF" or "ON") .. " (default ON)")
   elseif msg == "status" then
     M.PrintStatus()
   elseif msg == "import" then
