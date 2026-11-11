@@ -465,6 +465,9 @@ function M.HomeModel(opts)
   local stale = (lastDay and lastDay >= 0 and today - lastDay >= 2) and (today - lastDay) or nil
   mo.moves = { list = list, hits = hits, rest = rest, armed = armed, extraHits = max(0, #hits - 2),
                undercuts = uc, sells = sells, buys = buys, stale = stale, noScan = (not lastDay or lastDay < 0) }
+  -- buy ideas wait for the whole-archive analysis: until its first result the
+  -- card keeps its loading layer (Loading.lua) instead of a half list
+  mo.moves.pending = (M.TopPicks and select(4, M.TopPicks())) and true or nil
   mo.hero.mail, mo.hero.mailWho = collect, collectWho
   return mo
 end
@@ -1126,6 +1129,8 @@ do
   end
 end
 
+local layout   -- card geometry (===== layout below); BuildHome places the cards up front
+
 function M.BuildHome(panel)
   -- two views on the Start tab: the dashboard (cards on root) and the classic
   -- page (its own root); RefreshHome shows one of them
@@ -1294,6 +1299,13 @@ function M.BuildHome(panel)
   h.mv = { rows = {}, chips = {} }
   h.mv.empty = T.Text(moves, SZ_ROW, "sub")
   h.mv.empty:SetWordWrap(true); h.mv.empty:SetJustifyH("LEFT"); h.mv.empty:SetSpacing(3)
+
+  -- the cards stand in place from the first frame - the fill follows one frame
+  -- later - and their loading layers cover them until it lands (Loading.lua)
+  local classic = (M.db and M.db.config and M.db.config.homeView == "classic") and true or false
+  root:SetShown(not classic); classicRoot:SetShown(classic)
+  layout(h)
+  if M.HomeLoadingInit then M.HomeLoadingInit(h) end
 end
 
 -- ===== layout =================================================================
@@ -1305,7 +1317,7 @@ local function dims()
   return max(BASE_W, floor(W - 28 + 0.5)), max(BASE_H, floor(Hh - 134 + 0.5))
 end
 
-local function layout(h)
+layout = function(h)
   local W, Hh = dims()
   if h._lw == W and h._lh == Hh then return end
   h._lw, h._lh = W, Hh
@@ -1985,4 +1997,7 @@ function M.RefreshHome()
   refreshTrading(h, mo)
   refreshMap(h, mo)
   refreshMoves(h, mo)
+  if M.HomeLoadingSet then
+    M.HomeLoadingSet(h, { hero = true, trading = true, map = true, moves = not mo.moves.pending })
+  end
 end

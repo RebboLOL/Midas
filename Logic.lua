@@ -514,10 +514,19 @@ end
 -- exactly ONE deferred follow-up build catches up.
 
 local CHUNK = M.C.ANALYSIS_CHUNK or 300
+-- Where the client has a millisecond clock (debugprofilestop), a slice ends by
+-- TIME instead of by item count: 300 items took a mere 1-3 ms, so a 5,000-item
+-- archive spread over ~20 frames and the start page said "analyzing market
+-- data..." for a second or two at the AH. The time cap also keeps a slow PC
+-- inside the client's script budget. Without the clock: the fixed CHUNK.
+local SLICE_MS = M.C.ANALYSIS_SLICE_MS or 6
+local SLICE_CHECK = 25   -- items between two clock reads
 
 -- One chunked pass over the archive -> ranked list (Opportunities) + Top Picks.
 local function runAnalysis()
   local C = M.C
+  local clock = rawget(_G, "debugprofilestop")
+  local sliceAt = clock and clock()
   local genAtStart = M._analysisGen or 0
   local realm = M.RealmKey()
   local store = M.IterItems(realm)
@@ -529,6 +538,8 @@ local function runAnalysis()
   -- cannot mutate mid-iteration).
   local keys, kn = {}, 0
   for key in pairs(store) do kn = kn + 1; keys[kn] = key end
+  local prog = { done = 0, total = kn }   -- the start page counts along (M.AnalysisProgress)
+  M._analysisProgress = prog
   local ranked, cand, all = {}, {}, {}
   local maxDay = -1
   for i = 1, kn do
@@ -560,7 +571,16 @@ local function runAnalysis()
         all[#all + 1] = { key = key, m = m }
       end
     end
-    if i % CHUNK == 0 then coroutine.yield() end
+    if clock then
+      if i % SLICE_CHECK == 0 and clock() - sliceAt >= SLICE_MS then
+        prog.done = i
+        coroutine.yield()
+        sliceAt = clock()
+      end
+    elseif i % CHUNK == 0 then
+      prog.done = i
+      coroutine.yield()
+    end
   end
   -- Finalize Top Picks: only items on the newest scan day, with a real move.
   local last = maxDay
@@ -589,6 +609,12 @@ local function runAnalysis()
     M._lastDayCache = M._lastDayCache or {}
     M._lastDayCache[realm] = last
   end
+end
+
+-- Items done / in all of the running build; nothing while none runs.
+function M.AnalysisProgress()
+  local p = M._analysisJob and M._analysisProgress
+  if p then return p.done, p.total end
 end
 
 -- Kick / drive the background build (one slice per frame). Refresh the open window

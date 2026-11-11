@@ -1,5 +1,9 @@
 # Midas – Changelog
 
+## 1.2.24 – 2026-11-11
+- **Start page ready at the auction house.** Fixed a bug where the start page said "analyzing market data..." for a second or two the first time it opened - its picks are now there right away.
+- **Start page loading animations.** Until its numbers are ready, every start page card shows an animated stand-in in its own shape and then fades into them.
+
 ## 1.2.23 – 2026-11-10
 - **Forever: quick scan of your items.** When the full scan is slow or on cooldown, Midas scans your auctions, alerts, watchlist and stock on its own and adds today's prices to the charts.
 - **The window opens on the first click.** Fixed a bug where the first click on the minimap coin or /midas after logging in did not open the window - it now opens right away.

@@ -799,12 +799,12 @@ function M.ShowScanButton()
   w.frame:Show()
   M.ScanUIState(M.scanning == true)
   -- opt-in (Settings "Open with the auction house"): bring the market window
-  -- up together with the AH; closing is left to the user
+  -- up together with the AH; closing is left to the user. Same path as a
+  -- click (M.Toggle): the first open shows the window now and fills it one
+  -- frame later, as a script run of its own.
   if M.db and M.db.config and M.db.config.openWithAH
      and not (M.frame and M.frame:IsShown()) then
-    M.EnsureUI()
-    M.frame:Show()
-    if M.RefreshUI then M.RefreshUI() end
+    M.Toggle()
   end
 end
 

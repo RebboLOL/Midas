@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.23"
+M.version = "1.2.24"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -69,7 +69,8 @@ M.C = {
   SYNC_DAYS      = 60,    -- manifest/backfill horizon in days
   SYNC_MIN_ROWS  = 200,   -- a day must look like a real scan to be pulled/served (orphan-day gate)
   SHARE_MIN_FRAC = 0.05,  -- drop non-guild lows below 5% of the known low (poison guard)
-  ANALYSIS_CHUNK = 300,   -- items processed per frame by the background analyzer (Logic.lua)
+  ANALYSIS_CHUNK = 300,   -- items processed per frame by the background analyzer (Logic.lua) without a clock
+  ANALYSIS_SLICE_MS = 6,  -- ...with debugprofilestop: milliseconds of analysis per frame
   IMPORT_CHUNK = 400,     -- items merged per frame by the foreign-addon import (Import.lua)
   TRADE_LOG_DAYS = 75,    -- trade-mail log retention: full SELL_WINDOW (60d) + slack
 }
@@ -429,6 +430,11 @@ function M.OnLogin()
   -- seed/refresh the archive from other addons' scan databases (Auctionator,
   -- aux) -- fingerprint-gated, background-chunked, idempotent (Import.lua)
   if M.ImportExternal then C_Timer.After(6, M.ImportExternal) end
+  -- build the whole-archive analysis (Top Picks, ranking) in the background
+  -- soon after login: the first open - usually together with the AH - then
+  -- shows it at once instead of "analyzing market data..." for a second or
+  -- two. A running import defers it; the import's end starts it anyway.
+  if M.EnsureAnalysis then C_Timer.After(10, function() M.EnsureAnalysis() end) end
   M.Print("loaded. Open the auction house to run a full scan.  /midas = window.  v" .. M.version .. (M.MODERN_AH and "  (modern AH)" or ""))
   -- one-time privacy note (v1.1): the sync defaults are opt-out and were never
   -- announced anywhere -- say it once, then never again
