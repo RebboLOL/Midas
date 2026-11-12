@@ -1,5 +1,11 @@
 # Midas – Changelog
 
+## 1.2.25 – 2026-11-12
+- **Net worth: auctions counted once.** Fixed a bug where your auctions could count twice toward net worth after a visit to the auction house until that character opened its mailbox.
+- **Lighter item tooltips.** Fixed a bug where hovering an item could drop the frame rate - the Midas lines and the price chart under the tooltip now take far less work while it stays open, and the chart waits until the pointer rests on an item.
+- **Less work in the background.** The market analysis no longer rebuilds after every sync message while the Midas window is closed.
+- **/midas perf.** Measures for 15 seconds how often Midas rebuilds tooltips, charts and its market analysis and prints the numbers to chat.
+
 ## 1.2.24 – 2026-11-11
 - **Start page ready at the auction house.** Fixed a bug where the start page said "analyzing market data..." for a second or two the first time it opened - its picks are now there right away.
 - **Start page loading animations.** Until its numbers are ready, every start page card shows an animated stand-in in its own shape and then fades into them.

@@ -372,11 +372,21 @@ end
 -- CommitScan (low = MIN, qty = MAX) plus last-write-wins for cur via ts, so all
 -- clients converge to the same DB regardless of message order or duplicates.
 -- fromGuild relaxes the low-ball poison guard. Returns how many records improved.
+-- Sync rows trickle in message by message. A changed item's own numbers update
+-- at once (its metrics entry is dropped); the whole-archive refresh - ranked
+-- lists, craft costs, every other cached item - follows once per burst.
+local syncTimer = false
+local function syncSettled()
+  syncTimer = false
+  M.DirtyAnalysis()
+end
+
 function M.MergeSharedRows(day, rows, fromGuild)
   if not M.db or type(rows) ~= "table" then return 0 end
   local store = Store()
   local frac = M.C.SHARE_MIN_FRAC or 0.05
   local improved = 0
+  local memo = M._mCache and M._mCache.items
   for i = 1, #rows do
     local r = rows[i]
     local key = tostring(r.id)
@@ -394,6 +404,7 @@ function M.MergeSharedRows(day, rows, fromGuild)
       if not rec then
         it[day] = { low = low, qty = r.qty or 0, cur = cur, ts = r.ts }
         improved = improved + 1
+        if memo then memo[key] = nil end
       else
         local ch = false
         if low < rec.low then rec.low = low; ch = true end
@@ -404,12 +415,23 @@ function M.MergeSharedRows(day, rows, fromGuild)
         end
         -- a peer's full scan covered this item on that day: no quick row any more
         if rec.quick then rec.quick = nil; ch = true end
-        if ch then improved = improved + 1 end
+        if ch then
+          improved = improved + 1
+          if memo then memo[key] = nil end
+        end
       end
     end
   end
+  if M.perf then M.perf.sync = M.perf.sync + 1 end
   if improved > 0 then
-    M.DirtyAnalysis()
+    -- a newer scan day is known at once, without the walk over the archive
+    local ldc = M._lastDayCache
+    local rk = M.RealmKey()
+    if ldc and ldc[rk] and day > ldc[rk] then ldc[rk] = day end
+    if not syncTimer then
+      syncTimer = true
+      C_Timer.After(LIVE_SETTLE, syncSettled)
+    end
     -- price alerts also watch synced prices (debounced; sync rows trickle in)
     if M.CheckAlerts and not M._alertCheck then
       M._alertCheck = true

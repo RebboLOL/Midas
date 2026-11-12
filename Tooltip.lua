@@ -1,5 +1,6 @@
 -- Midas – Tooltip: median & price signal right on the item
 local ADDON, M = ...
+local P = M.perf   -- counters for "/midas perf" (Core.lua)
 
 -- Is our line already in the current tooltip? Prevents duplicates but still
 -- allows re-adding after other addons (Auctionator/Bagnon/vendor) rebuilt the
@@ -15,26 +16,37 @@ local function hasMidas(tooltip)
   return false
 end
 
-local function annotate(tooltip, itemID)
-  if not itemID or not M.db then return end
-  -- Settings > Item tooltip: "full" (default) / "reduced" / "off"
-  local mode = (M.db.config and M.db.config.tooltipMode) or "full"
-  if mode == "off" then return end
-  -- inside the Midas window the table row and the detail card already show
-  -- these numbers -- the in-window item tooltip stays vanilla (no third copy),
-  -- unless the caller asked for the full tooltip (start page, M.ShowItemTip)
-  local owner = tooltip.GetOwner and tooltip:GetOwner()
-  if owner and M.frame and owner == M.frame and not M.tipFull then return end
+-- The client rebuilds an item tooltip several times a second while it stays
+-- open (bag items, data updates). The lines are therefore built once into a
+-- recorder and replayed on every rebuild; the recorder offers just the two
+-- calls the line builders use.
+local Rec = {}
+Rec.__index = Rec
+function Rec:AddLine(t, r, g, b, wrap)
+  self[#self + 1] = { t, r, g, b, wrap }
+end
+function Rec:AddDoubleLine(l, rt, r1, g1, b1, r2, g2, b2)
+  self[#self + 1] = { l, rt, r1, g1, b1, r2, g2, b2, dbl = true }
+end
+
+local function replay(tooltip, lines)
+  for i = 1, #lines do
+    local L = lines[i]
+    if L.dbl then tooltip:AddDoubleLine(L[1], L[2], L[3], L[4], L[5], L[6], L[7], L[8])
+    else tooltip:AddLine(L[1], L[2], L[3], L[4], L[5]) end
+  end
+end
+
+-- all Midas lines of one item, in order (empty = nothing to show)
+local function buildLines(itemID, mode)
+  local tooltip = setmetatable({}, Rec)
   local series = M.GetSeries(tostring(itemID))
   local m = series and M.Metrics(series, tostring(itemID))
   if not m or not m.fair or m.fair <= 0 then
     -- no market data: a craftable or disenchantable item still gets its lines
-    if M.CraftTipLines and not hasMidas(tooltip) and M.CraftTipLines(tooltip, itemID, mode, true) then
-      tooltip:Show()
-    end
-    return
+    if M.CraftTipLines then M.CraftTipLines(tooltip, itemID, mode, true) end
+    return tooltip
   end
-  if hasMidas(tooltip) then return end
 
   local cur = m.cur
   local notListed = M.NotListed(m)
@@ -76,7 +88,7 @@ local function annotate(tooltip, itemID)
   tooltip:AddDoubleLine("|cffE8B44AMidas|r", sig, 0.91, 0.70, 0.29, r, g, b)
   tooltip:AddDoubleLine(curTxt, fairTxt, r, g, b, 0.78, 0.76, 0.70)
   if M.CraftTipLines then M.CraftTipLines(tooltip, itemID, mode) end
-  if mode == "reduced" then tooltip:Show(); return end
+  if mode == "reduced" then return tooltip end
   tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyPlain(m.quick), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   -- supply ladder of the newest scan: how much sits within 10% of the floor
@@ -111,6 +123,43 @@ local function annotate(tooltip, itemID)
       tooltip:AddLine(string.format("You paid  %s avg  (%d bought)", M.MoneyPlain(paid), units), 0.78, 0.76, 0.70)
     end
   end
+  return tooltip
+end
+
+-- the lines of the item last shown: valid while the data generation and the
+-- settings stand, and for LINES_TTL seconds at most (stock ladder, live
+-- prices and "last seen" move without a new generation)
+local LINES_TTL = 2
+local last = {}
+
+local function annotate(tooltip, itemID)
+  if not itemID or not M.db then return end
+  -- Settings > Item tooltip: "full" (default) / "reduced" / "off"
+  local cfg = M.db.config
+  local mode = (cfg and cfg.tooltipMode) or "full"
+  if mode == "off" then return end
+  -- inside the Midas window the table row and the detail card already show
+  -- these numbers -- the in-window item tooltip stays vanilla (no third copy),
+  -- unless the caller asked for the full tooltip (start page, M.ShowItemTip)
+  local owner = tooltip.GetOwner and tooltip:GetOwner()
+  if owner and M.frame and owner == M.frame and not M.tipFull then return end
+  if hasMidas(tooltip) then return end
+  local now = GetTime()
+  local gen = M._analysisGen or 0
+  local craft = cfg and cfg.tooltipCraft
+  local memo = M._mCache and M._mCache.items
+  local hit = memo and memo[tostring(itemID)]
+  if not (last.lines and last.id == itemID and last.mode == mode and last.gen == gen
+          and last.craft == craft and last.hit == hit and now - last.t < LINES_TTL) then
+    last.lines = buildLines(itemID, mode)
+    if P then P.build = P.build + 1 end
+    -- read after the build: that is the metrics entry these lines came from
+    memo = M._mCache and M._mCache.items
+    last.id, last.mode, last.gen, last.craft, last.t = itemID, mode, gen, craft, now
+    last.hit = memo and memo[tostring(itemID)]
+  end
+  if #last.lines == 0 then return end
+  replay(tooltip, last.lines)
   tooltip:Show()
 end
 
@@ -145,32 +194,65 @@ local function chartPanel()
   -- canvas as wired is the one switch that really turns it off
   tt.canvas._hoverWired = true
   tt.canvas:EnableMouse(false)
-  GameTooltip:HookScript("OnHide", function() tt:Hide() end)
+  GameTooltip:HookScript("OnHide", function() tt:Hide(); tt._cur = nil end)
   return tt
 end
 
-local function showChart(tooltip, itemID)
+-- no chart for what the tooltip shows now
+local function hidePanel()
+  if tt then tt:Hide(); tt._cur = nil end
+end
+
+-- The pointer sweeping over items (the next item within SWEEP_GAP seconds of
+-- the one before) draws no chart per item: the chart waits until the pointer
+-- has rested on an item for SWEEP_REST seconds.
+local SWEEP_GAP, SWEEP_REST = 0.30, 0.15
+
+local showChart
+showChart = function(tooltip, itemID)
   if tooltip ~= GameTooltip or not M.db then return end
   local rng = (M.db.config and M.db.config.tooltipRange) or "30"
-  if rng == "off" or not itemID then if tt then tt:Hide() end return end
+  if rng == "off" or not itemID then hidePanel() return end
   -- inside the Midas window the big chart is one click away - keep it clean
   -- (the start page asks for the full tooltip: its tiles carry no chart)
   local owner = tooltip.GetOwner and tooltip:GetOwner()
-  if owner and M.frame and owner == M.frame and not M.tipFull then if tt then tt:Hide() end return end
+  if owner and M.frame and owner == M.frame and not M.tipFull then hidePanel() return end
   local key = tostring(itemID)
   local series = M.GetSeries(key)
   local days = 0
   if series then for _ in pairs(series) do days = days + 1; if days >= 2 then break end end end
-  if days < 2 then if tt then tt:Hide() end return end
+  if days < 2 then hidePanel() return end
 
   local f = chartPanel()
+  local now = GetTime()
+  local newHover = f._cur ~= key
+  local sweeping = newHover and now - (f._ht or -9) < SWEEP_GAP
+  if newHover then f._cur, f._ht = key, now end
+  if (f._key ~= key or f._rng ~= rng) and f._force ~= key and (sweeping or f._wait == key) then
+    f:Hide()
+    if f._wait ~= key then
+      f._wait = key
+      local tok = (f._tok or 0) + 1
+      f._tok = tok
+      C_Timer.After(SWEEP_REST, function()
+        if f._tok ~= tok then return end
+        f._wait = nil
+        if f._cur == key and GameTooltip:IsShown() then
+          f._force = key
+          showChart(GameTooltip, itemID)
+        end
+      end)
+    end
+    return
+  end
+  f._force = nil
+  if f._wait then f._wait = nil; f._tok = (f._tok or 0) + 1 end
   -- match the tooltip's width (it has laid out by post-call time); a width
   -- change invalidates the render cache so the plot fills the new frame
   local w = tooltip.GetWidth and tooltip:GetWidth() or 0
   -- follow the tooltip's full width (some tooltips run wide); 600 is only a
   -- safety cap against freak addon tooltips
   w = (w and w >= 120) and math.min(600, math.max(220, math.floor(w + 0.5))) or 250
-  if f._w2 ~= w then f._w2 = w; f:SetWidth(w); f.canvas:SetSize(w - 12, 80); f._key = nil end
   f:ClearAllPoints()
   local b = tooltip.GetBottom and tooltip:GetBottom()
   if b and b < 118 then
@@ -182,14 +264,35 @@ local function showChart(tooltip, itemID)
   -- scans, sync merges, trades) or what the chart draws changed
   local gen = table.concat({ M._analysisGen or 0, tostring(M.chartFair ~= false), tostring(M.chartMA and true or false),
     M.FairHalflife and M.FairHalflife() or 7 }, ":")
-  if f._key ~= key or f._rng ~= rng or f._gen ~= gen then
-    f._key, f._rng, f._gen = key, rng, gen
+  local dirty = f._key ~= key or f._rng ~= rng or f._w2 ~= w
+  local recent = f._key == key and f._rng == rng and now - (f._rt or 0) < 1
+  -- a width that flips back to the one before (the tooltip rebuilding itself
+  -- several times a second) keeps the picture instead of redrawing each time
+  if dirty and recent and f._w2 ~= w and w == f._wPrev then dirty = false end
+  -- new data for the item on screen (sync merges trickle in): once a second
+  if not dirty and f._gen ~= gen and not recent then dirty = true end
+  if dirty then
+    if f._w2 ~= w then f._wPrev = f._w2; f._w2 = w; f:SetWidth(w); f.canvas:SetSize(w - 12, 80) end
+    f._key, f._rng, f._gen, f._rt = key, rng, gen, now
     f.head:SetText("MIDAS  \194\183  PRICE  \194\183  " .. (TT_RANGE_LBL[rng] or rng))
     f.canvas._rangeOverride = rng
     M.RenderAllTime(f.canvas, key)
     f.canvas:EnableMouse(false)   -- belt and braces; _hoverWired skips SetupHover
+    if P then P.chart = P.chart + 1 end
   end
   f:Show()
+end
+
+-- one item tooltip (re)built by the client; counted and timed for "/midas perf"
+local clock = rawget(_G, "debugprofilestop")
+local function onItem(tooltip, id)
+  local t0 = clock and clock()
+  if id then annotate(tooltip, id) end
+  showChart(tooltip, id)
+  if P then
+    P.tip = P.tip + 1
+    if t0 then P.tipMs = P.tipMs + (clock() - t0) end
+  end
 end
 
 local ok = false
@@ -197,8 +300,7 @@ if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and
   TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
     if tooltip ~= GameTooltip or not data then return end
     if issecretvalue and issecretvalue(data.id) then return end   -- modern client: restricted in combat
-    if data.id then annotate(tooltip, data.id) end
-    showChart(tooltip, data and data.id)
+    onItem(tooltip, data.id)
   end)
   ok = true
 end
@@ -207,8 +309,7 @@ if not ok and GameTooltip.HookScript then
     if self.GetItem then
       local _, link = self:GetItem()
       local id = link and tonumber(link:match("item:(%d+)"))
-      annotate(self, id)
-      showChart(self, id)
+      onItem(self, id)
     end
   end)
 end

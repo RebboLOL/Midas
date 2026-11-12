@@ -195,9 +195,17 @@ end
 -- proportional ask; CharAssets keeps valuing it like the auction it was, until
 -- its mail resolves it (M.AuctionSettled) or the inbox is the ground truth
 -- (M.CacheMail).
+-- A listing that comes back on the owner list was never gone: an empty or
+-- partial read (Auctions tab still loading, a post in progress) had booked it
+-- as pending. Units regained within this window leave the bridge again -
+-- otherwise they count twice, as auction and as pending, until the next
+-- mailbox visit of that character.
+local PENDING_REGAIN = 600
+
 local function notePending(c, au)
   local old = c.auctions
   if not old then return end
+  local now = time()
   for id, a in pairs(old) do
     local nq = (au[id] and au[id].qty) or 0
     local lost = (a.qty or 0) - nq
@@ -207,10 +215,21 @@ local function notePending(c, au)
       if not p then p = { qty = 0, gold = 0 }; c.pending[id] = p end
       p.qty = p.qty + lost
       p.gold = p.gold + math.floor(a.gold * lost / a.qty + 0.5)
-      p.ts = time()
+      p.ts = now
       c.pendingTs = p.ts
     end
   end
+  if not c.pending then return end
+  for id, p in pairs(c.pending) do
+    local gain = ((au[id] and au[id].qty) or 0) - ((old[id] and old[id].qty) or 0)
+    if gain > 0 and (p.qty or 0) > 0 and now - (p.ts or c.pendingTs or 0) <= PENDING_REGAIN then
+      local take = math.min(gain, p.qty)
+      p.gold = math.max(0, (p.gold or 0) - math.floor((p.gold or 0) * take / p.qty + 0.5))
+      p.qty = p.qty - take
+      if p.qty <= 0 then c.pending[id] = nil end
+    end
+  end
+  if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
 end
 
 -- An auction mail just told us a listing ended (sold / returned / cancelled):

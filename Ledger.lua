@@ -1653,7 +1653,13 @@ for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT", "PLAYER_MONEY", "
                      "CONFIRM_TALENT_WIPE", "DELETE_ITEM_CONFIRM", "UNIT_SPELLCAST_SUCCEEDED",
                      "COMMODITY_PRICE_UPDATED", "PLAYER_INTERACTION_MANAGER_FRAME_SHOW",
                      "PLAYER_INTERACTION_MANAGER_FRAME_HIDE" }) do
-  M.SafeRegister(ev, e)
+  -- casts matter for the player only: without the unit filter this fires for
+  -- every unit in sight
+  if e == "UNIT_SPELLCAST_SUCCEEDED" and ev.RegisterUnitEvent then
+    if not pcall(ev.RegisterUnitEvent, ev, e, "player") then M.SafeRegister(ev, e) end
+  else
+    M.SafeRegister(ev, e)
+  end
 end
 for e in pairs(OPEN) do M.SafeRegister(ev, e) end
 for e in pairs(CLOSE) do M.SafeRegister(ev, e) end

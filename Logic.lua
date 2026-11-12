@@ -630,17 +630,24 @@ function M.EnsureAnalysis()
     fr:SetScript("OnUpdate", function()
       local job = M._analysisJob
       if not job then fr:Hide(); return end
+      local P, clock = M.perf, rawget(_G, "debugprofilestop")
+      local t0 = P and clock and clock()
       local ok, err = coroutine.resume(job)
+      if t0 then P.runMs = P.runMs + (clock() - t0) end
       if not ok then
         M._analysisJob = nil; fr:Hide()
         if M.Print then M.Print("analysis error: " .. tostring(err)) end
       elseif coroutine.status(job) == "dead" then
         M._analysisJob = nil; fr:Hide()
+        if P then P.runs = P.runs + 1 end
         if M.FireAPIEvent then M.FireAPIEvent("ANALYSIS_COMPLETE", {}) end
         if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
-        if M._analysisStale then
-          -- data changed while building: catch up with ONE deferred rebuild. The
-          -- delay batches rapid sync merges instead of rebuilding per message.
+        -- data changed while building: catch up with ONE deferred rebuild. The
+        -- delay batches rapid sync merges instead of rebuilding per message.
+        -- Only where somebody looks at the result (the window, or the AH where
+        -- it opens next): out in the world the stale lists wait for the next
+        -- reader instead of rebuilding behind every sync burst.
+        if M._analysisStale and ((M.frame and M.frame:IsShown()) or M.AHOpen) then
           C_Timer.After(2, function() if M.EnsureAnalysis then M.EnsureAnalysis() end end)
         end
       end

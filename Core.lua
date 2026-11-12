@@ -1,8 +1,27 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.24"
+M.version = "1.2.25"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
+
+-- "/midas perf": what Midas did in the background over 15 seconds. The modules
+-- only count (tooltip rebuilds, chart draws, analysis builds, sync merges).
+M.perf = { tip = 0, tipMs = 0, build = 0, chart = 0, runs = 0, runMs = 0, sync = 0 }
+function M.PerfReport()
+  if M._perfRun then M.Print("perf: already measuring.") return end
+  M._perfRun = true
+  local secs, P, was = 15, M.perf, {}
+  for k, v in pairs(P) do was[k] = v end
+  M.Print("perf: measuring for " .. secs .. " seconds - hover a few items now.")
+  C_Timer.After(secs, function()
+    M._perfRun = nil
+    local function d(k) return P[k] - was[k] end
+    M.Print(string.format("perf: item tooltips rebuilt %d times (%.1f per second), Midas lines built %d times, chart drawn %d times, %.1f ms in total",
+      d("tip"), d("tip") / secs, d("build"), d("chart"), d("tipMs")))
+    M.Print(string.format("perf: market analysis rebuilt %d times (%.0f ms), sync messages merged %d, frame rate now %.0f",
+      d("runs"), d("runMs"), d("sync"), (GetFramerate and GetFramerate()) or 0))
+  end)
+end
 
 -- Parameters (identical to the Excel analysis) -------------------------------
 M.C = {
@@ -273,6 +292,53 @@ function M.MarketInfo()
   }
 end
 
+-- /midas market: what Midas detects as this character's market, plus the raw
+-- client answers behind it (realm/region/game-rules APIs). Printed AND kept in
+-- MidasDB.config.marketProbe[char] so the values can be read after a /reload.
+function M.PrintMarketProbe()
+  local mk = M.MarketInfo()
+  local raw = {}
+  local function put(k, v) raw[#raw + 1] = { k, tostring(v) } end
+  put("GetRealmName", GetRealmName and GetRealmName())
+  put("GetNormalizedRealmName", GetNormalizedRealmName and GetNormalizedRealmName())
+  put("GetCurrentRegion", GetCurrentRegion and GetCurrentRegion())
+  put("GetCurrentRegionName", GetCurrentRegionName and GetCurrentRegionName())
+  put("WOW_PROJECT_ID", WOW_PROJECT_ID)
+  -- every zero-argument Is*/Get*/Has* getter the game-rules / seasons APIs offer
+  for _, ns in ipairs({ "C_GameRules", "C_Seasons" }) do
+    local t = _G[ns]
+    if type(t) == "table" then
+      local names = {}
+      for name, fn in pairs(t) do
+        if type(fn) == "function" and (name:match("^Is") or name:match("^Get") or name:match("^Has")) then
+          names[#names + 1] = name
+        end
+      end
+      table.sort(names)
+      for _, name in ipairs(names) do
+        local ok, a, b = pcall(t[name])
+        put(ns .. "." .. name, ok and (tostring(a) .. (b ~= nil and (", " .. tostring(b)) or "")) or "error")
+      end
+    else
+      put(ns, "missing")
+    end
+  end
+  local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
+  local n = 0
+  if d and d.items then for _ in pairs(d.items) do n = n + 1 end end
+  M.Print(string.format("market: %s / %s / %s / %s / %s   (realm key \"%s\")",
+    mk.client, mk.region, mk.realm, mk.faction, mk.ruleset, M.RealmKey()))
+  M.Print(string.format("last offer-book scan: %s, %d items",
+    (d and d.ts) and date("%Y-%m-%d %H:%M", d.ts) or "none", n))
+  for _, r in ipairs(raw) do print("   " .. r[1] .. " = " .. r[2]) end
+  if M.db and M.db.config then
+    M.db.config.marketProbe = M.db.config.marketProbe or {}
+    M.db.config.marketProbe[M.RealmKey() .. " / " .. (UnitName("player") or "?")] =
+      { ts = time(), market = mk, raw = raw, scanTs = d and d.ts, scanItems = n }
+  end
+  M.Print("saved - /reload or log out so the values reach the saved-variables file.")
+end
+
 -- Events ---------------------------------------------------------------------
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
@@ -482,6 +548,7 @@ function M.PrintHelp()
     "/midas timer  -  gold timer: gold + loot value per hour   (start, pause, reset, report)",
     "/midas tree [item]  -  (beta) crafting tree: material cost now / Fair, used in, disenchant value",
     "/midas lines  -  chart lines smooth (default) or crisp",
+    "/midas perf  -  measure for 15 seconds what Midas does in the background",
     "/midas vendor  -  number of known vendor-sold items",
     "/midas prune  -  drop archive days older than 2 years",
     "/midas share on|off  -  community sync (guild)",
@@ -492,7 +559,7 @@ function M.PrintHelp()
     "/midas api  -  public API info for other addons",
     "/midas news  -  show the latest what's-new note again",
     "/midas discord  -  invite link to the Midas Discord (help, bugs, ideas)",
-    "diagnostics:  /midas commprobe  -  sync transport test",
+    "diagnostics:  /midas commprobe  -  sync transport test   \194\183   /midas market  -  detected market (realm, faction, ruleset)",
   }
   for _, l in ipairs(lines) do print("   " .. l) end
 end
@@ -621,6 +688,8 @@ SlashCmdList["MIDAS"] = function(msg)
   elseif msg == "discord" then
     M.Print("Midas Discord: " .. M.DISCORD_URL)
     if M.ShowLinkCopy then M.ShowLinkCopy(M.DISCORD_URL, "Midas Discord") end
+  elseif msg == "perf" then
+    M.PerfReport()
   elseif msg == "ttchart" then
     if M.TooltipChartTest then M.TooltipChartTest() end
   elseif msg == "band" then
@@ -725,6 +794,8 @@ SlashCmdList["MIDAS"] = function(msg)
     if M.CommSync then M.CommSync() end
   elseif msg == "commprobe" then
     if M.CommProbe then M.CommProbe() end
+  elseif msg == "market" then
+    M.PrintMarketProbe()
   elseif msg == "help" then
     M.PrintHelp()
   elseif msg == "" then
