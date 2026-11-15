@@ -102,13 +102,21 @@ local function CharCache()
   -- ghost, and that must not pull it off the graveyard. A character playing
   -- alive, though, is demonstrably not dead (accidental move, or the name was
   -- reused for a new character) -- bring it back.
-  if c.dead and UnitIsDeadOrGhost and not UnitIsDeadOrGhost("player") then
+  -- Hardcore wording only (M.HCMode): without it the character was set aside
+  -- on purpose and stays out of the total until it is counted again by hand.
+  if c.dead and M.HCMode and M.HCMode() and UnitIsDeadOrGhost and not UnitIsDeadOrGhost("player") then
     c.dead, c.deadTs, c.deadWorth = nil, nil, nil
     if M.Print then M.Print((c.name or k) .. " returned from the graveyard - counting toward the total again.") end
   end
   -- which auction house this character trades on: its items are only worth what
   -- THIS realm+faction pays, so net worth counts it only in that scope
-  c.scope = M.RealmKey()
+  local rk = M.RealmKey()
+  -- a scope from an Auctionator-named key (up to 1.2.25): move that history
+  -- home BEFORE the stamp below erases the last pointer to it
+  if c.scope and c.scope ~= rk and M.AdoptBorrowedKeys then M.AdoptBorrowedKeys() end
+  c.scope = rk
+  local fac = UnitFactionGroup and UnitFactionGroup("player")
+  if fac and fac ~= "Neutral" then c.faction = fac end
   return c
 end
 
@@ -153,15 +161,17 @@ function M.CacheBags()
   c.bagsTs = time()
 end
 
-function M.CacheMoney()
+-- changed = true: called for a PLAYER_MONEY event, i.e. the balance really moved
+function M.CacheMoney(changed)
   local c = CharCache(); if not c then return end
   -- keep the stored two-part name when the client reports only its first word
   local nm = (M.PlayerFullName and M.PlayerFullName()) or UnitName("player")
   if nm and not (c.name and c.name ~= nm and c.name:sub(1, #nm + 1) == nm .. " ") then c.name = nm end
   local m = GetMoney() or 0
   -- GetMoney() can read 0 during logout/loading; keep the known balance instead
-  -- of clobbering it with a transient zero.
-  if m == 0 and (c.money or 0) > 0 then return end
+  -- of clobbering it with a transient zero. A zero right after the balance
+  -- moved is real (everything spent or mailed away) and is stored.
+  if m == 0 and (c.money or 0) > 0 and changed ~= true then return end
   c.money = m
 end
 
@@ -447,7 +457,7 @@ ev:SetScript("OnEvent", function(_, event)
     -- bank bags only report BAG_UPDATE, never PLAYERBANKSLOTS_CHANGED
     if bankOpen then debounce("bank", cacheBankIfOpen, 0.3) end
   elseif event == "PLAYER_MONEY" then
-    debounce("money", M.CacheMoney, 0.2)
+    debounce("money", function() M.CacheMoney(true) end, 0.2)
   elseif event == "PLAYER_ENTERING_WORLD" then
     -- every login / reload / zone: make sure this character is captured
     debounce("bags", M.CacheBags, 1.0)

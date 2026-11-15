@@ -39,12 +39,16 @@ snapshot scan, commodities included):
 
 The full scan is server-throttled to roughly once every ~15 minutes – that's a game limit, not the addon.
 
-**Quick scan (WoW Forever).** When the server takes longer than 45 seconds to send the full scan, or a
-click hits the 15-minute cooldown, Midas scans your own items on its own: your auctions, price alerts,
-watchlist and the stock in your bags, bank and mail (up to 200 items). Their prices land in today's
-chart point like a full scan's; every other item keeps its last full scan and is never marked as not
-listed because of it. The full scan still comes in when the server sends it. `/midas quick` turns the
-quick scan off and on.
+**Price scan (WoW Forever).** When the server takes longer than 45 seconds to send the full scan, or a
+click hits the 15-minute cooldown, Midas reads the prices of the whole auction house from a search
+instead: cheapest price and units listed for every item. It has no cooldown and is stored like a full
+scan - charts, signals, alerts and the community sync all use it. Only the offer book needs the full
+scan and keeps its last state until the next one. The full scan still comes in when the server sends it.
+
+**Quick scan (WoW Forever).** If the price scan cannot run, Midas scans your own items instead: your
+auctions, price alerts, watchlist and the stock in your bags, bank and mail (up to 200 items). Their
+prices land in today's chart point; every other item keeps its last scan and is never marked as not
+listed because of it. `/midas quick` turns the price scan and the quick scan off and on.
 
 ## Usage
 - **Minimap button** (gold coin) – mouseover shows the best sells from your holdings;
@@ -82,6 +86,9 @@ quick scan off and on.
 - `/midas commprobe` – transport test: pings guild + nearby players, prints pongs
 - `/midas status` – archive status (items, daily values, last scan)
 - `/midas import` – re-check other addons' price databases (Auctionator, aux) now
+- `/midas realms` – list every stored market (realm + faction)
+- `/midas realmmerge <old name>` – move another stored market's price archive, trades, net worth
+  and alerts under the current one (after a realm rename)
 - `/midas vendor` – how many vendor-sold items Midas knows (excluded from picks)
 - `/midas prune` – remove daily values beyond the horizon
 - `/midas discord` – invite link to the Midas Discord (help, bugs, ideas) in a copy box
@@ -121,10 +128,11 @@ quick scan off and on.
    sorted by impact, each row one click from its holding history. The drill-downs carry the same window:
    a character's items show their market change, a class's top items their change column, a clicked
    chart day offers **"What moved since?"** attributed against exactly that day, and every change
-   column on the tab names its reference date. Fallen (HC)
-   characters can be **moved to the graveyard** from their drill-down: they stop counting toward
-   the total and rest in a separate graveyard sum - nothing is deleted, and logging in on the
-   character (or one click) brings it back.
+   column on the tab names its reference date. Characters can be
+   **excluded from the total** from their drill-down: they are listed in a separate "not counted"
+   sum - nothing is deleted, and one click counts them again. On Hardcore realms (or with
+   "Hardcore characters" in Settings) this is the **graveyard** of your fallen characters, and
+   logging in alive on one brings it back.
 4. **Trades** – your realized trading history and a **sellability** rating per item, built from the AH mail
    you collect, your vendor buys and the player trade window. A segmented toggle switches between **History**
    (a chronological log of sells, returns and buys with the net amount, character and trade partner) and
@@ -409,6 +417,10 @@ a full **item link**, or a raw archive key (`gr:...` for suffixed gear).
   Ships with a bundled **Inter** font (folder `Midas\Fonts\`) – keep that folder when copying the
   addon; if it is missing, Midas automatically falls back to a built-in font.
 - Self-contained: **Auctionator is not required** (any previously imported data stays in the archive).
+- **Realm names are Midas' own** (realm + faction), whether Auctionator is loaded or not. History
+  that older versions stored under Auctionator's realm name moves over at login; if that name is
+  shared with characters of another realm or faction, a chat note names the
+  `/midas realmmerge <old name>` to run instead.
 - Accuracy grows with regular scanning incl. weekends.
 - Data source = only what you scan yourself at the AH.
 - Vendor items are learned automatically whenever you open a merchant (unlimited, gold-only items),

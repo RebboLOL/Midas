@@ -4,8 +4,9 @@
 -- Same contract as Scanner.lua: acc[itemID] = { low = min unit buyout, qty = sum,
 -- lv = { [unit] = { units, auctions } } }
 -- -> M.CommitScan(acc). Only active when Compat detected the modern AH.
--- While the snapshot is slow (or on cooldown) a quick scan fetches current prices
--- for your own items (see "Quick scan" below).
+-- While the snapshot is slow (or on cooldown) a price scan reads every item's
+-- price from an empty browse search (see "Price scan" below); where that is not
+-- possible a quick scan fetches current prices for your own items.
 local ADDON, M = ...
 if not M.MODERN_AH then return end
 
@@ -355,9 +356,209 @@ function M.QuickItemScan(standalone)
   return true
 end
 
--- your own search in the AH window would mix with the quick scan's answers:
--- the quick scan steps aside (prices from your search count all the same)
+-- ===== Price scan: every item's price without the snapshot ===================
+-- The snapshot comes once per ~15 min; an empty browse search has no such
+-- limit. The AH answers it with one row per item - cheapest unit buyout and
+-- units listed - in batches (RequestMoreBrowseResults until
+-- HasFullBrowseResults). That is all a daily row needs, so a complete price
+-- scan is stored like a full scan (M.CommitScan with noDepth: charts, newest
+-- scan day, sync). Only the offer book needs the snapshot's single auctions:
+-- it stays as the last snapshot left it. A price scan that ends early, or
+-- holds far fewer items than the newest full scan day, is stored as quick rows
+-- (M.CommitQuick): the items it did not reach count as "not scanned".
+local PRICE_WAIT = 15       -- seconds without an answer before asking again
+local PRICE_TRIES = 3       -- unanswered requests in a row before giving up
+local PRICE_GAP = 60        -- seconds between two price scans
+local PRICE_MIN = 0.5       -- share of the newest full scan day a full market holds at least
+local price                 -- the running price scan (nil = none)
+local lastPrice = 0         -- time() of the last complete price scan
+
+local function priceAvailable()
+  return AH.SendBrowseQuery ~= nil and AH.RequestMoreBrowseResults ~= nil
+    and AH.GetBrowseResults ~= nil and AH.HasFullBrowseResults ~= nil
+    and not (M.db and M.db.config and M.db.config.quickScan == false)
+end
+
+-- items in the newest full scan day (0 = unknown): the size a full market has
+local function marketSize()
+  if not (M.Store and M.LastScanDay and M.db and M.db.realms) then return 0 end
+  local ok, day = pcall(M.LastScanDay)
+  if not ok or type(day) ~= "number" then return 0 end
+  local n = 0
+  for _, it in pairs(M.Store()) do
+    if type(it) == "table" and it[day] then n = n + 1 end
+  end
+  return n
+end
+
+-- browse rows -> { [itemID] = { low = cheapest unit buyout, qty = units listed } }
+local function priceRows(res)
+  local acc, n = {}, 0
+  for _, r in ipairs(res or {}) do
+    local k = type(r) == "table" and r.itemKey
+    local id = k and k.itemID
+    local units = type(r) == "table" and tonumber(r.totalQuantity) or 0
+    if id and (k.battlePetSpeciesID or 0) == 0 and units > 0
+        and type(r.minPrice) == "number" and r.minPrice > 0 then
+      local a = acc[id]
+      if not a then a = { low = r.minPrice, qty = 0 }; acc[id] = a; n = n + 1 end
+      if r.minPrice < a.low then a.low = r.minPrice end
+      a.qty = a.qty + units
+    end
+  end
+  return acc, n
+end
+
+local function priceProgress(p)
+  if p.est > 0 then return math.min(0.95, p.got / p.est) end
+  return p.got > 0 and 0.5 or 0.1
+end
+
+local function priceLabel(p)
+  return string.format("Prices: %d items", p.got)
+end
+
+local function priceIdle(p)
+  if p.standalone then
+    M.scanning = false
+    if M.ScanUIState then M.ScanUIState(false) end
+  end
+end
+
+-- end the running price scan; keep = store what it has as quick rows
+local function priceStop(keep)
+  local p = price
+  if not p then return 0 end
+  price = nil
+  M._priceScan = nil
+  local n = 0
+  if keep and p.rows and M.CommitQuick then
+    local acc, cnt = priceRows(p.rows)
+    if cnt > 0 then n = M.CommitQuick(acc) or cnt end
+  end
+  priceIdle(p)
+  return n
+end
+
+local function priceDone(res)
+  local p = price
+  price = nil
+  -- Live.lua may see this last answer after us: the mark falls a frame later
+  C_Timer.After(0, function() if not price then M._priceScan = nil end end)
+  priceIdle(p)
+  local acc, n = priceRows(res)
+  if n == 0 then
+    M.Print("Price scan: the auction house sent no prices - please try again in a moment. The archive keeps your last good scan.")
+    return
+  end
+  if p.est > 0 and n < p.est * PRICE_MIN and not (M.AtNeutralAH and M.AtNeutralAH()) then
+    -- not the whole market (a search of yours answered, or a short answer):
+    -- nothing may count as "not listed" because of it
+    local stored = (M.CommitQuick and M.CommitQuick(acc)) or n
+    M.Print(string.format("Price scan: the auction house sent only %d items - their prices are stored, every other item keeps its last scan.", stored))
+    return
+  end
+  lastPrice = time()
+  M._priceLast = { items = n }
+  local note
+  if p.standalone then
+    local left = M.ScanCooldown()
+    note = left > 0 and string.format(" Full scan with the offer book possible again in %d min.", math.ceil(left / 60)) or ""
+  else
+    note = " Still waiting for the full snapshot - it adds the offer book."
+  end
+  M.CommitScan(acc, { noDepth = true, note = note })
+end
+
+local priceStep
+
+-- ask for the first batch, or for the next one
+priceStep = function()
+  local p = price
+  if not p then return end
+  if not M.AHOpen then priceStop(true); return end
+  -- the AH queues its own queries; a request sent while it is busy is lost
+  if AH.IsThrottledMessageSystemReady and not AH.IsThrottledMessageSystemReady() and p.readyWait < 20 then
+    p.readyWait = p.readyWait + 1
+    C_Timer.After(0.5, function() if price == p then priceStep() end end)
+    return
+  end
+  p.readyWait = 0
+  local token = {}
+  p.token = token
+  p.own = true
+  if p.answered then
+    pcall(AH.RequestMoreBrowseResults)
+  else
+    pcall(AH.SendBrowseQuery, { searchString = "", sorts = {}, filters = {}, itemClassFilters = {} })
+  end
+  p.own = false
+  p.sent = true
+  C_Timer.After(PRICE_WAIT, function()
+    if price ~= p or p.token ~= token then return end
+    p.fails = p.fails + 1
+    if p.fails >= PRICE_TRIES then
+      local n = priceStop(true)
+      M.Print("Price scan: the auction house is not answering right now"
+        .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+      return
+    end
+    priceStep()
+  end)
+end
+
+local function onPriceBrowse(event)
+  local p = price
+  if not (p and p.sent) then return end
+  -- a new search answers with UPDATED first; ADDED before it is an older one's
+  if not p.answered and event ~= "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then return end
+  local ok, res = pcall(AH.GetBrowseResults)
+  if not ok or type(res) ~= "table" then return end
+  local okF, full = pcall(AH.HasFullBrowseResults)
+  full = okF and full and true or false
+  -- the AH refreshing a row fires UPDATED too: no new rows, no answer
+  if p.answered and #res <= p.got and not full then return end
+  p.answered, p.got, p.rows, p.fails, p.token = true, #res, res, 0, nil
+  if full then priceDone(res); return end
+  C_Timer.After(0.1, function() if price == p then priceStep() end end)
+end
+
+-- Start a price scan. standalone = on its own (full scan on cooldown), else it
+-- runs beside a pending full snapshot. Returns true when it started; false,
+-- "fresh" when the last one is less than PRICE_GAP seconds old.
+function M.PriceScan(standalone)
+  if price or quick or not M.AHOpen or not priceAvailable() then return false end
+  if time() - lastPrice < PRICE_GAP then return false, "fresh" end
+  local p = { standalone = standalone and true or false, got = 0, fails = 0, drops = 0, readyWait = 0,
+              est = marketSize() }
+  price = p
+  M._priceScan = true
+  if p.standalone then
+    M.scanning = true
+    if M.ScanUIState then M.ScanUIState(true) end
+    if M.SetScanProgress then M.SetScanProgress(0, "Querying AH...") end
+    local function step()
+      if price ~= p then return end
+      if M.SetScanProgress then M.SetScanProgress(priceProgress(p), priceLabel(p)) end
+      C_Timer.After(0.5, step)
+    end
+    C_Timer.After(0.5, step)
+  end
+  priceStep()
+  return true
+end
+
+-- your own search in the AH window would mix with the scan's answers: the
+-- price scan / quick scan steps aside (prices from your search count all the same)
 local function onForeignQuery()
+  local p = price
+  if p then
+    if p.own then return end
+    local n = priceStop(true)
+    M.Print("Price scan stopped - you searched the auction house yourself"
+      .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+    return
+  end
   local q = quick
   if not q or q.own then return end
   local n = quickStop(true)
@@ -380,6 +581,7 @@ local function abort(msg)
   M.scanning = false
   scanPending = false
   quickStop(true)   -- keeps what a quick scan found so far
+  priceStop(true)   -- and what a price scan has received
   if M.ScanUIState then M.ScanUIState(false) end
   if msg then M.Print(msg) end
 end
@@ -472,7 +674,9 @@ local function tick()
   local t = GetTime() - started
   if M.SetScanProgress then
     local clock = string.format("%d:%02d", math.floor(t / 60), math.floor(t % 60))
-    if quick and not quick.standalone then
+    if price and not price.standalone then
+      M.SetScanProgress(priceProgress(price), priceLabel(price) .. "  \194\183  " .. clock)
+    elseif quick and not quick.standalone then
       M.SetScanProgress(quickProgress(quick), quickLabel(quick) .. "  \194\183  " .. clock)
     elseif quickRan then
       M.SetScanProgress(0, "Waiting for the full scan  " .. clock)
@@ -486,15 +690,19 @@ local function tick()
   end
   local nextAt = RETRY_AT[tries]
   if nextAt and t >= nextAt then send() end
-  -- no snapshot yet: fetch the items that matter to you in the meantime
+  -- no snapshot yet: read every price from a browse search in the meantime,
+  -- or at least the items that matter to you
   if not quickTried and t >= QUICK_AFTER then
     quickTried = true
-    quickRan = M.QuickItemScan(false)
+    quickRan = M.PriceScan(false) or M.QuickItemScan(false)
   end
   if t >= TIMEOUT then
     lateUntil = time() + LATE
     local last = M._quickLast
-    if quickRan and last and last.updated > 0 then
+    local pl = M._priceLast
+    if pl and pl.items > 0 then
+      abort("Scan: no full snapshot after 5 minutes (busy hours). The price scan stored today's prices for " .. pl.items .. " items - if the snapshot still comes while the AH is open, Midas stores it.")
+    elseif quickRan and last and last.updated > 0 then
       abort("Scan: no full snapshot after 5 minutes (busy hours). The quick scan updated " .. last.updated .. " of your items - if the snapshot still comes while the AH is open, Midas stores it.")
     else
       abort("Scan: no snapshot after 5 minutes (asked " .. tries .. " times). The server sends one full snapshot per ~15 minutes per account and is slow at busy hours - if it still comes while the AH is open, Midas stores it. The archive keeps your last good scan.")
@@ -509,7 +717,12 @@ function M.Scan(verbose)
   local left = M.ScanCooldown()
   if left > 0 then
     if verbose then
-      if M.QuickItemScan(true) then
+      local started, why = M.PriceScan(true)
+      if started then
+        M.Print(string.format("Full scan on cooldown (%d min) - price scan of the whole auction house instead.", math.ceil(left / 60)))
+      elseif why == "fresh" then
+        M.Print(string.format("Prices were scanned less than a minute ago. Full scan with the offer book possible again in %d min.", math.ceil(left / 60)))
+      elseif M.QuickItemScan(true) then
         M.Print(string.format("Full scan on cooldown (%d min) - quick scan of your items instead.", math.ceil(left / 60)))
       else
         M.Print(string.format("Full scan on cooldown - try again in %d min.", math.ceil(left / 60)))
@@ -520,7 +733,7 @@ function M.Scan(verbose)
   M.scanning = true
   scanPending = true
   tries, readyWait, noted, waitingReady, lateUntil = 0, 0, false, false, nil
-  quickTried, quickRan, M._quickLast = false, false, nil
+  quickTried, quickRan, M._quickLast, M._priceLast = false, false, nil, nil
   started = GetTime()
   -- the cooldown stamp is set when the server actually ANSWERS (REPLICATE
   -- event below): a failed request must not lock the button for 15 minutes
@@ -548,7 +761,7 @@ M.SafeRegister(ev, "ITEM_SEARCH_RESULTS_ADDED")
 M.SafeRegister(ev, "COMMODITY_SEARCH_RESULTS_UPDATED")
 ev:SetScript("OnEvent", function(_, event, arg1)
   if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
-    if quick then onQuickBrowse() end
+    if price then onPriceBrowse(event) elseif quick then onQuickBrowse() end
     return
   elseif event == "ITEM_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_ADDED"
       or event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
@@ -567,8 +780,15 @@ ev:SetScript("OnEvent", function(_, event, arg1)
     lateUntil = nil   -- the snapshot rows cannot be read once the AH is closed
     if M.scanning or scanPending then abort("Scan aborted (auction house closed).") end
     quickStop(true)
+    priceStop(true)
   elseif event == "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED" then
     if scanPending then C_Timer.After(1, send) end
+    -- the dropped one may have been the price scan's: ask once more
+    local p = price
+    if p and p.sent and p.drops < 5 then
+      p.drops = p.drops + 1
+      C_Timer.After(1, function() if price == p then priceStep() end end)
+    end
     -- the dropped one may have been the quick scan's: send it once more
     local q = quick
     local job = q and q.job
@@ -583,6 +803,7 @@ ev:SetScript("OnEvent", function(_, event, arg1)
       scanPending, lateUntil = false, nil
       if ticker then ticker:Cancel(); ticker = nil end
       quickStop()   -- the full snapshot covers every item
+      priceStop()
       if late then
         M.scanning = true
         if M.ScanUIState then M.ScanUIState(true) end

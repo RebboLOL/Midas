@@ -118,6 +118,10 @@ pump:SetScript("OnUpdate", function(self, elapsed)
   if now < nextSend then return end             -- min spacing AND active backoff
   local item = queue[qHead]
   if not item then queue, qHead, qTail = {}, 1, 0; self:Hide(); return end
+  -- sharing switched off while messages still wait: they are dropped, not sent
+  if not (M.db and M.db.config and M.db.config.share) then
+    queue, qHead, qTail = {}, 1, 0; self:Hide(); return
+  end
   local cost = #item.text + 16
   if budget < cost or msgTokens < 1 then return end
   if item.chan == "GUILD" and not IsInGuild() then queue[qHead] = nil; qHead = qHead + 1; return end
@@ -220,6 +224,11 @@ end
 -- Strict: one malformed/out-of-bounds row rejects the whole chunk.
 local function DecodeRows(str, sTs)
   local rows, prev = {}, 0
+  -- a current price carries a time: one from the future would beat every real
+  -- observation after it, so it is bounded like the prices are (an hour of
+  -- clock difference between two PCs is fine)
+  local maxTs = time() + 3600
+  if sTs and (sTs <= 0 or sTs > maxTs) then return nil end
   for rs in str:gmatch("[^;]+") do
     local f = {}
     for x in rs:gmatch("[^.]+") do f[#f + 1] = x end
@@ -236,6 +245,8 @@ local function DecodeRows(str, sTs)
       local dc, ts = dec36(f[4]), dec36(f[5])
       if dc and ts then r.cur = low + dc; r.ts = ts end
     end
+    -- an out-of-range current price or time: the row keeps its low and qty only
+    if r.cur and (r.cur > 5e8 or r.ts <= 0 or r.ts > maxTs) then r.cur, r.ts = nil, nil end
     rows[#rows + 1] = r
   end
   return rows
@@ -266,6 +277,7 @@ local function LocalManifest()
   return per
 end
 M._commManifest = LocalManifest   -- offline tests
+M._commDecode = DecodeRows
 
 local lastManifestTx, lastManifestVicinityTx = 0, 0
 local function SendManifest(force)

@@ -446,7 +446,7 @@ local function hex(c) return string.format("|cff%02x%02x%02x", c[1] * 255, c[2] 
 local function money(c)
   if not c then return "?" end
   c = floor(c + 0.5)
-  return ((c < 0) and "-" or "") .. M.MoneyPlain(math.abs(c))
+  return ((c < 0) and "-" or "") .. M.MoneyTip(math.abs(c))
 end
 local function pct(p)
   if not p then return "" end

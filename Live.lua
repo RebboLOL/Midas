@@ -176,7 +176,8 @@ ev:SetScript("OnEvent", function(_, event, arg1)
   elseif event == "AUCTION_ITEM_LIST_UPDATE" then
     onClassicList()
   elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
-    onBrowse()
+    -- Midas' own price scan stores these rows itself (ScannerModern.lua)
+    if not M._priceScan then onBrowse() end
   elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
     onCommodity(arg1)
   elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then

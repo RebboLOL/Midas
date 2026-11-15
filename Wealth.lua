@@ -510,6 +510,32 @@ end
 -- permanent delete, NOTHING is removed: the character just stops counting
 -- toward the account total and rests in the graveyard sum instead. Logging in
 -- on the character (Inventory.lua) or the Restore button brings it back.
+-- The words for it follow M.HCMode(): graveyard / fallen / died on Hardcore
+-- realms and with the Settings switch, neutral "not counted" everywhere else.
+local GRAVE_HC = {
+  tag = "graveyard", kv = "Graveyard", homeKV = "Graveyard (not counted)",
+  hint = "GRAVEYARD  \194\183  worth at market  \194\183  died",
+  empty = "the graveyard is empty",
+  move = "Move to graveyard\226\128\166", restore = "Restore from graveyard",
+  popup = "Move %s to the graveyard?\n\nA fallen character stops counting toward the account total and rests in the graveyard sum instead. Nothing is deleted: its items stay browsable, and Restore (or logging in alive) brings it back.",
+  moved = " rests in the graveyard now - its worth no longer counts toward the total.",
+  back = " returned from the graveyard - counting toward the total again.",
+}
+local GRAVE_PLAIN = {
+  tag = "not counted", kv = "Not counted", homeKV = "Not counted",
+  hint = "NOT COUNTED  \194\183  worth at market  \194\183  since",
+  empty = "every character counts",
+  move = "Exclude from total\226\128\166", restore = "Count again",
+  popup = "Exclude %s from the total?\n\nThe character stops counting toward the account total and is listed under \"not counted\" instead. Nothing is deleted: its items stay browsable, and \"Count again\" brings it back.",
+  moved = " no longer counts toward the total.",
+  back = " counts toward the total again.",
+}
+function M.GraveWords() return M.HCMode() and GRAVE_HC or GRAVE_PLAIN end
+function M.GraveRowLabel(n)
+  if M.HCMode() then return string.format("GRAVEYARD  \194\183  %d fallen", n) end
+  return string.format("NOT COUNTED  \194\183  %d character%s", n, n == 1 and "" or "s")
+end
+
 function M.GraveyardChar(ck)
   local c = M.db and M.db.chars and ck and M.db.chars[ck]
   if not c or c.dead then return false end
@@ -517,7 +543,7 @@ function M.GraveyardChar(ck)
   c.dead = true
   c.deadTs = time()
   c.deadWorth = (a and a.total) or 0    -- worth at the time of death, for the record
-  M.Print(tostring((a and a.name) or ck) .. " rests in the graveyard now - its worth no longer counts toward the total.")
+  M.Print(tostring((a and a.name) or ck) .. M.GraveWords().moved)
   if M.NWNavReset then M.NWNavReset() end   -- close the whole drill-down stack
   if M.frame and M.frame:IsShown() and M.RefreshWealth then M.RefreshWealth() end
   return true
@@ -550,7 +576,7 @@ function M.ReviveChar(ck)
   local c = M.db and M.db.chars and ck and M.db.chars[ck]
   if not c or not c.dead then return false end
   c.dead, c.deadTs, c.deadWorth = nil, nil, nil
-  M.Print(tostring(c.name or ck) .. " returned from the graveyard - counting toward the total again.")
+  M.Print(tostring(c.name or ck) .. M.GraveWords().back)
   if M.frame and M.frame:IsShown() and M.RefreshWealth then M.RefreshWealth() end
   return true
 end
@@ -917,8 +943,8 @@ function M.PrintWorth()
     end
   end
   if (nw.graveCount or 0) > 0 then
-    M.Print(string.format("graveyard: %d fallen  \194\183  %s  (not in the total)",
-      nw.graveCount, M.MoneyPlain(nw.graveTotal or 0)))
+    M.Print(string.format("%s  \194\183  %s  (not in the total)",
+      M.GraveRowLabel(nw.graveCount):lower(), M.MoneyPlain(nw.graveTotal or 0)))
   end
 end
 

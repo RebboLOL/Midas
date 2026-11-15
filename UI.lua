@@ -1680,17 +1680,32 @@ function M.BuildSettings(panel)
   function s.setPreview(mode)
     local nShow = (mode == "off") and 0 or (mode == "reduced") and 3 or #PREVIEW
     local craft = M.db.config.tooltipCraft ~= false and (not M.CraftingOn or M.CraftingOn())
+    local coins = M.CoinIconsOn and M.CoinIconsOn()
     local y = -7
     for i = 1, #PREVIEW do
       local show = i <= nShow and (i ~= 3 or craft)
       pvL[i]:SetShown(show)
       pvR[i]:SetShown(show)
       if show then
+        pvL[i]:SetText(coins and M.CoinIcons(PREVIEW[i][1]) or PREVIEW[i][1])
+        pvR[i]:SetText(coins and M.CoinIcons(PREVIEW[i][2]) or PREVIEW[i][2])
         pvL[i]:SetPoint("TOPLEFT", 12, y); pvR[i]:SetPoint("TOPRIGHT", -12, y)
         y = y - 15
       end
     end
     pvOff:SetShown(mode == "off")
+  end
+
+  -- coin icons instead of g/s/c in item tooltips (Discord request), default off
+  local ciCb = T.Checkbox(left, "Coin icons", function(on)
+    M.db.config.coinIcons = on and true or nil
+    if s.setPreview then s.setPreview(M.db.config.tooltipMode or "full") end
+  end)
+  ciCb:SetPoint("TOPLEFT", pv, "BOTTOMLEFT", 318, -1)
+  s.ciCb = ciCb
+  if T.HelpTip then
+    T.HelpTip(ciCb, "Coin icons", {
+      "Shows prices in item tooltips with the game's gold, silver and copper coin icons instead of the letters g, s and c." })
   end
 
   local mmCb = T.Checkbox(left, "Minimap button", function(on)
@@ -1798,6 +1813,20 @@ function M.BuildSettings(panel)
   if T.HelpTip then
     T.HelpTip(owCb, "Open with the auction house", {
       "Opens the Midas window automatically whenever you open the auction house. The coin button next to \"Midas Scan\" opens it on demand either way." })
+  end
+  -- hardcore wording for the characters kept out of net worth (M.HCMode):
+  -- always on on Hardcore realms, opt-in for self-imposed hardcore elsewhere
+  local hcCb = T.Checkbox(left, "Hardcore characters", function(on)
+    M.db.config.hcMode = on and true or nil
+    if M.RefreshSettings then M.RefreshSettings() end
+    if M.RequestUIRefresh then M.RequestUIRefresh() end
+  end)
+  hcCb:SetPoint("TOPLEFT", 0, -306)
+  s.hcCb = hcCb
+  if T.HelpTip then
+    T.HelpTip(hcCb, "Hardcore characters", {
+      "For hardcore play on a realm without the Hardcore ruleset: characters you take out of the Net Worth total rest in a graveyard as fallen, and logging in alive on one counts it again.",
+      "Off, they are simply listed as \"not counted\" and stay out until you count them again. Hardcore realms always use the graveyard." })
   end
   -- ledger recording (Ledger.lua); default ON, the switch only stops new bookings
   local lgCb = T.Checkbox(left, "Record ledger (beta)", function(on)
@@ -2044,6 +2073,7 @@ function M.RefreshSettings()
   s.tipSeg:Select(mode)
   s.setPreview(mode)
   if s.tcCb then s.tcCb:SetChecked(cfg.tooltipCraft ~= false) end
+  if s.ciCb then s.ciCb:SetChecked(cfg.coinIcons == true) end
   s.mmCb:SetChecked(not cfg.minimapHide)
   s.autoCb:SetChecked(cfg.autoScan == true)
   if s.ahCb then s.ahCb:SetChecked(cfg.ahBook ~= false) end
@@ -2052,6 +2082,7 @@ function M.RefreshSettings()
   if s.sdCb then s.sdCb:SetChecked(cfg.sellDock ~= false) end
   if s.mcCb then s.mcCb:SetChecked(cfg.modClicks ~= false) end
   if s.owCb then s.owCb:SetChecked(cfg.openWithAH == true) end
+  if s.hcCb then s.hcCb:SetChecked(M.HCMode and M.HCMode() or false) end
   if s.lgCb then s.lgCb:SetChecked(cfg.ledgerOff ~= true) end
   if s.crCb then s.crCb:SetChecked(cfg.craftOff ~= true) end
   s.cb:SetChecked(cfg.share == true)
@@ -3908,7 +3939,7 @@ function M.BuildWealth(panel)
     addKV("On auctions", M.MoneyPlain(nw.auctionsTotal), C.sub, C.purple)
     if (nw.graveCount or 0) > 0 then
       GameTooltip:AddLine(" ")
-      addKV("Graveyard (" .. nw.graveCount .. ")", M.MoneyPlain(nw.graveTotal or 0), C.muted, C.muted)
+      addKV(M.GraveWords().kv .. " (" .. nw.graveCount .. ")",M.MoneyPlain(nw.graveTotal or 0), C.muted, C.muted)
     end
     GameTooltip:Show()
   end)
@@ -4157,9 +4188,9 @@ function M.BuildWealth(panel)
     if M.FillCharRows then M.FillCharRows(nil) end
   end)
   if T.HelpTip then
-    T.HelpTip(gy, "Graveyard", {
-      "The collected worth of your fallen (graveyard) characters - kept OUT of the account total on purpose.",
-      "Click to flip the list above between living characters and the graveyard; click a fallen character to browse its items or restore it." })
+    T.HelpTip(gy, "Not counted", {
+      "The collected worth of the characters you took out of the account total - on Hardcore the graveyard of your fallen characters.",
+      "Click to flip the list above between the counted characters and these; click one to browse its items or count it again." })
   end
   gy:Hide(); gy.lbl:Hide(); gy.val:Hide()
   w.graveRow = gy
@@ -4194,14 +4225,15 @@ function M.BuildWealth(panel)
       if M.ReviveChar then M.ReviveChar(iv.charKey); M.FillCharItems() end
     else
       local a = M.CharAssets and M.CharAssets(iv.charKey)
-      StaticPopup_Show("MIDAS_GRAVEYARD_CHAR", (a and a.name) or iv.charKey, nil, iv.charKey)
+      StaticPopupDialogs["MIDAS_GRAVEYARD_CHAR"].text = M.GraveWords().popup
+      StaticPopup_Show("MIDAS_GRAVEYARD_CHAR",(a and a.name) or iv.charKey, nil, iv.charKey)
     end
   end)
   iv.graveBtn = ivGrave
   if T.HelpTip then
-    T.HelpTip(ivGrave, "Graveyard", {
-      "Moves this character to the graveyard (for HC deaths): it stops counting toward the account total and rests in a separate graveyard sum. Nothing is deleted - its items stay browsable from the graveyard list.",
-      "On a graveyard character this button restores it instead. Logging in ALIVE on the character also revives it automatically - a ghost login leaves it resting." })
+    T.HelpTip(ivGrave, "Exclude from total", {
+      "Takes this character out of the account total: its worth is listed in a separate \"not counted\" sum instead. Nothing is deleted - its items stay browsable from that list, and the same button counts it again.",
+      "Hardcore (Hardcore realms, or \"Hardcore characters\" in Settings): the list is the graveyard of your fallen characters, and logging in ALIVE on one revives it automatically - a ghost login leaves it resting." })
   end
 
   -- asset-allocation chips: filter the item list by class ("All" + the classes).
@@ -4334,9 +4366,9 @@ function M.BuildWealth(panel)
     local filter = iv.clsFilter
     local cdead = M.db and M.db.chars and M.db.chars[ck] and M.db.chars[ck].dead
     iv.title:SetText((a.name or "?") .. (filter and ("   \194\183   " .. filter) or "")
-      .. (cdead and "   \194\183   graveyard" or ""))
+      .. (cdead and ("   \194\183   " .. M.GraveWords().tag) or ""))
     if iv.graveBtn and iv.graveBtn.text then
-      iv.graveBtn.text:SetText(cdead and "Restore from graveyard" or "Move to graveyard\226\128\166")
+      iv.graveBtn.text:SetText(cdead and M.GraveWords().restore or M.GraveWords().move)
       iv.graveBtn.text:SetTextColor(T.Unpack(cdead and C.green or C.sub))
     end
     -- make sure the attribution (and its cached reference prices) is current,
@@ -4788,7 +4820,7 @@ function M.FillCharRows(cmpDay)
   -- graveyard view: the same rows show the fallen (worth + death day) instead
   if w.graveView and not cmpDay then
     local g = nw.grave or {}
-    if w.charHint then w.charHint:SetText("GRAVEYARD  \194\183  worth at market  \194\183  died") end
+    if w.charHint then w.charHint:SetText(M.GraveWords().hint) end
     for i = 1, #w.charRows do
       local r = w.charRows[i]
       if r then
@@ -4799,7 +4831,7 @@ function M.FillCharRows(cmpDay)
           r.val:SetText(M.MoneyPlain(e.total)); colorize(r.val, C.sub)
           r.chg:SetText(e.deadTs and date("%b %d %Y", e.deadTs) or "\226\128\147"); colorize(r.chg, C.muted)
         elseif i == 1 then
-          r.name:SetText("the graveyard is empty"); colorize(r.name, C.muted)
+          r.name:SetText(M.GraveWords().empty); colorize(r.name, C.muted)
           r.val:SetText(""); r.chg:SetText("")
         else
           r.name:SetText(""); r.val:SetText(""); r.chg:SetText("")
@@ -5063,7 +5095,7 @@ function M.FillWorthDay()
         r.chg:SetText(fmtDelta(dd)); colorize(r.chg, deltaColor(dd))
       else
         local dc2 = M.db and M.db.chars and M.db.chars[e.ck]
-        r.chg:SetText((dc2 and dc2.dead) and "graveyard" or "removed"); colorize(r.chg, C.muted)
+        r.chg:SetText((dc2 and dc2.dead) and M.GraveWords().tag or "removed"); colorize(r.chg, C.muted)
       end
     else
       if r.btn then r.btn.ck = nil end
@@ -5141,7 +5173,7 @@ function M.FillWorthClass()
         r.chg:SetText(fmtDelta(d2)); colorize(r.chg, deltaColor(d2))
       else
         local dc = M.db and M.db.chars and M.db.chars[e.ck]
-        r.chg:SetText(nowc and "\226\128\147" or ((dc and dc.dead) and "graveyard" or "removed")); colorize(r.chg, C.muted)
+        r.chg:SetText(nowc and "\226\128\147" or ((dc and dc.dead) and M.GraveWords().tag or "removed")); colorize(r.chg, C.muted)
       end
     else
       if r.btn then r.btn.ck = nil end
@@ -5460,7 +5492,7 @@ function M.RefreshWealth()
     if n > 0 then
       w.graveRow:ClearAllPoints()
       w.graveRow:SetPoint("TOPLEFT", w.lowerAnchor, "TOPLEFT", 530, -(20 + (w._charVis or 8) * 17 + 4))
-      w.graveRow.lbl:SetText(string.format("GRAVEYARD  \194\183  %d fallen", n))
+      w.graveRow.lbl:SetText(M.GraveRowLabel(n))
       w.graveRow.val:SetText(M.MoneyPlain(nw.graveTotal or 0))
       w.graveRow:Show(); w.graveRow.lbl:Show(); w.graveRow.val:Show()
     else

@@ -47,7 +47,8 @@
 --
 --   MidasAPI.RegisterCallback(event, fn) / UnregisterCallback(event, fn)
 --     fn(event, payload) is called after the fact; errors are trapped. Events:
---       "SCAN_COMPLETE"     { day, items, ts, market } own AH scan stored
+--       "SCAN_COMPLETE"     { day, items, ts, market, depth } own AH scan stored
+--                           (depth = false: price scan, offer book unchanged)
 --       "ANALYSIS_COMPLETE" { }                       background analysis finished
 --       "IMPORT_COMPLETE"   { source, items, rows }   foreign-addon import merged
 --

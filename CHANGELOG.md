@@ -1,5 +1,17 @@
 # Midas – Changelog
 
+## 1.2.26 – 2026-11-15
+- **Forever: price scan without cooldown.** When the full scan is slow or on cooldown, Midas now scans the prices of the whole auction house instead of only your own items.
+- **All characters count together, with or without Auctionator.** Fixed a bug where characters with Auctionator switched on and characters without it ended up in separate net worth and price data - Midas now names the realm itself and moves the earlier history over at login.
+- **Net worth: "not counted" instead of graveyard.** Outside Hardcore realms, characters taken out of the total are now listed as "not counted" and stay out until you count them again - the new "Hardcore characters" checkbox in Settings brings the graveyard back for hardcore play on other realms.
+- **Midas lines on clicked item links.** The item window that opens when you click an item link in chat now shows the Midas lines too.
+- **Coin icons in item tooltips.** The new "Coin icons" setting shows tooltip prices with the game's gold, silver and copper icons instead of g, s and c.
+- **Faster price charts.** Charts of items with a long price history draw much faster, in the window and under the item tooltip.
+- **Merchants no longer refresh the market analysis.** Fixed a bug where every visit to a merchant and every purchase there made Midas recalculate its whole market analysis.
+- **Quick scan: other items stay listed.** Fixed a bug where items a quick scan had not looked at could show as "Not listed" until the next full scan.
+- **Gold spent to zero.** Fixed a bug where a character that spent or mailed away all of its gold kept its old balance in net worth.
+- **Sync checks current prices.** Shared prices with a current price or time out of range are no longer taken over, and turning sharing off drops the messages still waiting to be sent.
+
 ## 1.2.25 – 2026-11-12
 - **Net worth: auctions counted once.** Fixed a bug where your auctions could count twice toward net worth after a visit to the auction house until that character opened its mailbox.
 - **Lighter item tooltips.** Fixed a bug where hovering an item could drop the frame rate - the Midas lines and the price chart under the tooltip now take far less work while it stays open, and the chart waits until the pointer rests on an item.

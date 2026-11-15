@@ -93,8 +93,13 @@ end
 -- the tie-breaker that keeps cur consistent across community sync). Rows the
 -- scan actually changed are handed to Comm.lua for broadcasting.
 -- A scan at a neutral AH is stored apart and touches nothing else.
-function M.CommitScan(acc)
+-- opts.noDepth: a price scan (ScannerModern.lua) - every item's cheapest unit
+-- price and units, but no single auctions. Rows, newest scan day and sync as
+-- for a full scan; the offer book stays as the last snapshot left it.
+-- opts.note: text appended to the chat line.
+function M.CommitScan(acc, opts)
   if not M.db or type(acc) ~= "table" then return end
+  local noDepth = opts and opts.noDepth and true or false
   if M.AtNeutralAH() then
     local day, now, items = M.GetScanDay(), time(), 0
     for itemID, a in pairs(acc) do
@@ -157,14 +162,20 @@ function M.CommitScan(acc)
   M.db.config.lastIngest = now
   -- a full scan is newer than every price the AH showed before it
   if M.db.live then M.db.live[rk] = nil end
-  M.CommitDepth(acc, now)
-  M.DirtyAnalysis()
-  M.Print(string.format("Full scan stored: %d items, day %s.", items, M.DayLabel(day)))
+  if not noDepth then M.CommitDepth(acc, now) end
+  -- today is a full-scan day now: raise the cached newest day instead of
+  -- dropping it (the next reader would walk the whole archive for it)
+  local ldc = M._lastDayCache
+  if items > 0 and ldc and ldc[rk] and day > ldc[rk] then ldc[rk] = day end
+  M.DirtyAnalysis(items == 0 or (ldc and ldc[rk]) ~= nil)
+  M.Print(string.format("%s stored: %d items, day %s.%s", noDepth and "Price scan" or "Full scan",
+    items, M.DayLabel(day), (opts and opts.note) or ""))
   if M.CheckAlerts then M.CheckAlerts() end
   -- the sell helper at the AH ranks bags by these prices: re-fill it in place
   if M.ShowSellDock then M.ShowSellDock() end
   if M.OnScanCommitted then M.OnScanCommitted(day, changed, now) end
-  if M.FireAPIEvent then M.FireAPIEvent("SCAN_COMPLETE", { day = day, items = items, ts = now, market = M.MarketInfo() }) end
+  -- depth = false: a price scan, the offer book is still the last snapshot's
+  if M.FireAPIEvent then M.FireAPIEvent("SCAN_COMPLETE", { day = day, items = items, ts = now, market = M.MarketInfo(), depth = not noDepth }) end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
 end
 
@@ -207,7 +218,7 @@ function M.CommitQuick(acc)
     end
   end
   if items == 0 then return 0 end
-  M.DirtyAnalysis()
+  M.DirtyAnalysis(true)   -- quick rows never move the newest scan day
   if M.CheckAlerts then M.CheckAlerts() end
   if M.ShowSellDock then M.ShowSellDock() end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
@@ -253,7 +264,7 @@ end
 local liveTimer = false
 local function liveSettled()
   liveTimer = false
-  M.DirtyAnalysis()
+  M.DirtyAnalysis(true)   -- live prices stay out of the archive
   if M.CheckAlerts then M.CheckAlerts() end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
 end
@@ -274,9 +285,11 @@ function M.ObserveLive(itemID, unit, qty)
   local ls = M.db.live[rk]; if not ls then ls = {}; M.db.live[rk] = ls end
   local key = tostring(id)
   local old = ls[key]
-  ls[key] = { p = unit, q = qty, ts = time() }
   if M._mCache and M._mCache.items then M._mCache.items[key] = nil end
-  if old and old.p == unit and old.q == qty then return end
+  -- the same price again (an Auctionator scan writes thousands): only its
+  -- time moves, no new table and no whole-archive refresh
+  if old and old.p == unit and old.q == qty then old.ts = time(); return end
+  ls[key] = { p = unit, q = qty, ts = time() }
   if not liveTimer then
     liveTimer = true
     C_Timer.After(LIVE_SETTLE, liveSettled)
@@ -378,7 +391,7 @@ end
 local syncTimer = false
 local function syncSettled()
   syncTimer = false
-  M.DirtyAnalysis()
+  M.DirtyAnalysis(true)   -- MergeSharedRows raised the newest scan day itself
 end
 
 function M.MergeSharedRows(day, rows, fromGuild)

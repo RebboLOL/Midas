@@ -449,9 +449,18 @@ function M.FairSeries(series, key)
   local days = {}
   for d, v in pairs(series) do if v.low then days[#days + 1] = d end end
   table.sort(days)
+  -- Each day's Fair only reads the rows of its own trailing window (base span,
+  -- 14-day floor fallback), so the days slide through a small window table
+  -- instead of every day scanning the whole history - same numbers, and a
+  -- two-year archive costs days x window instead of days x days.
+  local span = math.max(14, M.C.FAIR_BASE_DAYS or 14)
+  local win, from = {}, 1
   for i = 1, #days do
-    local f = fairOnDay(series, days[i], m.rstar)
-    if f then out[#out + 1] = { day = days[i], fair = f } end
+    local day = days[i]
+    win[day] = series[day]
+    while days[from] <= day - span do win[days[from]] = nil; from = from + 1 end
+    local f = fairOnDay(win, day, m.rstar)
+    if f then out[#out + 1] = { day = day, fair = f } end
   end
   return out
 end
@@ -547,7 +556,19 @@ local function runAnalysis()
     local series = store[key]
     if series then
       local days, lastDay, avgQty = quickScan(series)    -- cheap gate before full Metrics
-      if lastDay > maxDay then maxDay = lastDay end
+      if lastDay > maxDay then
+        -- the newest scan day is a FULL scan's day (like M.LastScanDay): a row
+        -- only a quick scan wrote must not make every other item "not listed"
+        local full = lastDay
+        local lr = series[lastDay]
+        if lr and lr.quick then
+          full = -1
+          for d, v in pairs(series) do
+            if v.low and not v.quick and d > full then full = d end
+          end
+        end
+        if full > maxDay then maxDay = full end
+      end
       local m
       if days >= C.MIN_DAYS and avgQty >= C.RANK_MIN_QTY then
         m = M.Metrics(series, key)
@@ -587,7 +608,7 @@ local function runAnalysis()
   local buys, sells = {}, {}
   for i = 1, #cand do
     local p = cand[i]
-    if p.lastDay == last then
+    if p.lastDay >= last then   -- seen in the newest full scan, or by a quick scan since
       local m = p.m
       if math.abs(m.cur - m.fair) >= C.PICK_MIN_MOVE then
         local rec = { key = p.key, cur = m.cur, fair = m.fair, delta = m.delta,

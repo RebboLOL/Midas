@@ -896,7 +896,7 @@ do
     if nw then for _ in pairs(nw.chars or {}) do nChars = nChars + 1 end end
     local subT = nChars .. ((nChars == 1) and " character" or " characters")
     if nw and (nw.graveTotal or 0) > 0 then
-      subT = subT .. "   \194\183   graveyard " .. M.MoneyPlain(nw.graveTotal)
+      subT = subT .. "   \194\183   " .. M.GraveWords().tag .. " " .. M.MoneyPlain(nw.graveTotal)
     end
     h.nwSub:SetText(subT)
     if M.RenderWorthSpark then M.RenderWorthSpark(h.spark) end
@@ -1175,7 +1175,7 @@ function M.BuildHome(panel)
       tipKV("Characters", tostring(hm.chars))
       if hm.top then tipKV("Biggest change today", hm.top.name .. " " .. signedMoney(hm.top.d, true, true),
         (hm.top.d > 0) and C.green or C.red) end
-      if (hm.grave or 0) > 0 then tipKV("Graveyard (not counted)", M.MoneyPlain(hm.grave), C.muted) end
+      if (hm.grave or 0) > 0 then tipKV(M.GraveWords().homeKV,M.MoneyPlain(hm.grave), C.muted) end
     end })
   h.nwTotal = T.Text(hero, SZ_HERO, "accent", T.FONT_SEMI)
   h.nwTotal:SetPoint("TOPLEFT", PAD, -33)

@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.25"
+M.version = "1.2.26"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -109,10 +109,13 @@ end
 -- batch left Top Picks / Opportunities empty and "refreshing" forever. The next
 -- TopPicks/RankAll call rebuilds in the background and swaps the result in.
 -- Defined here in Core so the early-loading data/comm/vendor modules can call it.
-function M.DirtyAnalysis()
+-- keepLastDay: the caller did not move the newest full-scan day (or raised the
+-- cached one itself), so M.LastScanDay keeps its answer instead of walking the
+-- whole archive again.
+function M.DirtyAnalysis(keepLastDay)
   M._analysisStale = true   -- keep M._analysis on screen until the rebuild lands
   M._rankCache    = nil
-  M._lastDayCache = nil
+  if not keepLastDay then M._lastDayCache = nil end
   M._curveAnchor  = nil   -- sell-odds class anchors (Logic.lua) depend on trade data
   M._mCache       = nil   -- per-item metrics memo (Logic.lua), generation-stamped
   M._analysisGen  = (M._analysisGen or 0) + 1
@@ -138,6 +141,37 @@ function M.MoneyPlain(copper)
   if g > 0 then return string.format("%dg %02ds", g, s) end
   if s > 0 then return string.format("%ds %02dc", s, c) end
   return string.format("%dc", c)
+end
+
+-- Settings > "Coin icons": item tooltips show the game's gold/silver/copper
+-- icons instead of the g/s/c letters (opt-in, config.coinIcons). CoinIcons
+-- turns every "12g 05s" in a text into "12[gold] 5[silver]".
+local COIN_ICON = {
+  g = "|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t",
+  s = "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t",
+  c = "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t",
+}
+function M.CoinIcons(txt)
+  -- a color code's hex digits may run straight into the amount ("|cffFDCC619g"):
+  -- mark the code's end so only the amount itself gets matched
+  txt = txt:gsub("(|c%x%x%x%x%x%x%x%x)", "%1\001")
+  txt = txt:gsub("%f[%w](%d+)([gsc])%f[%A]", function(n, u)
+    return tonumber(n) .. COIN_ICON[u]
+  end)
+  return (txt:gsub("\001", ""))
+end
+function M.CoinIconsOn()
+  return M.db and M.db.config and M.db.config.coinIcons == true
+end
+-- tooltip money: MoneyPlain, or the coin icons when switched on
+function M.MoneyTip(copper)
+  if M.CoinIconsOn() then return M.CoinIcons(M.MoneyPlain(copper)) end
+  return M.MoneyPlain(copper)
+end
+-- tooltip money with gold-tinted gold (like Money); icons need no tint
+function M.MoneyTipGold(copper)
+  if M.CoinIconsOn() then return M.CoinIcons(M.MoneyPlain(copper)) end
+  return M.Money(copper)
 end
 
 -- Time / days ----------------------------------------------------------------
@@ -174,12 +208,12 @@ function M.DayLabel(day) -- e.g. "Jun 05"
   return date("%b %d", day * 86400 + M.C.SCAN_DAY_0)
 end
 
--- Current realm key. Self-contained: realm + faction (Classic AH is per faction).
--- Falls back to Auctionator's key if present, to stay compatible with old data.
+-- Current realm key: realm + faction (every faction has its own auction house).
+-- Always built from the client's own answers. Up to 1.2.25 a loaded Auctionator
+-- supplied the key instead ("PvP" on WoW Forever), which split one account's
+-- characters as soon as Auctionator was on for some and off for others -
+-- M.AdoptBorrowedKeys moves data stored under such a key home.
 function M.RealmKey()
-  if Auctionator and Auctionator.State and Auctionator.State.CurrentRealm then
-    return Auctionator.State.CurrentRealm
-  end
   local realm = GetRealmName() or "Realm"
   local faction = UnitFactionGroup("player")
   if faction and faction ~= "Neutral" then
@@ -279,6 +313,11 @@ local REGIONS = { "US", "KR", "EU", "TW", "CN" }
 function M.MarketInfo()
   local region = GetCurrentRegion and REGIONS[GetCurrentRegion()] or "?"
   local ruleset = "Normal"
+  -- Forever realm names end in their ruleset ("CAMWOW EU5 Realm 7 PvE");
+  -- no game-rules API reports it (probe 12.11.2026: IsStandard only)
+  local tail = (GetRealmName() or ""):match("(%a+)$")
+  local RULESETS = { PvE = true, PvP = true, RP = true, RPPvP = true, Hardcore = true }
+  if tail and RULESETS[tail] then ruleset = tail end
   if C_GameRules and C_GameRules.IsHardcoreActive then
     local ok, hc = pcall(C_GameRules.IsHardcoreActive)
     if ok and hc then ruleset = "Hardcore" end
@@ -290,6 +329,19 @@ function M.MarketInfo()
     faction = UnitFactionGroup("player") or "Neutral",
     ruleset = ruleset,
   }
+end
+
+-- Hardcore wording for characters kept out of the total (graveyard, fallen,
+-- died) and the revive on a living login: on by itself on Hardcore realms,
+-- opt-in elsewhere (Settings) for players who play hardcore by their own
+-- rules. Without it the same list reads neutral ("not counted").
+function M.HCMode()
+  if M.db and M.db.config and M.db.config.hcMode == true then return true end
+  if C_GameRules and C_GameRules.IsHardcoreActive then
+    local ok, hc = pcall(C_GameRules.IsHardcoreActive)
+    if ok and hc then return true end
+  end
+  return ((GetRealmName and GetRealmName() or ""):match("(%a+)$")) == "Hardcore"
 end
 
 -- /midas market: what Midas detects as this character's market, plus the raw
@@ -467,6 +519,7 @@ function M.OnLogin()
   -- then LOOKS gone (it sits under the old key). Say it once per YOUNG key -
   -- empty, or scanned for less than two weeks (the user may have scanned on
   -- the renamed realm before noticing) - while other realms hold data.
+  if M.AdoptBorrowedKeys then M.AdoptBorrowedKeys() end   -- before the note: it may fill this key
   do
     local rk = M.RealmKey and M.RealmKey()
     local cur = rk and MidasDB.realms[rk]
@@ -538,7 +591,7 @@ function M.PrintHelp()
     "/midas  -  open / close the window",
     "/midas scan  -  full AH scan (auction house must be open)",
     "/midas auto  -  toggle auto-scan when the AH opens",
-    "/midas quick  -  toggle the quick scan of your items while the full scan is slow (WoW Forever)",
+    "/midas quick  -  toggle the price scan / quick scan while the full scan is slow or on cooldown (WoW Forever)",
     "/midas status  -  archive status (items, days, last scan)",
     "/midas import  -  re-check the Auctionator / aux price databases",
     "/midas sells  -  top sell tips from your bags, bank & mail",
@@ -627,13 +680,44 @@ function M.MergeRealm(old)
       if e.realm == oldKey then e.realm = new; moved.trades = moved.trades + 1 end
     end
   end
-  -- net worth: fill missing days (the new key's own snapshots win)
+  -- net worth: fill missing days; where both keys hold a day, the snapshot
+  -- with the larger total stays (it counted more of the account)
   if db.nw and db.nw[oldKey] then
     local dst = db.nw[new]; if not dst then dst = {}; db.nw[new] = dst end
     for day, v in pairs(db.nw[oldKey]) do
-      if dst[day] == nil then dst[day] = v; moved.days = moved.days + 1 end
+      local cur = dst[day]
+      if cur == nil then dst[day] = v; moved.days = moved.days + 1
+      elseif type(v) == "table" and type(cur) == "table" and (v.t or 0) > (cur.t or 0) then dst[day] = v end
     end
     db.nw[oldKey] = nil
+  end
+  if db.config and db.config.nwHome == oldKey then db.config.nwHome = new end
+  -- ledger: days and months per character; the new key's own bookings win
+  local L = db.ledger
+  if type(L) == "table" then
+    for _, fld in ipairs({ "d", "mo" }) do
+      local t = L[fld]
+      if type(t) == "table" and t[oldKey] then
+        local dst = t[new]; if not dst then dst = {}; t[new] = dst end
+        for span, chars in pairs(t[oldKey]) do
+          local d2 = dst[span]
+          if d2 == nil then dst[span] = chars
+          elseif type(chars) == "table" and type(d2) == "table" then
+            for ck, rec in pairs(chars) do if d2[ck] == nil then d2[ck] = rec end end
+          end
+        end
+        t[oldKey] = nil
+      end
+    end
+  end
+  -- sell-odds calibration and live prices: move where the new key has none
+  if db.trade and type(db.trade.curve) == "table" and db.trade.curve[oldKey] then
+    if db.trade.curve[new] == nil then db.trade.curve[new] = db.trade.curve[oldKey] end
+    db.trade.curve[oldKey] = nil
+  end
+  if type(db.live) == "table" and db.live[oldKey] then
+    if db.live[new] == nil then db.live[new] = db.live[oldKey] end
+    db.live[oldKey] = nil
   end
   -- alerts: keep the new realm's own limits, adopt the rest
   if db.alerts and db.alerts[oldKey] then
@@ -662,6 +746,62 @@ function M.MergeRealm(old)
   return true, moved, oldKey
 end
 
+-- ===== Borrowed realm keys ===================================================
+-- Up to 1.2.25 a loaded Auctionator named the realm key. A character of THIS
+-- realm whose scope is neither this realm's own key nor the other faction's
+-- still points at such a borrowed key: its history is merged into the own key,
+-- once, with or without Auctionator installed today. Left alone (a chat note
+-- names the manual merge) when the borrowed key also holds characters of
+-- another realm or of the other faction - that data cannot be told apart.
+function M.AdoptBorrowedKeys()
+  local db = MidasDB
+  if not (db and type(db.chars) == "table" and GetRealmName and UnitFactionGroup) then return 0 end
+  local realm, faction = GetRealmName(), UnitFactionGroup("player")
+  if not realm or not faction or faction == "Neutral" then return 0 end
+  local own = M.RealmKey()
+  local suffix = "-" .. realm
+  local function here(ck) return type(ck) == "string" and ck:sub(-#suffix) == suffix end
+  local cand = {}
+  for ck, c in pairs(db.chars) do
+    local s = type(c) == "table" and c.scope
+    if type(s) == "string" and here(ck) and s ~= own
+       and s ~= realm .. " Alliance" and s ~= realm .. " Horde" and not M.IsNeutralKey(s) then
+      cand[s] = true
+    end
+  end
+  local n = 0
+  for key in pairs(cand) do
+    local safe = true
+    for ck, c in pairs(db.chars) do
+      if type(c) == "table" and c.scope == key
+         and (not here(ck) or (c.faction and c.faction ~= faction)) then
+        safe = false; break
+      end
+    end
+    if safe then
+      local ok, info = M.MergeRealm(key)
+      -- a key without market data of its own still names characters
+      for _, c in pairs(db.chars) do
+        if type(c) == "table" and c.scope == key then c.scope = own end
+      end
+      n = n + 1
+      if ok then
+        M.Print(string.format('Moved your history from "%s" to "%s": %d items, %d trade entries, %d net-worth days. Midas no longer takes its realm name from Auctionator, so all your characters here count together with or without it.',
+          key, own, info.items or 0, info.trades or 0, info.days or 0))
+      end
+    else
+      db.config = db.config or {}
+      db.config.borrowHint = db.config.borrowHint or {}
+      if not db.config.borrowHint[key] then
+        db.config.borrowHint[key] = 1
+        M.Print(string.format('Earlier data is stored under "%s", shared with characters of another realm or faction. "/midas realmmerge %s" moves it to "%s" - run it on the realm and faction it belongs to.',
+          key, key, own))
+      end
+    end
+  end
+  return n
+end
+
 -- Slash ----------------------------------------------------------------------
 SLASH_MIDAS1 = "/midas"
 SLASH_MIDAS2 = "/mid"
@@ -675,7 +815,7 @@ SlashCmdList["MIDAS"] = function(msg)
     M.Print("Auto-scan on AH open: " .. (M.db.config.autoScan and "ON" or "OFF") .. " (default OFF - use the Midas Scan button)")
   elseif msg == "quick" then
     if M.db.config.quickScan == false then M.db.config.quickScan = nil else M.db.config.quickScan = false end
-    M.Print("Quick scan of your items while the full scan is slow or on cooldown (WoW Forever): "
+    M.Print("Price scan and quick scan while the full scan is slow or on cooldown (WoW Forever): "
       .. (M.db.config.quickScan == false and "OFF" or "ON") .. " (default ON)")
   elseif msg == "status" then
     M.PrintStatus()

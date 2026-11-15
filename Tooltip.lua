@@ -73,23 +73,23 @@ local function buildLines(itemID, mode)
   local sc = M.Theme and M.Theme.C[notListed and "sub" or M.DeltaColor(delta)]
   local r, g, b = 0.78, 0.80, 0.85
   if sc then r, g, b = sc[1], sc[2], sc[3] end
-  local curTxt = "Current  " .. M.MoneyPlain(cur)
+  local curTxt = "Current  " .. M.MoneyTip(cur)
   if notListed then
     sig = "last seen " .. M.DayLabel(M.SeenDay(m))
-    curTxt = "Not listed  \194\183  last " .. M.MoneyPlain(cur)
+    curTxt = "Not listed  \194\183  last " .. M.MoneyTip(cur)
   end
   local liqTxt = m.liqLabel or ""
   if m.speed then liqTxt = string.format("~%.1f/day \194\183 %s", m.speed, m.liqLabel or "") end
   -- Fair carries its meaning: the sell chance it is calibrated to (lower if capped)
-  local fairTxt = "Fair  " .. M.Money(m.fair)
-  if m.oddsAtFair then fairTxt = string.format("Fair (~%.0f%%)  %s", m.oddsAtFair * 100, M.Money(m.fair)) end
+  local fairTxt = "Fair  " .. M.MoneyTipGold(m.fair)
+  if m.oddsAtFair then fairTxt = string.format("Fair (~%.0f%%)  %s", m.oddsAtFair * 100, M.MoneyTipGold(m.fair)) end
 
   tooltip:AddLine(" ")
   tooltip:AddDoubleLine("|cffE8B44AMidas|r", sig, 0.91, 0.70, 0.29, r, g, b)
   tooltip:AddDoubleLine(curTxt, fairTxt, r, g, b, 0.78, 0.76, 0.70)
   if M.CraftTipLines then M.CraftTipLines(tooltip, itemID, mode) end
   if mode == "reduced" then return tooltip end
-  tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyPlain(m.quick), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
+  tooltip:AddDoubleLine("Sells  " .. liqTxt, "Quick-sell  " .. M.MoneyTip(m.quick), 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   tooltip:AddDoubleLine("In AH now:  " .. curQty, "Avg in AH:  " .. avgQty, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   -- supply ladder of the newest scan: how much sits within 10% of the floor
   local dp = M.GetDepth and M.GetDepth(itemID)
@@ -120,7 +120,7 @@ local function buildLines(itemID, mode)
   if M.RealizedBuy then
     local paid, units = M.RealizedBuy(tostring(itemID))
     if paid and units > 0 then
-      tooltip:AddLine(string.format("You paid  %s avg  (%d bought)", M.MoneyPlain(paid), units), 0.78, 0.76, 0.70)
+      tooltip:AddLine(string.format("You paid  %s avg  (%d bought)", M.MoneyTip(paid), units), 0.78, 0.76, 0.70)
     end
   end
   return tooltip
@@ -147,15 +147,17 @@ local function annotate(tooltip, itemID)
   local now = GetTime()
   local gen = M._analysisGen or 0
   local craft = cfg and cfg.tooltipCraft
+  local coins = cfg and cfg.coinIcons
   local memo = M._mCache and M._mCache.items
   local hit = memo and memo[tostring(itemID)]
   if not (last.lines and last.id == itemID and last.mode == mode and last.gen == gen
-          and last.craft == craft and last.hit == hit and now - last.t < LINES_TTL) then
+          and last.craft == craft and last.coins == coins and last.hit == hit
+          and now - last.t < LINES_TTL) then
     last.lines = buildLines(itemID, mode)
     if P then P.build = P.build + 1 end
     -- read after the build: that is the metrics entry these lines came from
     memo = M._mCache and M._mCache.items
-    last.id, last.mode, last.gen, last.craft, last.t = itemID, mode, gen, craft, now
+    last.id, last.mode, last.gen, last.craft, last.coins, last.t = itemID, mode, gen, craft, coins, now
     last.hit = memo and memo[tostring(itemID)]
   end
   if #last.lines == 0 then return end
@@ -295,23 +297,30 @@ local function onItem(tooltip, id)
   end
 end
 
+-- The hover tooltip and the window an item link clicked in chat opens
+-- (ItemRefTooltip). The clicked one gets the lines only: the chart panel is
+-- docked to the hover tooltip (showChart) and both can be open at once.
+local itemRef = rawget(_G, "ItemRefTooltip")
+
 local ok = false
 if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
   TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
-    if tooltip ~= GameTooltip or not data then return end
+    if not data or (tooltip ~= GameTooltip and (not itemRef or tooltip ~= itemRef)) then return end
     if issecretvalue and issecretvalue(data.id) then return end   -- modern client: restricted in combat
     onItem(tooltip, data.id)
   end)
   ok = true
 end
-if not ok and GameTooltip.HookScript then
-  GameTooltip:HookScript("OnTooltipSetItem", function(self)
+if not ok then
+  local function onSetItem(self)
     if self.GetItem then
       local _, link = self:GetItem()
       local id = link and tonumber(link:match("item:(%d+)"))
       onItem(self, id)
     end
-  end)
+  end
+  if GameTooltip.HookScript then GameTooltip:HookScript("OnTooltipSetItem", onSetItem) end
+  if itemRef and itemRef.HookScript then itemRef:HookScript("OnTooltipSetItem", onSetItem) end
 end
 
 -- "/midas ttchart": self-test. Renders the panel mid-screen for the first

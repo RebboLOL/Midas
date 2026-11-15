@@ -20,14 +20,23 @@ function M.VendorPrice(id)
   return M.db and M.db.vendor and M.db.vendor[id] or nil
 end
 
+-- counted once and kept until this file writes to the table again (the craft
+-- cache asks on every lookup)
+local vendorN, vendorT
 function M.VendorCount()
+  local t = M.db and M.db.vendor
+  if not t then return 0 end
+  if vendorN and vendorT == t then return vendorN end
   local c = 0
-  if M.db and M.db.vendor then for _ in pairs(M.db.vendor) do c = c + 1 end end
+  for _ in pairs(t) do c = c + 1 end
+  vendorN, vendorT = c, t
   return c
 end
 
 -- Record unlimited, gold-only items from the currently open merchant.
+local scanPending = false
 local function scanMerchant()
+  scanPending = false
   local v = ensure(); if not v then return end
   local n = GetMerchantNumItems() or 0
   local added = 0
@@ -40,12 +49,16 @@ local function scanMerchant()
       local id = link and tonumber(link:match("item:(%d+)"))
       if id then
         local unit = math.floor(price / (quantity or 1))
-        if not v[id] or unit < v[id] then v[id] = unit end
-        added = added + 1
+        -- only a new item or a lower price is a change: a merchant seen before
+        -- must not refresh the whole analysis again
+        if not v[id] or unit < v[id] then v[id] = unit; added = added + 1 end
       end
     end
   end
-  if added > 0 then M.DirtyAnalysis() end
+  if added > 0 then
+    vendorN = nil
+    M.DirtyAnalysis(true)   -- vendor prices never move the newest scan day
+  end
 end
 
 -- Bootstrap from Auctionator's vendor price cache (keys are string item IDs).
@@ -63,7 +76,8 @@ function M.SeedVendor()
     end
   end
   if n > 0 then
-    M.DirtyAnalysis()
+    vendorN = nil
+    M.DirtyAnalysis(true)
     if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
   end
 end
@@ -71,4 +85,9 @@ end
 local ev = CreateFrame("Frame")
 M.SafeRegister(ev, "MERCHANT_SHOW")
 M.SafeRegister(ev, "MERCHANT_UPDATE")
-ev:SetScript("OnEvent", function() C_Timer.After(0.1, scanMerchant) end)
+-- one scan per burst of merchant events (every purchase fires MERCHANT_UPDATE)
+ev:SetScript("OnEvent", function()
+  if scanPending then return end
+  scanPending = true
+  C_Timer.After(0.1, scanMerchant)
+end)
