@@ -823,10 +823,18 @@ function M.WatchGroups()
   return (cfg and cfg.watchGroups) or {}
 end
 
+-- cut to at most n bytes without splitting a multi-byte (e.g. Chinese) character
+local function cutUtf8(s, n)
+  if #s <= n then return s end
+  local b = s:byte(n + 1)
+  while n > 0 and b and b >= 128 and b < 192 do n = n - 1; b = s:byte(n + 1) end
+  return s:sub(1, n)
+end
+
 function M.WatchGroupAdd(name)
   name = name and name:gsub("^%s+", ""):gsub("%s+$", "")
   if not name or name == "" then return false end
-  if #name > 24 then name = name:sub(1, 24) end
+  name = cutUtf8(name, 24)
   local cfg = M.db.config
   cfg.watchGroups = cfg.watchGroups or {}
   if #cfg.watchGroups >= 20 then return false end
@@ -840,7 +848,7 @@ end
 function M.WatchGroupRename(old, new)
   new = new and new:gsub("^%s+", ""):gsub("%s+$", "")
   if not new or new == "" or new == old then return false end
-  if #new > 24 then new = new:sub(1, 24) end
+  new = cutUtf8(new, 24)
   local cfg = M.db.config
   local gs = cfg.watchGroups or {}
   for _, g in ipairs(gs) do if g:lower() == new:lower() then return false end end

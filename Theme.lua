@@ -23,6 +23,13 @@ end
 T.FONT      = fontOr("Inter-Regular.ttf",  "Fonts\\ARIALN.TTF")
 T.FONT_MED  = fontOr("Inter-Medium.ttf",   T.FONT)
 T.FONT_SEMI = fontOr("Inter-SemiBold.ttf", T.FONT_MED)
+-- Inter has no Chinese/Korean glyphs: on those clients use the game's own
+-- font so item and character names don't render as boxes (#cjk)
+local LOCALE = GetLocale and GetLocale()
+if LOCALE == "zhTW" or LOCALE == "zhCN" or LOCALE == "koKR" then
+  local sys = STANDARD_TEXT_FONT or (GameFontNormal and GameFontNormal:GetFont())
+  if sys then T.FONT, T.FONT_MED, T.FONT_SEMI = sys, sys, sys end
+end
 
 -- ---- Color tokens (r, g, b [, a], range 0..1) ------------------------------
 -- The Midas gold theme: everything the addon touches turns to gold. Warm, dark

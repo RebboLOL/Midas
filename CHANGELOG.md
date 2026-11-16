@@ -1,5 +1,8 @@
 # Midas – Changelog
 
+## 1.2.27 – 2026-11-16
+- **Chinese and Korean item names.** On Chinese and Korean game clients Midas now uses the game's own font, so item and character names no longer show as boxes.
+
 ## 1.2.26 – 2026-11-15
 - **Forever: price scan without cooldown.** When the full scan is slow or on cooldown, Midas now scans the prices of the whole auction house instead of only your own items.
 - **All characters count together, with or without Auctionator.** Fixed a bug where characters with Auctionator switched on and characters without it ended up in separate net worth and price data - Midas now names the realm itself and moves the earlier history over at login.
