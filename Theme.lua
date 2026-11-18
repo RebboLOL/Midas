@@ -28,8 +28,25 @@ T.FONT_SEMI = fontOr("Inter-SemiBold.ttf", T.FONT_MED)
 local LOCALE = GetLocale and GetLocale()
 if LOCALE == "zhTW" or LOCALE == "zhCN" or LOCALE == "koKR" then
   local sys = STANDARD_TEXT_FONT or (GameFontNormal and GameFontNormal:GetFont())
-  if sys then T.FONT, T.FONT_MED, T.FONT_SEMI = sys, sys, sys end
+  if sys then T.FONT, T.FONT_MED, T.FONT_SEMI = sys, sys, sys; T.CJK = true end
 end
+
+-- The game's CJK fonts lack some typographic signs Inter has (the chip arrow
+-- among them): on those clients they are swapped for plain ASCII (#cjkglyph)
+local GLYPH_SUB = {
+  ["\226\128\186"] = ">",  ["\226\128\185"] = "<",    -- single guillemets
+  ["\194\187"]     = ">",  ["\194\171"]     = "<",    -- double guillemets
+  ["\226\137\164"] = "<=", ["\226\137\165"] = ">=",   -- less/greater or equal
+  ["\226\134\148"] = "<>", ["\226\128\158"] = '"',    -- left-right arrow, low quote
+  ["\226\136\146"] = "-",  ["\226\128\147"] = "-",    -- minus sign, en dash
+  ["\226\128\148"] = "-",                             -- em dash
+}
+local function safeText(s)
+  if type(s) ~= "string" or not s:find("[\194\226]") then return s end
+  for k, v in pairs(GLYPH_SUB) do s = s:gsub(k, v) end -- keys hold no pattern magic
+  return s
+end
+T.SafeText = T.CJK and safeText or function(s) return s end
 
 -- ---- Color tokens (r, g, b [, a], range 0..1) ------------------------------
 -- The Midas gold theme: everything the addon touches turns to gold. Warm, dark
@@ -72,6 +89,13 @@ T.Unpack = u
 -- requested size - the old scale-compensating font registry is gone.)
 function T.RegFont(fs, font, size)
   fs:SetFont(font, size, "")
+  -- CJK clients: this font string filters its own text (instance field only,
+  -- the shared FontString methods stay untouched)
+  if T.CJK and not fs._midasSafe and fs.GetObjectType and fs:GetObjectType() == "FontString" then
+    fs._midasSafe = true
+    local set = fs.SetText
+    fs.SetText = function(self, s) return set(self, safeText(s)) end
+  end
 end
 
 -- ---- Text ------------------------------------------------------------------
@@ -438,12 +462,12 @@ function T.HelpTip(owner, title, lines, anchor)
   owner:HookScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, anchor or "ANCHOR_RIGHT")
     GameTooltip:SetMinimumWidth(300)
-    GameTooltip:AddLine(title or "", u(T.C.accent))
+    GameTooltip:AddLine(T.SafeText(title or ""), u(T.C.accent))
     for _, ln in ipairs(lines or {}) do
       if ln == "" then
         GameTooltip:AddLine(" ")                     -- explicit paragraph spacer
       else
-        GameTooltip:AddLine(ln, T.C.sub[1], T.C.sub[2], T.C.sub[3], true) -- wrap
+        GameTooltip:AddLine(T.SafeText(ln), T.C.sub[1], T.C.sub[2], T.C.sub[3], true) -- wrap
       end
     end
     GameTooltip:Show()

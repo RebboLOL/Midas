@@ -1,5 +1,8 @@
 # Midas – Changelog
 
+## 1.2.28 – 2026-11-16
+- **Chinese and Korean clients: no more boxes on the item page buttons.** The arrows on the Chart, Tree, Book and Trades buttons and a few other signs the game's font cannot show are now drawn as plain characters.
+
 ## 1.2.27 – 2026-11-16
 - **Chinese and Korean item names.** On Chinese and Korean game clients Midas now uses the game's own font, so item and character names no longer show as boxes.
 
