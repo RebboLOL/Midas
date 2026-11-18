@@ -41,14 +41,22 @@ M.RegisterImportSource({
     return rt
   end,
   Fingerprint = function(rt)
-    -- catches: any GetAll scan (timestamp), any never-seen item (count), and a
-    -- new calendar day (at most one full re-walk per day). Same-day browse
-    -- increments are picked up next day at the latest -- the 21-day window and
-    -- the MIN/MAX merge make a skipped increment harmless.
+    -- catches: any Auctionator scan (timestamp: GetAll on the classic AH,
+    -- snapshot / summary scan on the modern one), any never-seen item (count),
+    -- and a new calendar day (at most one full re-walk per day). Same-day
+    -- browse increments are picked up next day at the latest -- the 21-day
+    -- window and the MIN/MAX merge make a skipped increment harmless.
     local n = 0
     for _ in pairs(rt) do n = n + 1 end
     local sv = AUCTIONATOR_SAVEDVARS
-    return n .. ":" .. ((sv and sv.TimeOfLastGetAllScan) or 0) .. ":" .. M.GetScanDay()
+    local t = 0
+    if type(sv) == "table" then
+      for _, k in ipairs({ "TimeOfLastGetAllScan", "TimeOfLastReplicateScan", "TimeOfLastBrowseScan" }) do
+        local v = tonumber(sv[k])
+        if v and v > t then t = v end
+      end
+    end
+    return n .. ":" .. t .. ":" .. M.GetScanDay()
   end,
   Keys = function(rt)
     local keys, n = {}, 0

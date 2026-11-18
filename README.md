@@ -50,6 +50,9 @@ auctions, price alerts, watchlist and the stock in your bags, bank and mail (up 
 prices land in today's chart point; every other item keeps its last scan and is never marked as not
 listed because of it. `/midas quick` turns the price scan and the quick scan off and on.
 
+**Scans of other addons (WoW Forever).** A full scan or a scan of all prices that another addon runs at
+the auction house is stored like a Midas scan; `/run MidasDB.config.captureScans = false` turns that off.
+
 ## Usage
 - **Minimap button** (gold coin) – mouseover shows the best sells from your holdings;
   left-click opens the window, right-click opens the **gold timer**, Shift + right-click runs a scan,
@@ -79,6 +82,9 @@ listed because of it. `/midas quick` turns the price scan and the quick scan off
 - `/midas tree [item]` – (beta) open the crafting tree (an item name, id or shift-clicked link)
 - `/midas lines` – chart lines smooth (soft anti-aliased edges, the default) or crisp plain pixel lines
 - `/midas share` – community sync on/off (on by default); `share on` / `share off` set it explicitly
+- `/midas datalink on|off|status` – Datalink: share your scans with midasmarket.app (off by default, see *Datalink*)
+- `/midas prices on|off|status` – Datalink: use the server prices the companion app delivers (on by default)
+- `/midas history` – Datalink: state of the one-time upload of your last 90 days of prices
 - `/midas trust` – accept shared data from everyone (default, with sanity guards) or guild only
 - `/midas vicinity` – cross-guild sharing with nearby players at the AH: `say` / `yell` / `off` (default `yell`)
 - `/midas sync` – broadcast your data manifest now (kicks off a sync round)
@@ -178,7 +184,8 @@ listed because of it. `/midas quick` turns the price scan and the quick scan off
    on/off, whose data to accept (everyone / guild only), the **cross-guild (nearby)** channel
    (Off / Say / Yell), a compact status (peers, rows in/out, throttle counter) and a **live log**
    of each scan, beacon and backfill. (`/midas share on|off`, `/midas vicinity` and
-   `/midas syncstatus` still work from chat.)
+   `/midas syncstatus` still work from chat.) **Datalink:** whether the Midas Companion app is
+   found, the switch to share your scans with midasmarket.app and the state of the server prices.
 
 9. **Help** – how the numbers are made, for humans: Fair and the sell odds explained with a
    worked example and two illustrative charts, plus a one-line glossary of every figure in the UI.
@@ -266,6 +273,24 @@ because someone else did. It works in two layers:
   your guild is dropped. `/midas trust` restricts to guild-only data; `/midas vicinity off` drops the
   cross-guild layer; `/midas share` turns the whole feature off. Traffic is rate-limited and pauses during scans.
 - Backfill covers the last 60 days; the full history can still be shipped as `MidasImport.lua`.
+
+## Datalink (midasmarket.app)
+Midas works together with the free **Midas Companion** desktop app (download: midasmarket.app/download).
+Addons cannot use the network, so the app does it for them; until 1.2.28 this needed the separate addon
+Midas_Uplink, which is now part of Midas: once the companion app is version 1.3.0 or newer, delete the
+Midas_Uplink folder - your settings carry over (an older app still needs it, so update the app first).
+
+- **Share my scans** (Settings > Datalink or `/midas datalink on`, **off by default**): after every full scan
+  the offer book (the 20 cheapest unit prices of each item, units and auctions listed) is handed to the app,
+  which uploads it after the next `/reload` or logout; once per market the daily prices of your last 90 days
+  follow. Realm, faction and game version come along, and for the scanned items their names and item data
+  (icon, type, level) from the game - no character, account, guild, gold or bag data. While sharing is on,
+  a full scan that another addon starts is shared as well.
+- **Server prices** (on by default, `/midas prices off`): the app downloads the daily prices of your markets
+  into `Prices.lua`; Midas imports them as the source "Midas Server" like Auctionator data - your own scans
+  always win. Works without sharing; to fetch them the app asks midasmarket.app for the markets you play
+  on (realm, faction).
+- `/uplink` still works as a short form of the Datalink commands.
 
 ## Net worth tracking
 Net worth is kept per **realm + faction**: only characters that trade on the same auction house are

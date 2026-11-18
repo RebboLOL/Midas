@@ -577,10 +577,63 @@ end
 -- ===== Side column: used in / disenchants into / from disenchanting =========
 local QUAL = { [2] = "Uncommon", [3] = "Rare", [4] = "Epic" }
 
+-- an enchant (no product): the game's spell tooltip, then what its
+-- materials cost - each line now (gold) and fair (purple)
+local function enchTip(rec)
+  local tip = GameTooltip
+  if not M.frame then tip:Hide(); return end
+  tip:SetOwner(M.frame, "ANCHOR_NONE")
+  tip:ClearAllPoints()
+  if (M.frame:GetRight() or 0) + 300 > GetScreenWidth() then
+    tip:SetPoint("TOPRIGHT", M.frame, "TOPLEFT", -6, -2)
+  else
+    tip:SetPoint("TOPLEFT", M.frame, "TOPRIGHT", 6, -2)
+  end
+  local ok = tip.SetSpellByID and pcall(tip.SetSpellByID, tip, rec.spell)
+  if not ok or (tip:NumLines() or 0) == 0 then tip:SetText(M.EnchantName(rec.spell), 1, 1, 1) end
+  tip:AddLine(" ")
+  tip:AddLine("|cffE8B44AMidas|r  " .. M.ProfName(rec.prof) .. "  -  materials, now  fair")
+  local ec = M.EnchantCost(rec.spell)
+  for i, mt in ipairs(rec.mats) do
+    local n = (ec and ec.mat[1][i]) and money(ec.mat[1][i]) or "?"
+    local f = (ec and ec.mat[2][i]) and money(ec.mat[2][i]) or "?"
+    tip:AddDoubleLine(mt.n .. "x " .. nameOf(mt.id), GOLDH .. n .. "|r  " .. PURH .. f .. "|r",
+      0.78, 0.76, 0.70, 1, 1, 1)
+  end
+  if ec then
+    local part = ec.complete and "" or "  " .. MUTH .. "(partial)|r"
+    tip:AddDoubleLine("Total" .. part, tipMoney(ec.now, ec.fair), 1, 1, 1, 1, 1, 1)
+  end
+  local who = M.CraftKnownBy(rec.spell, true)
+  if #who > 0 then
+    tip:AddLine("known by " .. table.concat(who, ", "), 0.36, 0.82, 0.47)
+  end
+  tip:Show()
+end
+
+-- the side column scrolls as one piece (mouse wheel); a thin thumb on its
+-- right edge shows where you are once it is longer than the column
+local SIDE_BAR = 7
+local function sideScroll(v)
+  if not ct.sideScroll then return end
+  local H = ct.side:GetHeight() or 0
+  local maxV = max(0, (ct.sideH or 0) - H)
+  ct.sideOff = max(0, min(v or 0, maxV))
+  ct.sideScroll:SetVerticalScroll(ct.sideOff)
+  local th = ct.sideThumb
+  if maxV <= 0 or H <= 0 then th:Hide(); return end
+  local len = max(24, H * H / ct.sideH)
+  th:ClearAllPoints()
+  th:SetHeight(len)
+  th:SetPoint("TOPRIGHT", ct.side, "TOPRIGHT", 0, -(H - len) * ct.sideOff / maxV)
+  th:Show()
+end
+M.CraftSideScroll = sideScroll
+
 local function sideRow(i)
   local r = ct.sideRows[i]
   if not r then
-    r = CreateFrame("Button", nil, ct.side)
+    r = CreateFrame("Button", nil, ct.sideBody)
     r:SetHeight(22)
     r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     r.ic = r:CreateTexture(nil, "ARTWORK"); r.ic:SetSize(18, 18); r.ic:SetPoint("LEFT", 0, 0)
@@ -589,9 +642,13 @@ local function sideRow(i)
     r.l:SetJustifyH("LEFT")
     r.r = T.Text(r, T.SIZE.tiny, "sub", T.FONT_MED); r.r:SetPoint("RIGHT", 0, 0); r.r:SetJustifyH("RIGHT")
     local hl = r:CreateTexture(nil, "BACKGROUND"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.05); hl:Hide()
-    r:SetScript("OnEnter", function(self) hl:Show(); if self.id and M.ShowItemTip then M.ShowItemTip(tostring(self.id)) end end)
+    r:SetScript("OnEnter", function(self)
+      hl:Show()
+      if self.ench then enchTip(self.ench)
+      elseif self.id and M.ShowItemTip then M.ShowItemTip(tostring(self.id)) end
+    end)
     r:SetScript("OnLeave", function() hl:Hide(); GameTooltip:Hide() end)
-    r:SetScript("OnClick", function(self, button) if self.id then itemClick(self.id, button) end end)
+    r:SetScript("OnClick", function(self, button) if self.id and not self.ench then itemClick(self.id, button) end end)
     ct.sideRows[i] = r
   end
   r:ClearAllPoints(); r:Show()
@@ -601,7 +658,7 @@ end
 local function sideHead(i)
   local h = ct.sideHeads[i]
   if not h then
-    h = T.Text(ct.side, T.SIZE.tiny, "muted", T.FONT_SEMI)
+    h = T.Text(ct.sideBody, T.SIZE.tiny, "muted", T.FONT_SEMI)
     ct.sideHeads[i] = h
   end
   h:ClearAllPoints(); h:Show()
@@ -613,7 +670,7 @@ local function fillSide(id)
   for _, h in ipairs(ct.sideHeads) do h:Hide() end
   local Rx = M.Recipes()
   local y, nr, nh = 0, 0, 0
-  local H = ct.side:GetHeight() or 300
+  if ct.sideFor ~= id then ct.sideFor, ct.sideOff = id, 0 end
   local function head(txt)
     nh = nh + 1
     local h = sideHead(nh)
@@ -625,18 +682,18 @@ local function fillSide(id)
   if ct.links then
     head("THIS ITEM")
     ct.links:ClearAllPoints()
-    ct.links:SetPoint("TOPLEFT", ct.side, "TOPLEFT", 0, -y)
-    ct.links:SetItem(tostring(id), SIDE_W)
+    ct.links:SetPoint("TOPLEFT", ct.sideBody, "TOPLEFT", 0, -y)
+    ct.links:SetItem(tostring(id), SIDE_W - SIDE_BAR)
     if ct.links:IsShown() then y = y + (ct.links.h or 20) + 12 end
   end
   local function row(rid, left, right, rc)
-    if y + 22 > H then return false end
+    if nr >= 400 then return false end
     nr = nr + 1
     local r = sideRow(nr)
-    r:SetPoint("TOPLEFT", 0, -y); r:SetPoint("RIGHT", ct.side, "RIGHT", 0, 0)
-    r.id = rid
+    r:SetPoint("TOPLEFT", 0, -y); r:SetPoint("RIGHT", ct.sideBody, "RIGHT", 0, 0)
+    r.id, r.ench = rid, nil
     r.ic:SetTexture(rid and iconOf(rid) or QMARK); r.ic:SetShown(rid ~= nil)
-    r.l:SetWidth(SIDE_W - 24 - 70); r.l:SetText(left)
+    r.l:SetWidth(SIDE_W - SIDE_BAR - 24 - 70); r.l:SetText(left)
     if rid then r.l:SetTextColor(qcolor(rid)) else r.l:SetTextColor(T.Unpack(C.sub)) end
     r.r:SetText(right or "")
     if rc then r.r:SetTextColor(T.Unpack(rc)) else r.r:SetTextColor(T.Unpack(C.sub)) end
@@ -670,6 +727,27 @@ local function fillSide(id)
     end
     y = y + 8
   end
+  -- enchants: no product, so no profit - what the materials cost, A-Z
+  local ench = Rx.enchIn[id]
+  if ench then
+    local list = {}
+    for _, rec in ipairs(ench) do
+      local ec = M.EnchantCost(rec.spell)
+      list[#list + 1] = { rec = rec, nm = M.EnchantName(rec.spell), c = ec and ec.now, ok = ec and ec.nowOk }
+    end
+    table.sort(list, function(a, b) if a.nm ~= b.nm then return a.nm < b.nm end return a.rec.spell < b.rec.spell end)
+    head("ENCHANTS  \194\183  " .. #list .. "  \194\183  MATS NOW")
+    for _, e in ipairs(list) do
+      if not row(nil, e.nm, e.c and ((e.ok and "" or "~") .. money(e.c)) or "-", e.c and C.teal or C.muted) then
+        break
+      end
+      local r = ct.sideRows[nr]
+      r.ench, r.id = e.rec, e.rec.spell
+      r.ic:SetTexture(M.EnchantIcon(e.rec.spell)); r.ic:Show()
+      r.l:SetTextColor(T.Unpack(C.text))
+    end
+    y = y + 8
+  end
   -- disenchants into (gear)
   local de = M.DisenchantValue(id)
   if de then
@@ -697,6 +775,11 @@ local function fillSide(id)
     head("USED IN")
     row(nil, "no recipe uses this item")
   end
+  -- as long as its content: the scroll range; room for the thumb when it scrolls
+  ct.sideH = y
+  local H = ct.side:GetHeight() or 0
+  ct.sideBody:SetSize((y > H) and (SIDE_W - SIDE_BAR) or SIDE_W, max(1, y))
+  sideScroll(ct.sideOff)
 end
 
 -- ===== Footer ===============================================================
@@ -895,11 +978,8 @@ local function fillHead(id)
     meta = M.ProfName(rec.prof) .. "  \194\183  makes " .. y
     if #recs > 1 then meta = meta .. "  \194\183  " .. #recs .. " recipes" end
   else
-    local seen, n = {}, 0
-    for _, rec in ipairs(Rx.usedIn[id] or {}) do
-      if not seen[rec.item] then seen[rec.item] = true; n = n + 1 end
-    end
-    meta = "material" .. ((n > 0) and ("  \194\183  used in " .. n .. ((n == 1) and " recipe" or " recipes")) or "")
+    local n, ne = M.UsedInCount(id)
+    meta = "material" .. ((n + ne > 0) and ("  \194\183  used in " .. M.UsedInText(n, ne)) or "")
   end
   ct.headMeta:SetText(meta)
   local tw = max(ct.headName:GetStringWidth() or 120, ct.headMeta:GetStringWidth() or 80)
@@ -989,6 +1069,9 @@ local function candidates()
     if not seen[id] then seen[id] = true; out[#out + 1] = id end
   end
   for id in pairs(Rx.usedIn) do
+    if not seen[id] then seen[id] = true; out[#out + 1] = id end
+  end
+  for id in pairs(Rx.enchIn) do
     if not seen[id] then seen[id] = true; out[#out + 1] = id end
   end
   ct.cand = out
@@ -1309,8 +1392,20 @@ function M.BuildCrafting(panel)
   ct.side = CreateFrame("Frame", nil, ct.tree)
   ct.side:SetPoint("TOPRIGHT", 0, 0); ct.side:SetPoint("BOTTOMRIGHT", 0, FOOT_H)
   ct.side:SetWidth(SIDE_W)
+  ct.sideScroll = CreateFrame("ScrollFrame", nil, ct.side)
+  ct.sideScroll:SetAllPoints()
+  ct.sideBody = CreateFrame("Frame", nil, ct.sideScroll)
+  ct.sideBody:SetSize(SIDE_W, 10)
+  ct.sideScroll:SetScrollChild(ct.sideBody)
+  ct.sideScroll:EnableMouseWheel(true)
+  ct.sideScroll:SetScript("OnMouseWheel", function(_, d) sideScroll((ct.sideOff or 0) - d * 44) end)
+  ct.sideScroll:SetScript("OnSizeChanged", function() sideScroll(ct.sideOff) end)
+  ct.sideThumb = ct.side:CreateTexture(nil, "OVERLAY")
+  ct.sideThumb:SetColorTexture(T.Unpack(C.borderlt))
+  ct.sideThumb:SetWidth(3)
+  ct.sideThumb:Hide()
   if M.LinkBar then
-    ct.links = M.LinkBar(ct.side, { except = "tree", watch = true, short = true, wrap = true })
+    ct.links = M.LinkBar(ct.sideBody, { except = "tree", watch = true, short = true, wrap = true })
   end
   local fdiv = ct.tree:CreateTexture(nil, "ARTWORK")
   fdiv:SetColorTexture(C.border[1], C.border[2], C.border[3], 0.6)

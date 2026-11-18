@@ -1,5 +1,16 @@
 # Midas – Changelog
 
+## 1.3.0 – 2026-11-18
+- **Datalink built in.** Sharing your scans with midasmarket.app and loading its server prices now work with Midas alone, so the Midas_Uplink folder can be deleted once the Midas Companion app is updated to 1.3.0.
+- **Datalink in Settings.** The Settings tab now shows whether the Midas Companion app is found, switches sharing on and off and tells which server prices are loaded.
+- **Datalink: item data.** Shared scans now also carry the basic data of their items (icon, type, level), so midasmarket.app can show items it does not know yet.
+- **Crafting: enchants.** Materials now also list the enchants that use them in the Crafting tab and the item tooltip, with what their materials cost.
+- **Crafting: side column scrolls.** The side column of the Crafting tab now scrolls with the mouse wheel, so long material and recipe lists are no longer cut off.
+- **Charts: 1D timeframe.** The big charts can now show the last 24 hours, with every scan of that day.
+- **Forever: scans of other addons count.** A full scan or a scan of all prices that another addon runs at the auction house is now stored like a Midas scan.
+- **Forever: price scan keeps running.** A price scan no longer stops when another addon scans the whole auction house at the same time.
+- **Forever: Auctionator import on the same day.** Fixed a bug where prices from an Auctionator scan were only imported on the following day.
+
 ## 1.2.28 – 2026-11-16
 - **Chinese and Korean clients: no more boxes on the item page buttons.** The arrows on the Chart, Tree, Book and Trades buttons and a few other signs the game's font cannot show are now drawn as plain characters.
 

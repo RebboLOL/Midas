@@ -469,7 +469,7 @@ function M.Toggle()
   end
 end
 
--- ===== Chart timeframe (1W / 1M / 3M / All) =================================
+-- ===== Chart timeframe (1D / 1W / 1M / 3M / All) ============================
 -- ONE global range for every big chart (config.chartRange, read by Charts.lua);
 -- the segments on the Charts tab, the Net Worth tab and in Settings mirror it.
 M.rangeSegs = {}
@@ -486,6 +486,7 @@ end
 
 local function makeRangeSeg(parent)
   local seg = T.Segment(parent, {
+    { key = "1",   label = "1D" },
     { key = "7",   label = "1W" },
     { key = "30",  label = "1M" },
     { key = "90",  label = "3M" },
@@ -495,7 +496,8 @@ local function makeRangeSeg(parent)
   M.rangeSegs[#M.rangeSegs + 1] = seg
   if T.HelpTip then
     T.HelpTip(seg.frame, "Chart timeframe", {
-      "How far back the big charts look: the last week, month, three months, or everything recorded. One setting for all big charts; the small preview cards have their own timeframe in Settings." })
+      "How far back the big charts look: the last day, week, month, three months, or everything recorded. One setting for all big charts; the small preview cards have their own timeframe in Settings.",
+      "1D shows every scan of the last 24 hours. Charts without per-scan points (holdings, a single character) show yesterday against today." })
   end
   return seg
 end
@@ -1595,7 +1597,9 @@ end
 -- three chart toggles in the window header, which stay next to the charts).
 -- height of the scrolling left column of the Settings tab (general options,
 -- sync status, live log); a taller window simply shows more of the log
-local SET_LEFT_H = 700
+local SET_LEFT_H = 890
+-- DATALINK row: status text left, download box right of it (no overlap)
+local DL_APP_W, DL_BOX_X = 170, 180
 
 function M.BuildSettings(panel)
   local s = {}
@@ -1605,8 +1609,9 @@ function M.BuildSettings(panel)
   s.GRN, s.RED, s.WHT, s.MUT, s.GOLD, s.MINT = GRN, RED, WHT, MUT, GOLD, MINT
 
   vline(panel, 445)
-  -- the left column scrolls: the general options, the sync status and the
-  -- live log need about 700px; the panel has 426 at the smallest window
+  -- the left column scrolls: the general options, the Datalink, the sync
+  -- status and the live log need about 890px; the panel has 426 at the
+  -- smallest window
   local lscroll = CreateFrame("ScrollFrame", "MidasSettingsScroll", panel, "UIPanelScrollFrameTemplate")
   lscroll:SetPoint("TOPLEFT", 0, 0); lscroll:SetPoint("BOTTOMLEFT", 0, 0); lscroll:SetWidth(430)
   local left = CreateFrame("Frame", nil, lscroll)
@@ -1909,6 +1914,86 @@ function M.BuildSettings(panel)
   local sdiv = T.Divider(left)
   sdiv:SetPoint("TOPLEFT", 0, -434); sdiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -434)
 
+  -- ----- DATALINK (left column, under the timeframes; Datalink.lua) --------
+  -- the Midas Companion desktop app (midasmarket.app): is it there, the
+  -- opt-in switch with what it shares, the server prices it delivers
+  local dh = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
+  dh:SetPoint("TOPLEFT", 0, -446); dh:SetText("DATALINK")
+  local dsub = T.Text(left, T.SIZE.tiny, "muted", T.FONT_MED)
+  dsub:SetPoint("LEFT", dh, "RIGHT", 10, 0)
+  dsub:SetText("MIDASMARKET.APP COMPANION  \194\183  NEW IN 1.3.0")
+  local dApp = T.Text(left, T.SIZE.body, "sub")
+  dApp:SetPoint("TOPLEFT", 0, -470); dApp:SetWidth(430); dApp:SetJustifyH("LEFT")
+  s.dlApp = dApp
+  -- app not found: the download link in a read-only edit box (click, Ctrl+C)
+  local dlBox = T.Surface(left, "bg0", "border")
+  -- the box starts right of the "not found" line (dApp is held to DL_APP_W then)
+  dlBox:SetPoint("TOPLEFT", DL_BOX_X, -465); dlBox:SetSize(430 - DL_BOX_X, 22)
+  local dlEdit = CreateFrame("EditBox", nil, dlBox)
+  dlEdit:SetPoint("TOPLEFT", 7, -1); dlEdit:SetPoint("BOTTOMRIGHT", -7, 1)
+  T.RegFont(dlEdit, T.FONT, T.SIZE.small); dlEdit:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+  dlEdit:SetAutoFocus(false)
+  dlEdit:SetText(M.DATALINK_URL or "")
+  dlEdit:SetCursorPosition(0)
+  dlEdit:SetScript("OnTextChanged", function(self)
+    local url = M.DATALINK_URL or ""
+    if self:GetText() ~= url then self:SetText(url); self:HighlightText() end
+  end)
+  dlEdit:SetScript("OnEditFocusGained", function(self)
+    self:HighlightText()
+    dlBox:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3])
+  end)
+  dlEdit:SetScript("OnEditFocusLost", function(self)
+    self:HighlightText(0, 0); self:SetCursorPosition(0)
+    dlBox:SetBackdropBorderColor(C.border[1], C.border[2], C.border[3])
+  end)
+  dlEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  dlEdit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+  s.dlBox = dlBox
+  if T.HelpTip then
+    T.HelpTip(dlEdit, "Midas Companion", {
+      "The free desktop app that connects Midas with midasmarket.app: it uploads the scans you share and brings the server prices of your markets into the game.",
+      "Click the link, press Ctrl+C and paste it into your browser." })
+  end
+
+  local shCb = T.Checkbox(left, "Share my scans with midasmarket.app", function(on)
+    if M.DatalinkSetShare then M.DatalinkSetShare(on) end
+    M.RefreshSettings()
+  end)
+  shCb:SetPoint("TOPLEFT", 0, -496)
+  s.dlShare = shCb
+  local shSub = T.Text(left, T.SIZE.small, "muted")
+  shSub:SetPoint("TOPLEFT", 23, -516); shSub:SetWidth(407); shSub:SetJustifyH("LEFT"); shSub:SetWordWrap(true)
+  shSub:SetText("Off until you switch it on: shares the prices and amounts of your auction house scans and once your last 90 days of prices - never character, guild or gold data.")
+  if T.HelpTip then
+    T.HelpTip(shCb, "Share my scans", {
+      "After every full scan Midas hands the offer book (the 20 cheapest prices of each item and how much is listed) to the Midas Companion app, which uploads it to midasmarket.app. Once per market it also sends the daily prices of your last 90 days.",
+      "Realm, faction and game version come along, and for the scanned items their names and item data (icon, type, level) - nothing about your characters, guild, gold or bags.",
+      "Needs the companion app on this PC. Off clears what is still waiting. Server prices work without sharing." })
+  end
+
+  local prCb = T.Checkbox(left, "Load server prices", function(on)
+    if M.DatalinkSetPrices then M.DatalinkSetPrices(on) end
+    M.RefreshSettings()
+  end)
+  prCb:SetPoint("TOPLEFT", 0, -552)
+  s.dlPrices = prCb
+  if T.HelpTip then
+    T.HelpTip(prCb, "Load server prices", {
+      "The companion app downloads the daily prices of your markets from midasmarket.app (last 90 days). Midas imports them like Auctionator data: they fill the gaps in your history, your own scans always win.",
+      "To fetch them the app asks midasmarket.app for the markets you play on (realm, faction).",
+      "Changes take effect at the next login or /reload." })
+  end
+  local dPr = T.Text(left, T.SIZE.small, "sub")
+  dPr:SetPoint("TOPLEFT", 23, -572); dPr:SetWidth(407); dPr:SetJustifyH("LEFT")
+  s.dlPriceLine = dPr
+  local dLeg = T.Text(left, T.SIZE.small, "sub")
+  dLeg:SetPoint("TOPLEFT", 0, -592); dLeg:SetWidth(430); dLeg:SetJustifyH("LEFT"); dLeg:SetWordWrap(true)
+  s.dlLegacy = dLeg
+
+  local ddiv = T.Divider(left)
+  ddiv:SetPoint("TOPLEFT", 0, -624); ddiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -624)
+
   -- ----- COMMUNITY SYNC (right column) -------------------------------------
   local X = 464
   local sh0 = T.Text(panel, T.SIZE.small, "muted", T.FONT_MED)
@@ -1963,9 +2048,9 @@ function M.BuildSettings(panel)
   -- status + live log in the LEFT column (monitoring, below the timeframes);
   -- the stats anchor keeps the log below however many import-source lines show
   local sh = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
-  sh:SetPoint("TOPLEFT", 0, -446); sh:SetText("SYNC \194\183 STATUS")
+  sh:SetPoint("TOPLEFT", 0, -636); sh:SetText("SYNC \194\183 STATUS")
   local stats = T.Text(left, T.SIZE.body, "sub")
-  stats:SetPoint("TOPLEFT", 0, -466); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
+  stats:SetPoint("TOPLEFT", 0, -656); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
   stats:SetWidth(430); stats:SetSpacing(5); stats:SetWordWrap(true)
   s.stats = stats
   -- live log: every entry tagged PUSH (sent by you) / PULL (received or asked
@@ -2060,6 +2145,58 @@ function M.BuildSettings(panel)
   end)
 end
 
+-- the DATALINK block of the Settings tab (state from Datalink.lua)
+function M.RefreshDatalink(s)
+  local dl = M.DatalinkInfo()
+  local GRN, RED, WHT, MUT, GOLD = s.GRN, s.RED, s.WHT, s.MUT, s.GOLD
+  local found = dl.app or dl.found
+  if dl.app then
+    local t = "Companion app  " .. GRN .. "v" .. dl.app .. " found|r"
+    -- checked = 0 (or junk): the app has not reached the server yet
+    if type(dl.checked) ~= "number" or dl.checked <= 0 then
+      t = t .. MUT .. "  \194\183  no server check yet|r"
+    else
+      local days = math.floor((time() - dl.checked) / 86400)
+      if days >= 2 then
+        t = t .. GOLD .. "  \194\183  no server check for " .. days .. " days - is the app running?|r"
+      else
+        t = t .. MUT .. "  \194\183  last check " .. date("%d.%m. %H:%M", dl.checked) .. "|r"
+      end
+    end
+    s.dlApp:SetText(t)
+  elseif found then
+    s.dlApp:SetText("Companion app  " .. GRN .. "found|r" .. MUT .. "  \194\183  an update shows its version here|r")
+  else
+    s.dlApp:SetText("Companion app  " .. RED .. "not found|r")
+  end
+  s.dlBox:SetShown(not found)
+  -- never under the link box: the line is held to the room left of it
+  s.dlApp:SetWidth(found and 430 or DL_APP_W)
+  s.dlShare:SetChecked(dl.share)
+  s.dlPrices:SetChecked(dl.prices)
+  if not dl.prices then
+    s.dlPriceLine:SetText(MUT .. "Server prices off - Midas ignores them from the next login or /reload.|r")
+  elseif dl.market then
+    s.dlPriceLine:SetText(string.format("Server prices  %s%s|r  \194\183  %s  \194\183  %s%d items|r", WHT, dl.market,
+      date("%d.%m. %H:%M", dl.priceTs or 0), WHT, dl.priceItems or 0))
+  elseif found then
+    s.dlPriceLine:SetText(MUT .. "Server prices  none for this market yet - they arrive after the next /reload.|r")
+  else
+    s.dlPriceLine:SetText(MUT .. "Server prices  none - the companion app brings them.|r")
+  end
+  if dl.legacy then
+    if dl.appReady then
+      s.dlLegacy:SetText(RED .. "The old Midas_Uplink addon is still installed.|r" .. WHT
+        .. " It is part of Midas now: quit the game and delete the Midas_Uplink folder in Interface\\AddOns - your settings carry over.|r")
+    else
+      s.dlLegacy:SetText(RED .. "The old Midas_Uplink addon is still installed.|r" .. WHT
+        .. " Update the Midas Companion app (midasmarket.app/download), then delete the Midas_Uplink folder in Interface\\AddOns.|r")
+    end
+  else
+    s.dlLegacy:SetText("")
+  end
+end
+
 function M.RefreshSettings()
   local s = M.setUI
   if not s then return end
@@ -2085,6 +2222,7 @@ function M.RefreshSettings()
   if s.hcCb then s.hcCb:SetChecked(M.HCMode and M.HCMode() or false) end
   if s.lgCb then s.lgCb:SetChecked(cfg.ledgerOff ~= true) end
   if s.crCb then s.crCb:SetChecked(cfg.craftOff ~= true) end
+  if s.dlApp and M.DatalinkInfo then M.RefreshDatalink(s) end
   s.cb:SetChecked(cfg.share == true)
   s.trustSeg:Select(cfg.shareTrust == "guild" and "guild" or "all")
   if s.prevSeg then s.prevSeg:Select(cfg.previewRange or "all") end
@@ -5361,7 +5499,24 @@ function M.RefreshWealth()
   -- oldest covered day, not at that day's closing snapshot - the headline
   -- has to start there too to match the chart's endpoints
   local intraRef = false
-  if refVal and M.ChartRangeDays and M.ChartRangeDays() == 7 and M.NWIntra then
+  local rdays = M.ChartRangeDays and M.ChartRangeDays()
+  if refVal and rdays == 1 and M.NWWindow1D and hist then
+    -- 1D: the line starts at the first scan of the 24 h window
+    local nd
+    for day in pairs(hist) do if type(day) == "number" and (not nd or day > nd) then nd = day end end
+    local w0 = M.NWWindow1D(nd)
+    if w0 then
+      local ni = M.NWIntra()
+      for i = 1, #ni do
+        local t = (ni[i].ts - M.C.SCAN_DAY_0) / 86400
+        if t >= w0 then
+          refVal, intraRef = ni[i].t, true
+          refLbl = M.DayLabel(math.floor(t)) .. " " .. date("%H:%M", ni[i].ts)
+          break
+        end
+      end
+    end
+  elseif refVal and rdays == 7 and M.NWIntra then
     local ni = M.NWIntra()
     for i = 1, #ni do
       local d = math.floor((ni[i].ts - M.C.SCAN_DAY_0) / 86400)

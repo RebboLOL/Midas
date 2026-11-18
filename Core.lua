@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.2.28"
+M.version = "1.3.0"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -605,6 +605,9 @@ function M.PrintHelp()
     "/midas vendor  -  number of known vendor-sold items",
     "/midas prune  -  drop archive days older than 2 years",
     "/midas share on|off  -  community sync (guild)",
+    "/midas datalink on|off|status|now|clear  -  Datalink: share your scans with midasmarket.app (off by default)",
+    "/midas prices on|off|status  -  Datalink: server prices from the companion app",
+    "/midas history  -  Datalink: state of the one-time price history upload",
     "/midas trust  -  accept synced data from everyone / guild only",
     "/midas vicinity say|yell|off  -  cross-guild sync at the AH",
     "/midas sync  -  send a sync manifest now",
@@ -914,6 +917,10 @@ SlashCmdList["MIDAS"] = function(msg)
     else M.db.config.share = not (M.db.config.share == true) end
     M.Print("Community sync: " .. (M.db.config.share and "ON" or "OFF"))
     if M.CommStatus then M.CommStatus() end
+  elseif msg == "datalink" or msg:match("^datalink%s") or msg == "prices" or msg:match("^prices%s") or msg == "history" then
+    -- Datalink (midasmarket.app companion app, Datalink.lua)
+    if M.DatalinkSlash then M.DatalinkSlash(msg) end
+    if M.RefreshSettings then M.RefreshSettings() end
   elseif msg == "syncstatus" or msg == "commstatus" then
     if M.CommStatus then M.CommStatus() end
   elseif msg == "trust" then

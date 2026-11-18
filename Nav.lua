@@ -91,12 +91,9 @@ function M.ItemLinkInfo(key)
   if Rx then
     if Rx.byItem[id] then
       info.tree = { make = true }
-    elseif Rx.usedIn[id] then
-      local seen, n = {}, 0
-      for _, rec in ipairs(Rx.usedIn[id]) do
-        if not seen[rec.item] then seen[rec.item] = true; n = n + 1 end
-      end
-      info.tree = { uses = n, extra = "used in " .. n }
+    elseif Rx.usedIn[id] or (Rx.enchIn and Rx.enchIn[id]) then
+      local n, ne = M.UsedInCount(id)
+      info.tree = { uses = n + ne, extra = "used in " .. (n + ne) }
     end
   end
   local d = M.GetDepth and M.GetDepth(id)

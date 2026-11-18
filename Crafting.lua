@@ -31,7 +31,8 @@ end
 local R
 function M.Recipes()
   if R then return R end
-  R = { byItem = {}, bySpell = {}, usedIn = {}, items = {}, prof = {}, vend = {}, n = 0 }
+  R = { byItem = {}, bySpell = {}, usedIn = {}, items = {}, prof = {}, vend = {}, n = 0,
+        enchants = {}, enchBySpell = {}, enchIn = {} }
   local D = M.RECIPE_DATA
   if type(D) ~= "table" then return R end
   R.prof, R.vend, R.build, R.flavor = D.prof or {}, D.vend or {}, D.build, D.flavor
@@ -56,8 +57,70 @@ function M.Recipes()
       R.n = R.n + 1
     end
   end
-  D.rec = nil   -- the index is all we need from here on
+  -- enchants: a profession spell that enchants an item instead of making one
+  -- (Enchant Weapon - Crusader); no product, so only "what goes into it"
+  for line in (D.ench or ""):gmatch("[^\n]+") do
+    local spell, prof, yel, grey, mats = line:match("^(%d+):(%d+):(%d+):(%d+)|(.+)$")
+    if spell then
+      local rec = { spell = tonumber(spell), prof = tonumber(prof), yellow = tonumber(yel),
+                    grey = tonumber(grey), mats = {}, enchant = true }
+      for m, c in mats:gmatch("(%d+)%*(%d+)") do
+        local mid = tonumber(m)
+        rec.mats[#rec.mats + 1] = { id = mid, n = tonumber(c) }
+        local u = R.enchIn[mid]
+        if not u then u = {}; R.enchIn[mid] = u end
+        u[#u + 1] = rec
+      end
+      R.enchants[#R.enchants + 1] = rec
+      R.enchBySpell[rec.spell] = rec
+    end
+  end
+  D.rec, D.ench = nil, nil   -- the index is all we need from here on
   return R
+end
+
+-- name and icon of an enchant spell (the client knows every spell, learned or not)
+function M.EnchantName(spell)
+  if C_Spell and C_Spell.GetSpellName then
+    local ok, n = pcall(C_Spell.GetSpellName, spell)
+    if ok and n then return n end
+  end
+  if GetSpellInfo then
+    local ok, n = pcall(GetSpellInfo, spell)
+    if ok and n then return n end
+  end
+  return "Enchant #" .. tostring(spell)
+end
+
+local ENCH_ICON = "Interface\\Icons\\Trade_Engraving"
+function M.EnchantIcon(spell)
+  if C_Spell and C_Spell.GetSpellTexture then
+    local ok, t = pcall(C_Spell.GetSpellTexture, spell)
+    if ok and t then return t end
+  end
+  if GetSpellTexture then
+    local ok, t = pcall(GetSpellTexture, spell)
+    if ok and t then return t end
+  end
+  return ENCH_ICON
+end
+
+-- "4 recipes, 2 enchants" / "1 recipe" / "3 enchants"
+function M.UsedInText(nRec, nEnch)
+  local t = {}
+  if nRec > 0 then t[#t + 1] = nRec .. (nRec == 1 and " recipe" or " recipes") end
+  if nEnch > 0 then t[#t + 1] = nEnch .. (nEnch == 1 and " enchant" or " enchants") end
+  return table.concat(t, ", ")
+end
+
+-- how many distinct recipes and enchants use a material
+function M.UsedInCount(id)
+  local Rx = M.Recipes()
+  local seen, n = {}, 0
+  for _, rec in ipairs(Rx.usedIn[id] or {}) do
+    if not seen[rec.item] then seen[rec.item] = true; n = n + 1 end
+  end
+  return n, #(Rx.enchIn[id] or {})
 end
 
 function M.ProfName(id)
@@ -173,6 +236,32 @@ function M.CraftCost(id, mob)
     res.memo[k] = mm
     if k == NOW then res.now, res.rec, res.nowOk = c, rec, ok
     else res.fair, res.fairRec, res.fairOk = c, rec, ok end
+  end
+  res.complete = res.nowOk and res.fairOk
+  cache[key] = res
+  return res
+end
+
+-- what the materials of one enchant cost, now and fair (each bought or made,
+-- whichever is cheaper): { now, fair, nowOk, fairOk, complete,
+-- mat = { [now] = { cost of each material line }, [fair] = { ... } } }
+function M.EnchantCost(spell, mob)
+  local rec = M.Recipes().enchBySpell[tonumber(spell) or 0]
+  if not rec then return nil end
+  if mob == nil then mob = mobOn() end
+  fresh()
+  local key = "e" .. rec.spell .. (mob and ":m" or ":b")
+  if cache[key] then return cache[key] end
+  local res = { mat = { {}, {} } }
+  for k = NOW, FAIR do
+    local mm, sum, ok = {}, 0, true
+    for i, mt in ipairs(rec.mats) do
+      local c, _, _, cok = cost(mt.id, k, 1, {}, mob, mm)
+      res.mat[k][i] = c and c * mt.n
+      if c then sum = sum + c * mt.n else ok = false end
+      if not cok then ok = false end
+    end
+    if k == NOW then res.now, res.nowOk = sum, ok else res.fair, res.fairOk = sum, ok end
   end
   res.complete = res.nowOk and res.fairOk
   cache[key] = res
@@ -346,8 +435,17 @@ local function charStore()
   local ck = M.CharKey()
   local c = M.db.crafts[ck]
   if not c then c = { items = {}, prof = {} }; M.db.crafts[ck] = c end
-  c.items, c.prof = c.items or {}, c.prof or {}
+  c.items, c.prof, c.ench = c.items or {}, c.prof or {}, c.ench or {}
   return c
+end
+
+-- an enchant shows as an "enchant:<spell>" link instead of an item
+local function enchOf(c, link)
+  if type(link) ~= "string" then return false end
+  if issecretvalue and issecretvalue(link) then return false end
+  local sp = tonumber(link:match("enchant:(%d+)"))
+  if sp and M.Recipes().enchBySpell[sp] then c.ench[sp] = true; return true end
+  return false
 end
 
 local function readLegacy(c)
@@ -359,7 +457,8 @@ local function readLegacy(c)
     local _, kind = GetTradeSkillInfo(i)
     if kind ~= "header" then
       local id = idOf(GetTradeSkillItemLink and GetTradeSkillItemLink(i))
-      if id then c.items[id] = true; got = got + 1 end
+      if id then c.items[id] = true; got = got + 1
+      elseif GetTradeSkillRecipeLink and enchOf(c, GetTradeSkillRecipeLink(i)) then got = got + 1 end
     end
   end
   if name and type(rank) == "number" and name ~= "UNKNOWN" then c.prof[name] = rank end
@@ -372,8 +471,10 @@ local function readCraft(c)
   for i = 1, n do
     local _, _, kind = GetCraftInfo(i)
     if kind ~= "header" then
-      local id = idOf(GetCraftItemLink and GetCraftItemLink(i))
-      if id and M.Recipes().byItem[id] then c.items[id] = true; got = got + 1 end
+      local link = GetCraftItemLink and GetCraftItemLink(i)
+      local id = idOf(link)
+      if id and M.Recipes().byItem[id] then c.items[id] = true; got = got + 1
+      elseif enchOf(c, link) then got = got + 1 end
     end
   end
   if GetCraftDisplaySkillLine then
@@ -392,7 +493,8 @@ local function readModern(c)
   for _, rid in ipairs(ids) do
     local info = T.GetRecipeInfo(rid)
     local rec = M.Recipes().bySpell[rid]
-    if info and info.learned and rec then c.items[rec.item] = true; got = got + 1 end
+    if info and info.learned and rec then c.items[rec.item] = true; got = got + 1
+    elseif info and info.learned and M.Recipes().enchBySpell[rid] then c.ench[rid] = true; got = got + 1 end
   end
   return got
 end
@@ -408,12 +510,14 @@ function M.CraftLearn(kind)
   return ok and got or 0
 end
 
--- names of your characters who can make this item
-function M.CraftKnownBy(id)
+-- names of your characters who can make this item (enchant = true: who
+-- knows this enchant spell)
+function M.CraftKnownBy(id, enchant)
   id = tonumber(id)
   local out = {}
   for ck, c in pairs((M.db and M.db.crafts) or {}) do
-    if c.items and c.items[id] then
+    local set = enchant and c.ench or c.items
+    if set and set[id] then
       local ch = M.db.chars and M.db.chars[ck]
       out[#out + 1] = (ch and ch.name) or ck:match("^(.*)%-[^%-]*$") or ck
     end
@@ -464,7 +568,8 @@ function M.CraftTipLines(tip, id, mode, header)
   local Rx = M.Recipes()
   local p = Rx.byItem[id] and M.CraftProfit(id)
   local de = M.DisenchantValue(id)
-  local uses = Rx.usedIn[id]
+  local nRec, nEnch = M.UsedInCount(id)
+  local uses = (nRec + nEnch) > 0
   if not (p or de or (uses and mode ~= "reduced")) then return false end
   if header then
     tip:AddLine(" ")
@@ -483,11 +588,7 @@ function M.CraftTipLines(tip, id, mode, header)
       P .. "fair ~" .. money(de.fair) .. "|r", 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   end
   if uses and mode ~= "reduced" then
-    local seen, n = {}, 0
-    for _, rec in ipairs(uses) do
-      if not seen[rec.item] then seen[rec.item] = true; n = n + 1 end
-    end
-    tip:AddLine(string.format("Used in  %d recipe%s", n, n == 1 and "" or "s"), 0.55, 0.58, 0.64)
+    tip:AddLine("Used in  " .. M.UsedInText(nRec, nEnch), 0.55, 0.58, 0.64)
   end
   return true
 end

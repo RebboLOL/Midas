@@ -36,6 +36,7 @@ local QUICK_BATCH = 50      -- item keys per browse request
 local QUICK_WAIT = 8        -- seconds to wait for one answer
 local QUICK_FOLLOW = 30     -- item lists for stackable non-commodities
 local quick                 -- the running quick scan (nil = none)
+local passive               -- a whole-market list another addon asked for (see "Scans other addons run")
 
 local function quickAvailable()
   return AH.SearchForItemKeys ~= nil and AH.GetBrowseResults ~= nil
@@ -331,6 +332,7 @@ function M.QuickItemScan(standalone)
   if quick or not M.AHOpen or not quickAvailable() then return false end
   local keys = M.QuickItemKeys()
   if #keys == 0 then return false end
+  passive = nil   -- the quick scan's own searches replace the list
   local q = { keys = keys, jobs = {}, updated = {}, listed = {}, readyWait = 0, fails = 0, t0 = time(),
               total = 0, doneN = 0, followN = 0, standalone = standalone and true or false }
   for i = 1, #keys, QUICK_BATCH do
@@ -532,6 +534,7 @@ function M.PriceScan(standalone)
   local p = { standalone = standalone and true or false, got = 0, fails = 0, drops = 0, readyWait = 0,
               est = marketSize() }
   price = p
+  passive = nil   -- Midas reads the list itself now
   M._priceScan = true
   if p.standalone then
     M.scanning = true
@@ -549,29 +552,100 @@ function M.PriceScan(standalone)
 end
 
 -- your own search in the AH window would mix with the scan's answers: the
--- price scan / quick scan steps aside (prices from your search count all the same)
-local function onForeignQuery()
-  local p = price
+-- price scan / quick scan steps aside (prices from your search count all the same).
+-- Only another whole-market search leaves the price scan running.
+-- An empty search without filters lists the whole auction house, exactly like
+-- the price scan's own request (another addon's price scan sends it). A level
+-- range (minLevel / maxLevel set and not 0) narrows the list like a filter.
+local function wholeMarket(query)
+  return type(query) == "table" and (query.searchString or "") == ""
+    and not (type(query.filters) == "table" and #query.filters > 0)
+    and not (type(query.itemClassFilters) == "table" and #query.itemClassFilters > 0)
+    and (tonumber(query.minLevel) or 0) == 0 and (tonumber(query.maxLevel) or 0) == 0
+end
+
+-- ===== Scans other addons run ================================================
+-- A whole-market search another addon sends (its own price scan) fills the
+-- same list a Midas price scan reads. Midas follows it without asking for
+-- anything itself: once the AH holds the complete list, it is stored like a
+-- price scan (M.CommitScan with noDepth). A list narrowed by quality filters
+-- only, or one far smaller than the market, is stored as quick rows: prices,
+-- but no item counts as "not listed" because of it.
+-- /run MidasDB.config.captureScans = false turns this and the snapshot
+-- takeover below off.
+local PASSIVE_MIN = 500     -- items a list needs to pass as a market while no full scan day is known
+local LIST_QUERY = { SendBrowseQuery = true, SearchForFavorites = true, SearchForItemKeys = true }
+
+local function captureOn()
+  return not (M.db and M.db.config and M.db.config.captureScans == false)
+end
+
+-- no search text and no item class filter: every item, at most narrowed by quality
+local function allItems(query)
+  return type(query) == "table" and (query.searchString or "") == ""
+    and not (type(query.itemClassFilters) == "table" and #query.itemClassFilters > 0)
+end
+
+local function passiveStart(fn, query)
+  passive = nil
+  if fn ~= "SendBrowseQuery" or not allItems(query) then return end
+  if not M.AHOpen or not captureOn() or not priceAvailable() then return end
+  passive = { exact = wholeMarket(query), answered = false }
+end
+
+local function onPassiveBrowse(event)
+  local s = passive
+  if not s then return end
+  -- a new search answers with UPDATED first; ADDED before it is an older one's
+  if not s.answered and event ~= "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then return end
+  s.answered = true
+  local okF, full = pcall(AH.HasFullBrowseResults)
+  if not (okF and full) then return end
+  local ok, res = pcall(AH.GetBrowseResults)
+  if not ok or type(res) ~= "table" then return end
+  passive = nil
+  local acc, n = priceRows(res)
+  if n == 0 then return end
+  local est = marketSize()
+  local market = s.exact and ((est > 0 and n >= est * PRICE_MIN) or (est == 0 and n >= PASSIVE_MIN))
+  if market or (s.exact and M.AtNeutralAH and M.AtNeutralAH()) then
+    lastPrice = time()
+    if scanPending then M._priceLast = { items = n } end
+    M.CommitScan(acc, { noDepth = true, note = " Read from another addon's scan." })
+  elseif M.CommitQuick then
+    M.CommitQuick(acc)
+  end
+end
+
+local function onForeignQuery(fn, query)
+  local p, q = price, quick
+  if (p and p.own) or (q and q.own) then return end
   if p then
-    if p.own then return end
+    if fn == "SendBrowseQuery" and wholeMarket(query) then
+      -- the same list starts over: read it again from its first batch
+      p.answered, p.got, p.rows = false, 0, nil
+      return
+    end
     local n = priceStop(true)
     M.Print("Price scan stopped - you searched the auction house yourself"
       .. (n > 0 and string.format(" (%d items stored).", n) or "."))
-    return
+  elseif q then
+    local n = quickStop(true)
+    if q.standalone then
+      M.scanning = false
+      if M.ScanUIState then M.ScanUIState(false) end
+    end
+    M.Print("Quick scan stopped - you searched the auction house yourself"
+      .. (n > 0 and string.format(" (%d items stored).", n) or "."))
   end
-  local q = quick
-  if not q or q.own then return end
-  local n = quickStop(true)
-  if q.standalone then
-    M.scanning = false
-    if M.ScanUIState then M.ScanUIState(false) end
-  end
-  M.Print("Quick scan stopped - you searched the auction house yourself"
-    .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+  -- a new list replaces the one being followed; a search for one item leaves it
+  if LIST_QUERY[fn] then passiveStart(fn, query) end
 end
 if hooksecurefunc and AH then
   for _, fn in ipairs({ "SendBrowseQuery", "SearchForFavorites", "SendSearchQuery", "SearchForItemKeys" }) do
-    if type(AH[fn]) == "function" then pcall(hooksecurefunc, AH, fn, onForeignQuery) end
+    if type(AH[fn]) == "function" then
+      pcall(hooksecurefunc, AH, fn, function(query) onForeignQuery(fn, query) end)
+    end
   end
 end
 
@@ -597,9 +671,14 @@ function M.ScanCooldown()
   return left > 0 and left or 0
 end
 
-local function processSnapshot()
+-- foreign: a snapshot another addon asked for - an empty or unreadable one is
+-- that addon's matter, Midas stays quiet about it
+local function processSnapshot(foreign)
   local num = AH.GetNumReplicateItems() or 0
-  if num == 0 then abort("Scan: the server sent an empty snapshot - please try again in a moment. The archive keeps your last good scan."); return end
+  if num == 0 then
+    abort(not foreign and "Scan: the server sent an empty snapshot - please try again in a moment. The archive keeps your last good scan." or nil)
+    return
+  end
   local acc, i = {}, 0
   driver = driver or CreateFrame("Frame")
   driver:SetScript("OnUpdate", function(self)
@@ -633,7 +712,7 @@ local function processSnapshot()
       if next(acc) == nil then
         -- rows arrived but none were readable: never commit (an empty commit
         -- would wipe the offer-book depth) - say what happened instead
-        M.Print(string.format("Scan: %d rows received but none were readable - please try again later. The archive keeps your last good scan.", num))
+        if not foreign then M.Print(string.format("Scan: %d rows received but none were readable - please try again later. The archive keeps your last good scan.", num)) end
         return
       end
       M.CommitScan(acc)
@@ -653,6 +732,21 @@ local LATE = 600
 local tries, readyWait, started, noted, waitingReady = 0, 0, 0, false, false
 local lateUntil, quickTried, quickRan
 
+-- A snapshot another addon asks for (its own full scan) is the same snapshot
+-- Midas would get, and it uses up the ~15 min the server allows per account.
+-- Midas notes the request and stores the answer like its own full scan.
+-- A request inside the ~15 min after the last snapshot (Midas' own or one
+-- taken over) gets no new snapshot from the server: it is not noted, so the
+-- rows still in the client are never stored again as a scan of "now".
+local ownAsk = false
+local foreignAsk            -- time() another addon asked for a snapshot (nil = none)
+if hooksecurefunc and type(AH.ReplicateItems) == "function" then
+  pcall(hooksecurefunc, AH, "ReplicateItems", function()
+    if ownAsk then return end
+    foreignAsk = (M.ScanCooldown() == 0) and time() or nil
+  end)
+end
+
 local function send()
   if not (scanPending and M.AHOpen) or waitingReady or tries >= MAX_TRIES then return end
   -- the AH queues its own queries; a request sent while it is busy is lost
@@ -663,7 +757,9 @@ local function send()
     return
   end
   tries = tries + 1
+  ownAsk = true
   AH.ReplicateItems()
+  ownAsk = false
 end
 
 local function tick()
@@ -761,7 +857,7 @@ M.SafeRegister(ev, "ITEM_SEARCH_RESULTS_ADDED")
 M.SafeRegister(ev, "COMMODITY_SEARCH_RESULTS_UPDATED")
 ev:SetScript("OnEvent", function(_, event, arg1)
   if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
-    if price then onPriceBrowse(event) elseif quick then onQuickBrowse() end
+    if price then onPriceBrowse(event) elseif quick then onQuickBrowse() elseif passive then onPassiveBrowse(event) end
     return
   elseif event == "ITEM_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_ADDED"
       or event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
@@ -778,6 +874,7 @@ ev:SetScript("OnEvent", function(_, event, arg1)
     M.AHOpen = false
     if M.HideScanButton then M.HideScanButton() end
     lateUntil = nil   -- the snapshot rows cannot be read once the AH is closed
+    foreignAsk, passive = nil, nil
     if M.scanning or scanPending then abort("Scan aborted (auction house closed).") end
     quickStop(true)
     priceStop(true)
@@ -796,11 +893,12 @@ ev:SetScript("OnEvent", function(_, event, arg1)
       C_Timer.After(1, function() if quick == q and q.job == job then quickSend() end end)
     end
   elseif event == "REPLICATE_ITEM_LIST_UPDATE" then
-    -- ours (or a late answer to ours after Midas stopped waiting); snapshots
-    -- other addons asked for are left alone
+    -- ours (or a late answer to ours after Midas stopped waiting), or the
+    -- answer to another addon's request; a snapshot nobody was seen asking
+    -- for is left alone
     local late = not scanPending and lateUntil and time() <= lateUntil and M.AHOpen and not M.scanning
     if scanPending or late then
-      scanPending, lateUntil = false, nil
+      scanPending, lateUntil, foreignAsk = false, nil, nil
       if ticker then ticker:Cancel(); ticker = nil end
       quickStop()   -- the full snapshot covers every item
       priceStop()
@@ -812,6 +910,17 @@ ev:SetScript("OnEvent", function(_, event, arg1)
       -- the server answered: NOW the ~15-min replicate cooldown is real
       if M.db and M.db.config then M.db.config.lastReplicate = time() end
       processSnapshot()
+    elseif foreignAsk and time() - foreignAsk <= LATE and M.AHOpen and captureOn()
+        and not (M.scanning and not (price or quick)) then   -- not while a snapshot is being read
+      foreignAsk = nil
+      quickStop()   -- the full snapshot covers every item
+      priceStop()
+      M.scanning = true
+      if M.ScanUIState then M.ScanUIState(true) end
+      -- the account's snapshot is used up for ~15 min, whoever asked
+      if M.db and M.db.config then M.db.config.lastReplicate = time() end
+      M.Print("Scan: another addon asked for a full snapshot - Midas stores it too.")
+      processSnapshot(true)
     end
   end
 end)

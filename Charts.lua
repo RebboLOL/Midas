@@ -500,10 +500,12 @@ function M.SetupHover(canvas)
   end)
 end
 
--- ===== Chart timeframe (1W / 1M / 3M / All) =================================
--- config.chartRange ("7" / "30" / "90" / "all"; unset = all) trims every BIG
--- chart to the last N days before its newest data point. Preview cards
+-- ===== Chart timeframe (1D / 1W / 1M / 3M / All) ============================
+-- config.chartRange ("1" / "7" / "30" / "90" / "all"; unset = all) trims every
+-- BIG chart to the last N days before its newest data point. Preview cards
 -- (canvas._compact) follow their own config.previewRange (set in Settings).
+-- 1D is the 24 hours before the newest scan, drawn from the intraday tail;
+-- a chart without intraday points shows its last two daily points instead.
 function M.ChartRangeDays()
   local v = M.db and M.db.config and M.db.config.chartRange
   return tonumber(v)   -- nil for "all" / unset
@@ -512,6 +514,30 @@ end
 function M.PreviewRangeDays()
   local v = M.db and M.db.config and M.db.config.previewRange
   return tonumber(v)   -- nil for "all" / unset
+end
+
+-- 1D window over the account net-worth tail: the start t (float day) of the
+-- 24 h before the newest point, or nil when fewer than two scans fall in it.
+-- The Net Worth chart and the hero headline share it, so their ends match.
+function M.NWWindow1D(newestDay)
+  local ni = M.NWIntra and M.NWIntra()
+  if not (ni and ni[1]) then return nil end
+  local tEnd = (ni[#ni].ts - M.C.SCAN_DAY_0) / 86400
+  if newestDay and newestDay > tEnd then tEnd = newestDay end
+  local w0, c = tEnd - 1, 0
+  for i = #ni, 1, -1 do
+    if (ni[i].ts - M.C.SCAN_DAY_0) / 86400 >= w0 then c = c + 1 else break end
+  end
+  return (c >= 2) and w0 or nil
+end
+
+-- clock labels along a 1D axis (four marks over the 24 h window)
+local function hourLabels(canvas, X, bottom, w0)
+  for k = 0, 3 do
+    local t = w0 + k / 3
+    local anchor = (k == 0) and "LEFT" or ((k == 3) and "RIGHT" or "CENTER")
+    Label(canvas, X(t), bottom - 12, date("%H:%M", math.floor(M.C.SCAN_DAY_0 + t * 86400)), anchor, TC("muted"))
+  end
 end
 
 local function applyRange(arr, days)
@@ -578,23 +604,32 @@ function M.RenderAllTime(canvas, key)
   if canvas._rangeOverride then rangeDays = tonumber(canvas._rangeOverride)
   elseif canvas._compact then rangeDays = M.PreviewRangeDays()
   else rangeDays = M.ChartRangeDays() end
-  arr = applyRange(arr, rangeDays)
+  -- 1D keeps the last two scan days as backbone: the 24 h window reaches back
+  -- into yesterday (big chart only; previews have no 1D)
+  local is1D = not canvas._compact and not canvas._rangeOverride and rangeDays == 1
+  arr = applyRange(arr, is1D and 2 or rangeDays)
   local n = #arr
   if n == 0 then Label(canvas, canvas:GetWidth() / 2, canvas:GetHeight() / 2, "No data", "CENTER", TC("muted")); return end
 
-  -- 1W intraday: per-scan points from the intraday tail (big chart only).
+  -- 1W / 1D intraday: per-scan points from the intraday tail (big chart only).
   -- Every intraday day also has a daily row (CommitScan writes both), so the
   -- day list in arr stays the backbone; lastOf marks each day's newest scan.
-  local ipts, covered, lastOf
-  if not canvas._compact and M.ChartRangeDays() == 7 and M.db and M.db.intra then
+  -- win0 (1D only) is the window start as a float day.
+  local ipts, covered, lastOf, win0
+  if not canvas._compact and (M.ChartRangeDays() == 7 or is1D) and M.db and M.db.intra then
     local ist = M.db.intra[M.RealmKey()]
     local st = ist and ist[key]
     if st and st[1] then
       local cutoff = arr[n].day - 6
+      if is1D then
+        local tEnd = (st[#st].ts - M.C.SCAN_DAY_0) / 86400
+        if arr[n].day > tEnd then tEnd = arr[n].day end
+        win0 = tEnd - 1
+      end
       for i = 1, #st do
         local t = (st[i].ts - M.C.SCAN_DAY_0) / 86400
         local d = math.floor(t)
-        if d >= cutoff then
+        if (win0 and t >= win0) or (not win0 and d >= cutoff) then
           ipts = ipts or {}
           ipts[#ipts + 1] = { day = d, t = t, ts = st[i].ts, low = st[i].low, qty = st[i].qty or 0 }
         end
@@ -606,11 +641,32 @@ function M.RenderAllTime(canvas, key)
       end
     end
   end
+  -- 1D: keep the day rows the window shows (covered by a scan inside it, or a
+  -- synced daily row starting inside it); without two scans in the window the
+  -- chart falls back to the last two daily points
+  if is1D then
+    local keep = {}
+    if ipts then
+      for i = 1, n do
+        if covered[arr[i].day] or arr[i].day >= win0 then keep[#keep + 1] = arr[i] end
+      end
+    end
+    if keep[1] then arr = keep else ipts, covered, lastOf, win0 = nil, nil, nil, nil end
+    n = #arr
+  end
+  -- a trade counts for the 1D chart only inside the window
+  local function inWin(e)
+    return not win0 or (e.ts and (e.ts - M.C.SCAN_DAY_0) / 86400 >= win0) or false
+  end
 
   -- the newest day's point is the CURRENT price (that day's latest scan, the
   -- number the headers show); older days plot their daily low. A 1W intraday
-  -- day already ends on its own last scan.
-  for i = 1, n do arr[i].px = arr[i].low end
+  -- day already ends on its own last scan; on 1D a covered day scales by its
+  -- last scan in the window (its daily low may lie before the window).
+  for i = 1, n do
+    local lp = win0 and lastOf[arr[i].day]
+    arr[i].px = lp and lp.low or arr[i].low
+  end
   if arr[n].cur and not (lastOf and lastOf[arr[n].day]) then arr[n].px = arr[n].cur end
   -- a newer live price from the same day (Data.lua) is what the headers show
   local lv = M.FreshLive and not (lastOf and lastOf[arr[n].day]) and M.FreshLive(key, series[arr[n].day], arr[n].day)
@@ -650,7 +706,7 @@ function M.RenderAllTime(canvas, key)
       local d0, d1 = arr[1].day, arr[n].day
       for _, e in ipairs(M.db.trade.log) do
         if e.id == id and e.realm == realm and (e.kind == "sold" or e.kind == "bought")
-           and (e.gross or 0) > 0 and e.day and e.day >= d0 and e.day <= d1 then
+           and (e.gross or 0) > 0 and e.day and e.day >= d0 and e.day <= d1 and inWin(e) then
           local cnt = (e.count and e.count > 0) and e.count or 1
           widen((e.gross / cnt) / 10000)
         end
@@ -712,9 +768,12 @@ function M.RenderAllTime(canvas, key)
     if ipts[1].t < tMin then tMin = ipts[1].t end
     if ipts[#ipts].t > tMax then tMax = ipts[#ipts].t end
   end
+  -- 1D: the axis is exactly the 24 h window, full width (no young-history cap)
+  if win0 then tMin, tMax = win0, win0 + 1 end
   local dSpan = math.max(1, tMax - tMin)
   local dayW, capped
-  dayW, pw, capped = dayStep(pw, dSpan)
+  if win0 then dayW, capped = pw / dSpan, false
+  else dayW, pw, capped = dayStep(pw, dSpan) end
   local function X(day) return left + (day - tMin) * dayW end
   local function Y(g) return bottom + (g - vmin) / (vmax - vmin) * ph end
   local function inScale(g) return g >= vmin and g <= vmax end
@@ -735,10 +794,17 @@ function M.RenderAllTime(canvas, key)
   if ipts then for _, e in ipairs(ipts) do if (e.qty or 0) > qmax then qmax = e.qty end end end
   local function qtyY(q) return (qmax > 0) and (bottom + volH * (q / qmax)) or bottom end
 
-  -- subtle volume bars (quantity per day) at each day's real time position
+  -- subtle volume bars (quantity per day) at each day's real time position;
+  -- on 1D one bar per scan (a day is the whole axis there)
   local bars = {}
-  for i = 1, n do bars[i] = { x = dayX[i], q = dayQ[i] } end
-  VolumeBars(canvas, bars, bottom, ph, capped and 18 or math.max(1.5, math.min(10, dayW)), qmax)
+  if win0 then
+    for i = 1, n do if not lastOf[arr[i].day] then bars[#bars + 1] = { x = dayX[i], q = dayQ[i] } end end
+    for _, e in ipairs(ipts) do bars[#bars + 1] = { x = X(e.t), q = e.qty or 0 } end
+    VolumeBars(canvas, bars, bottom, ph, math.max(2, math.min(10, pw / (#bars * 3))), qmax)
+  else
+    for i = 1, n do bars[i] = { x = dayX[i], q = dayQ[i] } end
+    VolumeBars(canvas, bars, bottom, ph, capped and 18 or math.max(1.5, math.min(10, dayW)), qmax)
+  end
 
   -- hover points = the real scan days, each carrying price + fair + qty read-outs
   local pts = {}
@@ -822,7 +888,7 @@ function M.RenderAllTime(canvas, key)
       local drew, maxCnt = false, 0
       for _, e in ipairs(M.db.trade.log or {}) do
         if e.id == id and e.realm == realm and (e.kind == "sold" or e.kind == "bought")
-           and (e.gross or 0) > 0 and e.day and e.day >= dMin and e.day <= dMax then
+           and (e.gross or 0) > 0 and e.day and e.day >= dMin and e.day <= dMax and inWin(e) then
           local cnt = (e.count and e.count > 0) and e.count or 1
           -- with intraday points active, place the dot at the trade's actual time
           local tx = e.day
@@ -1017,7 +1083,8 @@ function M.RenderAllTime(canvas, key)
   -- date labels (bottom), evenly spaced by TIME; on a capped (left-hugging)
   -- chart only first + last, both LEFT-anchored so they cannot collide.
   -- Placement runs on the INT day span (labels name whole days even when the
-  -- intraday tail stretches the plot span to a float).
+  -- intraday tail stretches the plot span to a float). 1D names clock times.
+  if win0 then hourLabels(canvas, X, bottom, win0); return end
   local ldSpan = dMax - dMin
   local labelN = (dMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
   for k = 0, labelN - 1 do
@@ -1070,29 +1137,37 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
     end
   end
   table.sort(arr, function(x, y) return x.day < y.day end)
-  arr = applyRange(arr, M.ChartRangeDays())
+  -- 1D keeps the last two days: the 24 h window reaches back into yesterday,
+  -- and a line without intraday points (a character, a class) shows them daily
+  local rd = M.ChartRangeDays()
+  arr = applyRange(arr, (rd == 1) and 2 or rd)
   local n = #arr
-  -- 1W intraday: splice the intraday tail (several points per day) into the
-  -- account-wide total line. Days covered by intraday points drop their daily
-  -- LINE point (it would sit at midnight with the end-of-day value); the class
-  -- stack bars below stay daily. Intraday points carry t (float day) for the
-  -- X axis and keep day (int) so hover drill-downs stay day-based.
-  local ipts
-  if not ck and not clsName and M.ChartRangeDays() == 7 and M.NWIntra then
+  -- 1W / 1D intraday: splice the intraday tail (several points per day) into
+  -- the account-wide total line. Days covered by intraday points drop their
+  -- daily LINE point (it would sit at midnight with the end-of-day value); the
+  -- class stack bars below stay daily. Intraday points carry t (float day) for
+  -- the X axis and keep day (int) so hover drill-downs stay day-based.
+  -- win0 (1D only) is the window start as a float day.
+  local ipts, win0
+  if not ck and not clsName and (rd == 7 or rd == 1) and M.NWIntra then
     local ni = M.NWIntra()
     if ni[1] then
       local newest = (n > 0) and arr[n].day
         or math.floor((ni[#ni].ts - M.C.SCAN_DAY_0) / 86400)
       local cutoff = newest - 6
-      for i = 1, #ni do
-        local t = (ni[i].ts - M.C.SCAN_DAY_0) / 86400
-        local d = math.floor(t)
-        if d >= cutoff then
-          ipts = ipts or {}
-          ipts[#ipts + 1] = { day = d, t = t, ts = ni[i].ts, v = ni[i].t, cls = ni[i].c }
+      if rd == 1 then win0 = M.NWWindow1D(newest) end
+      if rd ~= 1 or win0 then
+        for i = 1, #ni do
+          local t = (ni[i].ts - M.C.SCAN_DAY_0) / 86400
+          local d = math.floor(t)
+          if (win0 and t >= win0) or (not win0 and d >= cutoff) then
+            ipts = ipts or {}
+            ipts[#ipts + 1] = { day = d, t = t, ts = ni[i].ts, v = ni[i].t, cls = ni[i].c }
+          end
         end
       end
       if ipts and #ipts < 2 then ipts = nil end
+      if not ipts then win0 = nil end
     end
   end
   local plotArr = arr
@@ -1105,6 +1180,12 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
       local l = iByDay[e.day]
       if not l then l = {}; iByDay[e.day] = l end
       l[#l + 1] = e
+    end
+    -- 1D: only the days the window shows keep their stacks
+    if win0 then
+      local keep = {}
+      for _, e in ipairs(arr) do if covered[e.day] or e.day >= win0 then keep[#keep + 1] = e end end
+      arr, n = keep, #keep
     end
     plotArr = {}
     for _, e in ipairs(arr) do if not covered[e.day] then plotArr[#plotArr + 1] = e end end
@@ -1150,9 +1231,12 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
   -- float span: intraday points sit at their time of day between the day marks
   local tMin = plotArr[1].t or plotArr[1].day
   local tMax = plotArr[pn].t or plotArr[pn].day
+  -- 1D: the axis is exactly the 24 h window, full width (no young-history cap)
+  if win0 then tMin, tMax = win0, win0 + 1 end
   local dSpan = math.max(1, tMax - tMin)
   local dayW, capped
-  dayW, pw, capped = dayStep(pw, dSpan)
+  if win0 then dayW, capped = pw / dSpan, false
+  else dayW, pw, capped = dayStep(pw, dSpan) end
   local function X(day) return left + (day - tMin) * dayW end
   local function Y(g) return bottom + (g - vmin) / (vmax - vmin) * ph end
   -- cumulative class stack per day (bars under the line, clamped to the plot).
@@ -1244,7 +1328,9 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
   if math.abs(yCur - bottom) > 11 then Label(canvas, left + pw + 8, bottom, M.MoneyPlain(vmin * 10000), "LEFT", mr, mg, mb) end
   Dot(canvas, pts[pn].x, yCur, 4, lr, lg, lb)
   Label(canvas, left + pw + 8, yCur, M.MoneyPlain(plotArr[pn].v), "LEFT", lr, lg, lb)
-  -- date labels evenly spaced by TIME on whole days, like the market chart
+  -- date labels evenly spaced by TIME on whole days, like the market chart;
+  -- 1D names clock times
+  if win0 then hourLabels(canvas, X, bottom, win0); return end
   local dMin, dMax = plotArr[1].day, plotArr[pn].day
   local ldSpan = dMax - dMin
   local labelN = (dMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
@@ -1290,7 +1376,9 @@ function M.RenderHoldingChart(canvas, key, qty)
     if v.low then arr[#arr + 1] = { day = day, low = v.low } end
   end
   table.sort(arr, function(x, y) return x.day < y.day end)
-  arr = applyRange(arr, M.ChartRangeDays())
+  -- daily chart: 1D shows yesterday -> today
+  local hrd = M.ChartRangeDays()
+  arr = applyRange(arr, (hrd == 1) and 2 or hrd)
   local n = #arr
   if n == 0 then
     Label(canvas, canvas:GetWidth() / 2, canvas:GetHeight() / 2, "No market data", "CENTER", TC("muted"))
