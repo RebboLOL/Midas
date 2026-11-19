@@ -132,10 +132,92 @@ end
 -- has its mail in the inbox by now.
 local SALE_MAIL_DELAY = 3600 + 120
 
+-- Expired and cancelled listings come back as inbox items, and their mail is
+-- not always read in time (19.11.2026 on WoW Forever: two expired Elixirs of
+-- the Mongoose were taken from the mailbox before Midas had read the mail, so
+-- the bridge kept valuing them next to the bags). Returns therefore settle by
+-- their items, not by their mail:
+-- * while a pending entry's items sit in the inbox they count as mail there
+--   (p.inMail), so the bridge stops valuing those units;
+-- * items of a pending entry that land in the bags during a mailbox visit
+--   settle it for good.
+-- Items of purchases (buyer invoice), COD parcels and mails from your own
+-- characters are no returns: what the visit saw of them is remembered, so
+-- taking them out settles nothing.
+local mailOpen, mailUntil, notReturn = false, 0, {}
+local bankOpen = false
+
+function M.MailSession(open)
+  if open then
+    mailOpen, notReturn = true, {}
+  else
+    -- bags still fill from the last take for a moment after the frame closes
+    mailOpen, mailUntil = false, (GetTime and GetTime() or 0) + 3
+  end
+end
+
+local function atMailbox()
+  return (mailOpen or (GetTime and GetTime() or 0) < mailUntil) and not bankOpen
+end
+
+local function inboxItems()
+  local back, other = {}, {}
+  local n = (GetInboxNumItems and GetInboxNumItems()) or 0
+  local maxAtt = ATTACHMENTS_MAX_RECEIVE or 16
+  for i = 1, n do
+    local _, _, sender, _, _, cod = GetInboxHeaderInfo(i)
+    local inv = GetInboxInvoiceInfo and GetInboxInvoiceInfo(i)
+    local own = M.IsOwnChar and M.IsOwnChar(sender)
+    local into = (inv == "buyer" or (cod or 0) > 0 or own) and other or back
+    for j = 1, maxAtt do
+      local link = GetInboxItemLink and GetInboxItemLink(i, j)
+      local id = link and tonumber(link:match("item:(%d+)"))
+      if id then
+        local _, _, _, count = GetInboxItem(i, j)
+        into[id] = (into[id] or 0) + (count or 1)
+      end
+    end
+  end
+  return back, other
+end
+
+local function markReturns(c)
+  local back, other = inboxItems()
+  for id, q in pairs(other) do
+    if q > (notReturn[id] or 0) then notReturn[id] = q end
+  end
+  if not c.pending then return end
+  for id, p in pairs(c.pending) do
+    local seen = math.min(back[id] or 0, p.qty or 0)
+    p.inMail = (seen > 0) and seen or nil
+  end
+end
+
+local function settleFromBags(c, old, new)
+  if not (c.pending and old and atMailbox()) then return end
+  local settled = false
+  for id, p in pairs(c.pending) do
+    local gain = (new[id] or 0) - (old[id] or 0)
+    local credit = math.min(math.max(gain, 0), notReturn[id] or 0)
+    if credit > 0 then notReturn[id] = notReturn[id] - credit end
+    local take = math.min(gain - credit, p.qty or 0)
+    if take > 0 then
+      p.gold = math.max(0, (p.gold or 0) - math.floor((p.gold or 0) * take / p.qty + 0.5))
+      p.qty = p.qty - take
+      if p.inMail and p.inMail > p.qty then p.inMail = (p.qty > 0) and p.qty or nil end
+      if p.qty <= 0 then c.pending[id] = nil end
+      settled = true
+    end
+  end
+  if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
+  if settled and M.RequestUIRefresh then M.RequestUIRefresh() end   -- net worth reads this
+end
+
 function M.CacheMail()
   local c = CharCache(); if not c then return end
   c.mail, c.mailGold = scanMail({})
   c.mailTs = time()
+  markReturns(c)
   -- the inbox is the ground truth for pending entries older than the sale-mail
   -- delay; younger ones may still be in transit and stay until their mail
   -- resolves them (M.AuctionSettled)
@@ -157,6 +239,7 @@ function M.CacheBags()
   -- wipe a previously captured snapshot of this character's bags (that bug made
   -- every offline character read as 0c after their last clean logout).
   if next(scan) == nil and c.bags and next(c.bags) ~= nil then return end
+  settleFromBags(c, c.bags, scan)
   c.bags = scan
   c.bagsTs = time()
 end
@@ -236,6 +319,7 @@ local function notePending(c, au)
       local take = math.min(gain, p.qty)
       p.gold = math.max(0, (p.gold or 0) - math.floor((p.gold or 0) * take / p.qty + 0.5))
       p.qty = p.qty - take
+      if p.inMail and p.inMail > p.qty then p.inMail = (p.qty > 0) and p.qty or nil end
       if p.qty <= 0 then c.pending[id] = nil end
     end
   end
@@ -246,18 +330,24 @@ end
 -- take it out of the pending bridge and the still-cached owner list, so the
 -- mail content and the old auction value are never counted twice. The next
 -- real owner-list refresh overwrites the whole auction cache anyway.
-function M.AuctionSettled(id, count)
+-- A returned listing (kind "returned" / "cancelled") brings its items: pending
+-- units stay until those land in the bags (settleFromBags) and count as mail
+-- meanwhile (p.inMail) - settling them here as well would take them twice.
+function M.AuctionSettled(id, count, kind)
   local c = CharCache(); if not c then return end
   local q = count or 1
   -- pending units left the owner list first, so the mail settles them first
   local p = c.pending and c.pending[id]
   if p and (p.qty or 0) > 0 and q > 0 then
     local take = math.min(q, p.qty)
-    local punit = (p.gold or 0) / p.qty
-    p.qty = p.qty - take
-    p.gold = math.max(0, (p.gold or 0) - math.floor(punit * take + 0.5))
-    if p.qty <= 0 then c.pending[id] = nil end
-    if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
+    if kind ~= "returned" and kind ~= "cancelled" then
+      local punit = (p.gold or 0) / p.qty
+      p.qty = p.qty - take
+      p.gold = math.max(0, (p.gold or 0) - math.floor(punit * take + 0.5))
+      if p.inMail and p.inMail > p.qty then p.inMail = (p.qty > 0) and p.qty or nil end
+      if p.qty <= 0 then c.pending[id] = nil end
+      if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
+    end
     q = q - take
   end
   local a = c.auctions and c.auctions[id]; if not a then return end
@@ -413,15 +503,15 @@ end
 
 -- bank contents are only readable while the bank is open: a debounced scan
 -- that lands after closing would read it as empty and wipe the cache
-local bankOpen = false
+-- (bankOpen is declared with the mailbox state above)
 local function cacheBankIfOpen()
   if bankOpen then M.CacheBank() end
 end
 
 local ev = CreateFrame("Frame")
 for _, e in ipairs({ "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "MAIL_SHOW",
-                     "MAIL_INBOX_UPDATE", "BAG_UPDATE_DELAYED", "PLAYER_MONEY", "PLAYER_ENTERING_WORLD",
-                     "PLAYER_LOGOUT" }) do
+                     "MAIL_INBOX_UPDATE", "MAIL_CLOSED", "BAG_UPDATE_DELAYED", "PLAYER_MONEY",
+                     "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT" }) do
   M.SafeRegister(ev, e)
 end
 if M.MODERN_AH then
@@ -439,9 +529,12 @@ ev:SetScript("OnEvent", function(_, event)
   elseif event == "PLAYERBANKSLOTS_CHANGED" then
     debounce("bank", cacheBankIfOpen, 0.3)
   elseif event == "MAIL_SHOW" then
+    M.MailSession(true)
     if CheckInbox then CheckInbox() end
     debounce("mail", M.CacheMail, 0.5)
     if M.ScanTradeMail then debounce("trademail", M.ScanTradeMail, 0.7) end
+  elseif event == "MAIL_CLOSED" then
+    M.MailSession(false)
   elseif event == "MAIL_INBOX_UPDATE" then
     debounce("mail", M.CacheMail, 0.3)
     if M.ScanTradeMail then debounce("trademail", M.ScanTradeMail, 0.5) end

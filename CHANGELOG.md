@@ -1,5 +1,8 @@
 # Midas – Changelog
 
+## 1.3.2 – 2026-11-19
+- **Net Worth: fixed a bug where returned auctions count twice.** Items of an expired or cancelled auction no longer count as auction once they are back in your mailbox or bags.
+
 ## 1.3.1 – 2026-11-18
 - **Forever: one scan for your other addons.** After a full scan Midas now also reads the price list of the auction house, so addons that keep prices from it get that scan too.
 - **Datalink: price scans shared.** With sharing on and the Midas Companion app 1.3.1, every complete price scan between full scans now goes to midasmarket.app as well, so its prices stay current.

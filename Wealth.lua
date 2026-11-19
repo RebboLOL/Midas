@@ -380,8 +380,15 @@ function M.CharAssets(ck)
   -- the pending bridge (Inventory.lua): listings that left the owner list but
   -- whose mail is still unread keep their auction valuation - no dip between
   -- the AH refresh and the mailbox visit. 30-day cap = the mail's own lifetime.
+  -- Units whose items are back in the inbox (a.inMail) count as mail instead.
   if c.pending and (not c.pendingTs or (time() - c.pendingTs) < 30 * 86400) then
-    for id, a in pairs(c.pending) do addAuction(id, a) end
+    for id, a in pairs(c.pending) do
+      local qty = a.qty or 0
+      local q = qty - math.min(a.inMail or 0, qty)
+      if q > 0 then
+        addAuction(id, (q == qty) and a or { qty = q, gold = math.floor((a.gold or 0) * q / qty + 0.5) })
+      end
+    end
   end
   table.sort(items, function(a, b) return a.value > b.value end)
   table.sort(auctions, function(a, b) return a.value > b.value end)

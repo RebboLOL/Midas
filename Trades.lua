@@ -325,7 +325,7 @@ function M.ScanTradeMail()
           -- both count toward net worth (Inventory.lua owns the cache)
           if M.AuctionSettled and id
              and (kind == "sold" or kind == "returned" or kind == "cancelled") then
-            M.AuctionSettled(id, (count and count > 0) and count or 1)
+            M.AuctionSettled(id, (count and count > 0) and count or 1, kind)
           end
           -- feed the sell-odds calibration (Fair price v2). A sold outcome only
           -- counts while the listings cache could also have priced an expiry of

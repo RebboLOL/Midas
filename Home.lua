@@ -131,7 +131,12 @@ local function ownership()
       for _, field in ipairs({ "auctions", "pending" }) do
         local src = c[field]
         if type(src) == "table" then
-          for id in pairs(src) do local nid = tonumber(id); if nid then listed[nid] = true end end
+          for id, a in pairs(src) do
+            local nid = tonumber(id)
+            -- a pending entry whose items are all back in the inbox is no listing
+            local back = field == "pending" and type(a) == "table" and (a.inMail or 0) >= (a.qty or 0)
+            if nid and not back then listed[nid] = true end
+          end
         end
       end
     end
