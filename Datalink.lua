@@ -4,12 +4,18 @@
 -- Addons cannot talk to the network. After every own full scan the Datalink
 -- copies the newest offer book (MidasAPI.GetDepthSnapshot) into
 -- MidasUplinkDB, a SavedVariable of Midas (WTF\...\SavedVariables\Midas.lua).
+-- After every complete price scan (Midas' own or another addon's, stored
+-- with depth = false) it copies that scan's rows (MidasAPI.GetLastScanRows:
+-- cheapest unit price and units listed per item) into a list of its own,
+-- pqueue - apps before 1.3.1 (1.3.0) only read queue and never take a price scan for
+-- an offer book. Quick scans (only some items) are never shared.
 -- WoW writes that file on /reload or logout; the companion app picks new
 -- snapshots up there.
 --
 -- Privacy: opt-in (off until /midas datalink on or the Settings switch). A
 -- snapshot holds the market (client, region, realm, faction, ruleset) and per
--- item the listed units, buyout auctions and the 20 cheapest unit prices. No
+-- item the listed units, buyout auctions and the 20 cheapest unit prices (a
+-- price snapshot: only the listed units and the cheapest unit price). No
 -- character, account, guild or seller names, no money, no bags. For the items
 -- of a snapshot the game's own item data comes along: name and quality (in
 -- the client language) and the basic item data (icon, type, binding, levels,
@@ -42,6 +48,8 @@
 --   enabled = false,
 --   seq     = <last snapshot number>,
 --   queue   = { snapshot, ... }  oldest first, at most QUEUE_MAX
+--   pqueue  = { price snapshot, ... }  oldest first, at most PQUEUE_MAX;
+--             seq counts on with queue (one number per snapshot of either kind)
 --   names   = { [itemID] = "Name" }   item names in the client language
 --   quality = { [itemID] = 0..7 }
 --   locale  = GetLocale()             names/quality are wiped when it changes
@@ -59,6 +67,10 @@
 -- snapshot = { v = 1, seq, ts, addon, market = {...}, count,
 --              items = { [itemID] = "listed,auctions,p1,q1,n1,p2,q2,n2,..." } }
 -- p = unit buyout in copper (ascending), q = units, n = auctions at p.
+-- price snapshot = { v = 1, kind = "prices", seq, ts, addon, market = {...}, count,
+--                    items = { [itemID] = "listed,low" } }
+-- listed = units listed (>= 0), low = cheapest unit buyout in copper (> 0);
+-- items without an offer are left out.
 --
 -- MidasUplinkPrices = { v = 1, app, checked, written, markets = { { market = "forever/EU/pve/alliance",
 --   ts, day0, match = { { client, region, realm, faction }, ... },
@@ -69,6 +81,10 @@ local ADDON, M = ...
 
 local FORMAT    = 1
 local QUEUE_MAX = 5
+local PQUEUE_MAX = 3                  -- price snapshots kept (~6,000 short strings each)
+local PQ_SAY_GAP = 1800               -- seconds between two "price scan queued" chat lines
+local PRICE_MAX  = 1e11               -- above this a unit price is not believed (gold cap ~2.1e9)
+local LISTED_MAX = 1e9                -- units listed above this count as unknown (0)
 local LEVELS_MAX  = 20                -- server limit per item
 local ITEM_ID_MAX = 10000000
 local MAX_AGE     = 6 * 86400         -- older scans are not queued (server: 7 days)
@@ -108,9 +124,12 @@ local function initDB()
   db = MidasUplinkDB
   if db.format ~= FORMAT then          -- unknown/older layout: start clean
     db.queue = {}
+    db.pqueue = {}
     db.format = FORMAT
   end
   db.queue = type(db.queue) == "table" and db.queue or {}
+  db.pqueue = type(db.pqueue) == "table" and db.pqueue or {}
+  while #db.pqueue > PQUEUE_MAX do table.remove(db.pqueue, 1) end
   db.seq = tonumber(db.seq) or 0
   if db.enabled == nil then db.enabled = false end
   if db.prices ~= false then db.prices = true end
@@ -333,6 +352,12 @@ local function push(s)
   return true
 end
 
+-- the DATALINK block of the Settings tab shows the queue lengths (UI.lua)
+local function refreshBlock()
+  local s = M.setUI
+  if s and s.dlApp and M.RefreshDatalink then pcall(M.RefreshDatalink, s) end
+end
+
 local function capture(quiet)
   if passive or not db or not db.enabled then return end
   if not (MidasAPI and MidasAPI.GetDepthSnapshot) then return end
@@ -352,9 +377,84 @@ local function capture(quiet)
   local added = push(s)
   collectNames(s)                       -- also retries names on a repeated scan
   if added then
+    refreshBlock()
     say(string.format("scan queued (%d items). The companion app picks it up after the next /reload or logout.", s.count))
   elseif not quiet then
     say("the newest scan is already queued.")
+  end
+end
+
+-- ===== price scans ============================================================
+-- MidasAPI.GetLastScanRows -> price snapshot (nil when nothing usable)
+local function encodePrices(rows)
+  if type(rows) ~= "table" or rows.depth ~= false or type(rows.items) ~= "table" or not tonumber(rows.ts) then
+    return nil
+  end
+  local mk = rows.market or {}
+  if not mk.client or not mk.region or mk.region == "?" or not mk.faction then return nil end
+  local items, count = {}, 0
+  for id, r in pairs(rows.items) do
+    local itemID = tonumber(id)
+    local low = type(r) == "table" and tonumber(r.low)
+    if itemID and itemID > 0 and itemID <= ITEM_ID_MAX and itemID % 1 == 0
+       and low and low >= 1 and low <= PRICE_MAX then
+      low = math.floor(low)
+      local listed = tonumber(r.qty) or 0
+      if not (listed >= 0 and listed <= LISTED_MAX) then listed = 0 end   -- also NaN
+      items[itemID] = tostring(math.floor(listed)) .. "," .. tostring(low)
+      count = count + 1
+    end
+  end
+  if count == 0 then return nil end
+  return {
+    v = FORMAT,
+    kind = "prices",
+    ts = tonumber(rows.ts),
+    addon = midasVersion(),
+    market = { client = mk.client, region = mk.region, realm = mk.realm,
+               faction = mk.faction, ruleset = mk.ruleset },
+    count = count,
+    items = items,
+  }
+end
+
+local function sameScan(a, b)
+  local ma, mb = a.market, b.market
+  return a.ts == b.ts and type(ma) == "table" and type(mb) == "table" and ma.client == mb.client
+    and ma.region == mb.region and ma.realm == mb.realm and ma.faction == mb.faction
+end
+
+local function pushPrices(s)
+  local q = db.pqueue
+  for i = 1, #q do
+    if type(q[i]) == "table" and sameScan(q[i], s) then return false end   -- same scan twice
+  end
+  db.seq = db.seq + 1
+  s.seq = db.seq
+  q[#q + 1] = s
+  while #q > PQUEUE_MAX do table.remove(q, 1) end
+  return true
+end
+
+local lastPriceSay = 0                  -- price scans come often: one chat line per PQ_SAY_GAP
+
+-- ts = the scan the SCAN_COMPLETE event announced (nil: whatever is newest)
+local function capturePrices(ts)
+  if passive or not db or not db.enabled then return end
+  if not (MidasAPI and MidasAPI.GetLastScanRows) then return end
+  local ok, rows = pcall(MidasAPI.GetLastScanRows)
+  if not ok then geterrorhandler()(rows); return end
+  if type(rows) ~= "table" or (ts and rows.ts ~= ts) then return end
+  local s = encodePrices(rows)
+  if not s then return end
+  local now = time()
+  if now - s.ts > MAX_AGE or s.ts - now > MAX_AHEAD then return end
+  local added = pushPrices(s)
+  collectNames(s)
+  if added then refreshBlock() end
+  if added and now - lastPriceSay >= PQ_SAY_GAP then
+    lastPriceSay = now
+    say(string.format("price scan queued (%d items). The companion app picks it up after the next /reload or logout.", s.count))
   end
 end
 
@@ -670,14 +770,20 @@ local function onScan(_, payload)
   if passive or not db then return end
   -- the market Midas filed the scan under (M.MarketInfo of this scan)
   if type(payload) == "table" then rememberMarket(payload.market) end
-  -- a price scan stores no offer book: nothing new to hand over
-  if type(payload) == "table" and payload.depth == false then return end
-  -- SCAN_COMPLETE fires right after Midas stored the new offer book; copy it
-  -- on the next frame so Midas finishes its own scan handling first.
-  if C_Timer and C_Timer.After then
-    C_Timer.After(0, function() capture(true) end)
+  -- SCAN_COMPLETE fires right after Midas stored the scan; copy it on the
+  -- next frame so Midas finishes its own scan handling first. A price scan
+  -- (depth = false) stores no offer book: its rows go into pqueue instead.
+  local fn
+  if type(payload) == "table" and payload.depth == false then
+    local ts = tonumber(payload.ts)
+    fn = function() capturePrices(ts) end
   else
-    capture(true)
+    fn = function() capture(true) end
+  end
+  if C_Timer and C_Timer.After then
+    C_Timer.After(0, fn)
+  else
+    fn()
   end
 end
 
@@ -714,8 +820,15 @@ function M.DatalinkInfo()
     info.share = db.enabled == true
     info.prices = db.prices ~= false
     info.queue = type(db.queue) == "table" and #db.queue or 0
+    info.pqueue = type(db.pqueue) == "table" and #db.pqueue or 0
+    -- the newest snapshot kept for the app (either list)
+    for _, q in ipairs({ db.queue, db.pqueue }) do
+      local s = type(q) == "table" and q[#q]
+      local ts = type(s) == "table" and tonumber(s.ts)
+      if ts and (not info.newest or ts > info.newest) then info.newest = ts end
+    end
   else
-    info.share, info.prices, info.queue = false, true, 0
+    info.share, info.prices, info.queue, info.pqueue = false, true, 0, 0
   end
   if type(P) == "table" then
     info.app = type(P.app) == "string" and P.app ~= "" and P.app or nil
@@ -766,16 +879,20 @@ local function status()
   elseif not info.found then
     say("companion app not found - get it at " .. M.DATALINK_URL)
   end
-  if #q == 0 then
+  local function line(s, kind)
+    local mk = s.market or {}
+    say(string.format("#%d  %s  %s/%s/%s/%s  %d items  (%s)",
+      s.seq or 0, date("%d.%m. %H:%M", s.ts or 0), mk.client or "?", mk.region or "?",
+      mk.ruleset or "?", mk.faction or "?", s.count or 0, kind))
+  end
+  local pq = db.pqueue
+  if #q == 0 and #pq == 0 then
     say("queue empty.")
   else
-    for i = 1, #q do
-      local s = q[i]
-      local mk = s.market or {}
-      say(string.format("#%d  %s  %s/%s/%s/%s  %d items",
-        s.seq or 0, date("%d.%m. %H:%M", s.ts or 0), mk.client or "?", mk.region or "?",
-        mk.ruleset or "?", mk.faction or "?", s.count or 0))
-    end
+    say(string.format("queue: %d full %s, %d price %s.", #q, #q == 1 and "scan" or "scans",
+      #pq, #pq == 1 and "scan" or "scans"))
+    for i = 1, #q do line(q[i], "full scan") end
+    for i = 1, #pq do line(pq[i], "price scan") end
   end
   say(pricesText())
   say(historyText())
@@ -787,13 +904,16 @@ function M.DatalinkSetShare(on)
   if not db then return end
   if on then
     db.enabled = true
-    say("sharing ON. Each full Midas scan is handed to the companion app (offer book only, no character data).")
+    say("sharing ON. Each full scan (offer book) and each complete price scan is handed to the companion app - no character data.")
     capture(true)
+    capturePrices(nil)
     prepareHistory(false)
   else
     db.enabled = false
     db.queue = {}
+    db.pqueue = {}
     db.history = {}
+    refreshBlock()
     say("sharing OFF. Queue and prepared price history cleared, nothing is shared.")
   end
   if passive then legacyNote() end
@@ -823,7 +943,8 @@ function M.DatalinkSlash(msg)
     elseif v == "now" then
       if passive then legacyNote() else capture(false) end
     elseif v == "clear" then
-      db.queue = {}
+      db.queue, db.pqueue = {}, {}
+      refreshBlock()
       say("queue cleared.")
     else status() end
   elseif verb == "prices" then
@@ -835,7 +956,8 @@ function M.DatalinkSlash(msg)
   elseif verb == "now" then
     if passive then legacyNote() else capture(false) end
   elseif verb == "clear" then
-    db.queue = {}
+    db.queue, db.pqueue = {}, {}
+    refreshBlock()
     say("queue cleared.")
   elseif msg == "" or verb == "status" then
     status()

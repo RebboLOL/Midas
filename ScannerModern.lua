@@ -434,7 +434,7 @@ local function priceStop(keep)
   price = nil
   M._priceScan = nil
   local n = 0
-  if keep and p.rows and M.CommitQuick then
+  if keep and p.rows and not p.echo and M.CommitQuick then
     local acc, cnt = priceRows(p.rows)
     if cnt > 0 then n = M.CommitQuick(acc) or cnt end
   end
@@ -448,6 +448,7 @@ local function priceDone(res)
   -- Live.lua may see this last answer after us: the mark falls a frame later
   C_Timer.After(0, function() if not price then M._priceScan = nil end end)
   priceIdle(p)
+  if p.echo then return end   -- read for other addons only: the snapshot is stored already
   local acc, n = priceRows(res)
   if n == 0 then
     M.Print("Price scan: the auction house sent no prices - please try again in a moment. The archive keeps your last good scan.")
@@ -501,8 +502,10 @@ priceStep = function()
     p.fails = p.fails + 1
     if p.fails >= PRICE_TRIES then
       local n = priceStop(true)
-      M.Print("Price scan: the auction house is not answering right now"
-        .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+      if not p.echo then
+        M.Print("Price scan: the auction house is not answering right now"
+          .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+      end
       return
     end
     priceStep()
@@ -547,6 +550,24 @@ function M.PriceScan(standalone)
     end
     C_Timer.After(0.5, step)
   end
+  priceStep()
+  return true
+end
+
+-- ===== Price list for other addons ============================================
+-- Midas' full scan is a snapshot, and other addons do not read a snapshot they
+-- did not ask for. The price list of an empty browse search they do read
+-- (Auctionator, and through its prices the addons built on them). So after an
+-- own full scan Midas asks for that list once more - a price scan that stores
+-- nothing: the snapshot stored a moment ago holds every row of it and more.
+-- /run MidasDB.config.shareScan = false turns it off.
+local function echoScan()
+  if price or quick or not M.AHOpen or not priceAvailable() then return false end
+  if M.db and M.db.config and M.db.config.shareScan == false then return false end
+  local p = { standalone = false, echo = true, got = 0, fails = 0, drops = 0, readyWait = 0, est = 0 }
+  price = p
+  passive = nil
+  M._priceScan = true   -- Live.lua leaves these rows alone, as in every price scan
   priceStep()
   return true
 end
@@ -627,8 +648,10 @@ local function onForeignQuery(fn, query)
       return
     end
     local n = priceStop(true)
-    M.Print("Price scan stopped - you searched the auction house yourself"
-      .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+    if not p.echo then
+      M.Print("Price scan stopped - you searched the auction house yourself"
+        .. (n > 0 and string.format(" (%d items stored).", n) or "."))
+    end
   elseif q then
     local n = quickStop(true)
     if q.standalone then
@@ -716,6 +739,8 @@ local function processSnapshot(foreign)
         return
       end
       M.CommitScan(acc)
+      -- an own full scan: let the other addons have its prices too
+      if not foreign then echoScan() end
     end
   end)
 end

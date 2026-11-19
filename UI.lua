@@ -1967,7 +1967,7 @@ function M.BuildSettings(panel)
   shSub:SetText("Off until you switch it on: shares the prices and amounts of your auction house scans and once your last 90 days of prices - never character, guild or gold data.")
   if T.HelpTip then
     T.HelpTip(shCb, "Share my scans", {
-      "After every full scan Midas hands the offer book (the 20 cheapest prices of each item and how much is listed) to the Midas Companion app, which uploads it to midasmarket.app. Once per market it also sends the daily prices of your last 90 days.",
+      "After every full scan Midas hands the offer book (the 20 cheapest prices of each item and how much is listed) to the Midas Companion app, which uploads it to midasmarket.app. Between full scans each complete price scan follows with the cheapest price and amount of each item. Once per market it also sends the daily prices of your last 90 days.",
       "Realm, faction and game version come along, and for the scanned items their names and item data (icon, type, level) - nothing about your characters, guild, gold or bags.",
       "Needs the companion app on this PC. Off clears what is still waiting. Server prices work without sharing." })
   end
@@ -2192,6 +2192,13 @@ function M.RefreshDatalink(s)
       s.dlLegacy:SetText(RED .. "The old Midas_Uplink addon is still installed.|r" .. WHT
         .. " Update the Midas Companion app (midasmarket.app/download), then delete the Midas_Uplink folder in Interface\\AddOns.|r")
     end
+  elseif dl.share then
+    -- the newest snapshots MidasUplinkDB keeps for the app (written at /reload
+    -- or logout; the app remembers what it sent, the lists only roll over)
+    local q, pq = dl.queue or 0, dl.pqueue or 0
+    s.dlLegacy:SetText(string.format("Kept for the app  %s%d|r full %s  \194\183  %s%d|r price %s%s",
+      WHT, q, q == 1 and "scan" or "scans", WHT, pq, pq == 1 and "scan" or "scans",
+      dl.newest and (MUT .. "  \194\183  newest " .. date("%d.%m. %H:%M", dl.newest) .. "|r") or ""))
   else
     s.dlLegacy:SetText("")
   end
@@ -2866,6 +2873,25 @@ local function CreateRankTab(panel, opts)
     -- view is cached and reused until the data table (a new analysis build),
     -- the query or the sort changes. The watchlist path stays uncached (its
     -- dataFn returns a fresh table each call, and 200 rows sort instantly).
+    -- one comparator for the table and for the search's "+ item" candidates
+    local function rowLess(a, b)
+      local av, bv = rankSortVal(a, fld), rankSortVal(b, fld)
+      if type(av) == "string" or type(bv) == "string" then
+        av = av or ""; bv = bv or ""
+        if av ~= bv then if asc then return av < bv else return av > bv end end
+      else
+        -- rows WITHOUT a value in this column always sort last (asc or
+        -- desc), so the browse view's unrated items stop flooding one end
+        if (av == nil) ~= (bv == nil) then return bv == nil end
+        if av ~= nil and av ~= bv then if asc then return av < bv else return av > bv end end
+      end
+      local as = (a.m and a.m.score) or -math.huge
+      local bs = (b.m and b.m.score) or -math.huge
+      if as ~= bs then return as > bs end
+      -- final tiebreaker by name: table.sort is NOT stable, so equal rows
+      -- would reshuffle on every refresh (each scan/sync) without this
+      return rankSortVal(a, "name") < rankSortVal(b, "name")
+    end
     local sorted
     local bc = browseView and st._bCache
     if bc and bc.src == data and bc.q == q and bc.fld == fld and bc.asc == asc then
@@ -2882,24 +2908,7 @@ local function CreateRankTab(panel, opts)
         end
         if keep then sorted[#sorted + 1] = e end
       end
-      table.sort(sorted, function(a, b)
-        local av, bv = rankSortVal(a, fld), rankSortVal(b, fld)
-        if type(av) == "string" or type(bv) == "string" then
-          av = av or ""; bv = bv or ""
-          if av ~= bv then if asc then return av < bv else return av > bv end end
-        else
-          -- rows WITHOUT a value in this column always sort last (asc or
-          -- desc), so the browse view's unrated items stop flooding one end
-          if (av == nil) ~= (bv == nil) then return bv == nil end
-          if av ~= nil and av ~= bv then if asc then return av < bv else return av > bv end end
-        end
-        local as = (a.m and a.m.score) or -math.huge
-        local bs = (b.m and b.m.score) or -math.huge
-        if as ~= bs then return as > bs end
-        -- final tiebreaker by name: table.sort is NOT stable, so equal rows
-        -- would reshuffle on every refresh (each scan/sync) without this
-        return rankSortVal(a, "name") < rankSortVal(b, "name")
-      end)
+      table.sort(sorted, rowLess)
       if browseView then
         st._bCache = { src = data, q = q, fld = fld, asc = asc, view = sorted }
       end
@@ -2927,7 +2936,12 @@ local function CreateRankTab(panel, opts)
         extra[#extra + 1] = { key = key, m = M.Metrics(M.GetSeries(key), key), addable = true }
       end
       table.sort(extra, function(a, b) return ((a.m and a.m.score) or 0) > ((b.m and b.m.score) or 0) end)
-      for i = 1, math.min(#extra, 15) do sorted[#sorted + 1] = extra[i] end
+      -- the 15 best by score stay the pick; shown below the watched matches in
+      -- the order of the chosen column, like the rows above them
+      local pick = {}
+      for i = 1, math.min(#extra, 15) do pick[i] = extra[i] end
+      table.sort(pick, rowLess)
+      for i = 1, #pick do sorted[#sorted + 1] = pick[i] end
     end
     -- watchlist groups: the plain view folds into ordered sections (own groups
     -- first, the rest under UNGROUPED); searching shows the flat list. "+ new
@@ -7664,6 +7678,22 @@ M.NEWS = {
       M.SelectTab(TAB.Start)
     end,
   },
+  {
+    -- the link is M.DATALINK_URL spelled out: Datalink.lua loads after this file
+    id = "datalink-1.3.0", version = "1.3.0", title = "Midas Companion app",
+    text = "Midas now has a website, midasmarket.app, and a free desktop app that links it to the game. "
+      .. "The Midas Companion uploads the scans you choose to share and brings the server prices of your "
+      .. "markets (last 90 days) into Midas - they fill the gaps in your history, your own scans always "
+      .. "win. Sharing is off until you switch it on in Settings; server prices work without it.",
+    where = "midasmarket.app/download", link = "https://midasmarket.app/download",
+    linkTitle = "Midas Companion", showLabel = "Open Settings",
+    preview = "datalink",
+    open = function()
+      M.EnsureUI()
+      M.frame:Show()
+      M.SelectTab(TAB.Settings)
+    end,
+  },
 }
 
 -- ===== Get-started tour =====================================================
@@ -8183,6 +8213,41 @@ local function drawLinksPreview(f)
   end
 end
 
+-- tiny datalink illustration: website, companion app and game stacked, the
+-- shared scans going up (teal) and the server prices coming down (purple);
+-- regions only, like every preview
+local function drawDatalinkPreview(f)
+  local AC, TL, PU, B = C.accent, C.teal or C.accent, C.purple or C.accent, C.border
+  local boxes = { { "midasmarket.app", "website" }, { "Midas Companion", "app" }, { "Midas", "in game" } }
+  for i, bx in ipairs(boxes) do
+    local y = -8 - (i - 1) * 48
+    local b = f:CreateTexture(nil, "BORDER")
+    b:SetColorTexture(B[1], B[2], B[3], 1)
+    b:SetPoint("TOPLEFT", 10, y); b:SetSize(160, 28)
+    local fill = f:CreateTexture(nil, "ARTWORK")
+    fill:SetColorTexture(C.bg1[1], C.bg1[2], C.bg1[3], 1)
+    fill:SetPoint("TOPLEFT", b, "TOPLEFT", 1, -1); fill:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
+    local nm = T.Text(f, T.SIZE.small, "text", T.FONT_SEMI)
+    nm:SetPoint("LEFT", b, "LEFT", 8, 0); nm:SetText(bx[1])
+    if i == 1 then nm:SetTextColor(AC[1], AC[2], AC[3]) end
+    local kind = T.Text(f, T.SIZE.tiny, "muted", T.FONT_MED)
+    kind:SetPoint("RIGHT", b, "RIGHT", -8, 0); kind:SetText(bx[2])
+    if i < #boxes then
+      -- the two flows in the gap under this box
+      local up = f:CreateTexture(nil, "ARTWORK")
+      up:SetColorTexture(TL[1], TL[2], TL[3], 0.9)
+      up:SetPoint("TOPLEFT", 20, y - 28); up:SetSize(2, 20)
+      local upL = T.Text(f, T.SIZE.tiny, "text", T.FONT_MED); upL:SetTextColor(TL[1], TL[2], TL[3])
+      upL:SetPoint("LEFT", up, "RIGHT", 4, 0); upL:SetText("your scans")
+      local dn = f:CreateTexture(nil, "ARTWORK")
+      dn:SetColorTexture(PU[1], PU[2], PU[3], 0.9)
+      dn:SetPoint("TOPLEFT", 92, y - 28); dn:SetSize(2, 20)
+      local dnL = T.Text(f, T.SIZE.tiny, "text", T.FONT_MED); dnL:SetTextColor(PU[1], PU[2], PU[3])
+      dnL:SetPoint("LEFT", dn, "RIGHT", 4, 0); dnL:SetText("server prices")
+    end
+  end
+end
+
 local newsFrame
 -- render the current entry of the stacked news window (f._list / f._idx)
 local function renderNews(f)
@@ -8194,7 +8259,7 @@ local function renderNews(f)
   f.text:SetText(item.text)
   f.where:SetText(item.where)
   -- a link entry: the WHERE line is clickable (copy box) and the button says so
-  f._link = item.link
+  f._link, f._linkTitle = item.link, item.linkTitle
   f.whereL:SetText(item.link and "LINK  \194\183  CLICK TO COPY" or "WHERE TO FIND IT")
   f.whereBtn:SetShown(item.link ~= nil)
   f.show.text:SetText(item.showLabel or "Show me")
@@ -8219,6 +8284,7 @@ local function renderNews(f)
     elseif item.preview == "goldtimer" then drawGoldTimerPreview(f.preview)
     elseif item.preview == "crafting" then drawCraftingPreview(f.preview)
     elseif item.preview == "links" then drawLinksPreview(f.preview)
+    elseif item.preview == "datalink" then drawDatalinkPreview(f.preview)
     elseif item.preview == "home" then drawHomePreview(f.preview) end
   end
   f.pager:SetText(f._idx .. " / " .. n)
@@ -8248,7 +8314,7 @@ local function buildNewsFrame()
   f.where:SetJustifyH("LEFT"); f.where:SetWordWrap(true)
   f.whereBtn = CreateFrame("Button", nil, f)
   f.whereBtn:SetAllPoints(f.where); f.whereBtn:Hide()
-  f.whereBtn:SetScript("OnClick", function() if f._link then M.ShowLinkCopy(f._link, "Midas Discord") end end)
+  f.whereBtn:SetScript("OnClick", function() if f._link then M.ShowLinkCopy(f._link, f._linkTitle or "Midas Discord") end end)
   f.whereBtn:SetScript("OnEnter", function() f.where:SetTextColor(C.text[1], C.text[2], C.text[3]) end)
   f.whereBtn:SetScript("OnLeave", function() f.where:SetTextColor(C.accent[1], C.accent[2], C.accent[3]) end)
   f.show = T.Button(f, "Show me", 110, 24); f.show:SetPoint("BOTTOMRIGHT", -20, 16)

@@ -1,5 +1,10 @@
 # Midas – Changelog
 
+## 1.3.1 – 2026-11-18
+- **Forever: one scan for your other addons.** After a full scan Midas now also reads the price list of the auction house, so addons that keep prices from it get that scan too.
+- **Datalink: price scans shared.** With sharing on and the Midas Companion app 1.3.1, every complete price scan between full scans now goes to midasmarket.app as well, so its prices stay current.
+- **Watchlist: search results follow the column sort.** Fixed a bug where the items a search offers to add ignored the column you sorted by.
+
 ## 1.3.0 – 2026-11-18
 - **Datalink built in.** Sharing your scans with midasmarket.app and loading its server prices now work with Midas alone, so the Midas_Uplink folder can be deleted once the Midas Companion app is updated to 1.3.0.
 - **Datalink in Settings.** The Settings tab now shows whether the Midas Companion app is found, switches sharing on and off and tells which server prices are loaded.

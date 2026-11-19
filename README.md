@@ -52,6 +52,8 @@ listed because of it. `/midas quick` turns the price scan and the quick scan off
 
 **Scans of other addons (WoW Forever).** A full scan or a scan of all prices that another addon runs at
 the auction house is stored like a Midas scan; `/run MidasDB.config.captureScans = false` turns that off.
+After a full scan of its own Midas also reads the price list of the auction house once, so addons that
+keep prices from that list get the scan too; `/run MidasDB.config.shareScan = false` turns that off.
 
 ## Usage
 - **Minimap button** (gold coin) – mouseover shows the best sells from your holdings;
@@ -285,7 +287,9 @@ Midas_Uplink folder - your settings carry over (an older app still needs it, so 
   which uploads it after the next `/reload` or logout; once per market the daily prices of your last 90 days
   follow. Realm, faction and game version come along, and for the scanned items their names and item data
   (icon, type, level) from the game - no character, account, guild, gold or bag data. While sharing is on,
-  a full scan that another addon starts is shared as well.
+  a full scan that another addon starts is shared as well, and so is every complete price scan between full
+  scans (Midas' own or another addon's): the cheapest unit price and units listed of each item (uploaded
+  by the companion app from version 1.3.1).
 - **Server prices** (on by default, `/midas prices off`): the app downloads the daily prices of your markets
   into `Prices.lua`; Midas imports them as the source "Midas Server" like Auctionator data - your own scans
   always win. Works without sharing; to fetch them the app asks midasmarket.app for the markets you play
@@ -424,6 +428,8 @@ a full **item link**, or a raw archive key (`gr:...` for suffixed gear).
 - `MidasAPI.GetHistory(item, days)` – the daily price series `{day, time, low, qty}`, oldest first.
 - `MidasAPI.GetDepth(item)` – the offer book (sell-side depth) of the newest scan `{ts, units, auctions, levels}`;
   `GetDepthSnapshot()` returns it for every item plus the market (client, region, realm, faction, ruleset).
+- `MidasAPI.GetLastScanRows()` – the rows of the newest price scan `{ts, depth = false, market, items = {[itemID] = {low, qty}}}`;
+  nil once a full scan followed (use `GetDepthSnapshot()` then).
 - `MidasAPI.GetTradeStats(item)` – your own record: sold/expired, sell-through, avg buy,
   median sell, sales per day, sellability rating.
 - `MidasAPI.GetNetWorth()` – account totals (money/items/auctions, graveyard, per character).

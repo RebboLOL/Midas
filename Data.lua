@@ -160,6 +160,9 @@ function M.CommitScan(acc, opts)
     end
   end
   M.db.config.lastIngest = now
+  -- the rows of a price scan stay readable until the next full scan (API.lua
+  -- GetLastScanRows, Datalink.lua); a full scan has its offer book for that
+  M._lastScanRows = noDepth and { ts = now, market = M.MarketInfo(), acc = acc } or nil
   -- a full scan is newer than every price the AH showed before it
   if M.db.live then M.db.live[rk] = nil end
   if not noDepth then M.CommitDepth(acc, now) end

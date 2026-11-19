@@ -35,6 +35,11 @@
 --   MidasAPI.GetDepthSnapshot()       -> table | nil     the whole newest ladder, this realm:
 --       { ts, market = {client, region, realm, faction, ruleset},
 --         items = { [itemID] = { auctions, listed, levels = {{price, qty, auctions}...} } } }
+--   MidasAPI.GetLastScanRows()        -> table | nil     the rows of the newest price scan
+--                                        (SCAN_COMPLETE with depth = false), this session:
+--       { ts, depth = false, market = {client, region, realm, faction, ruleset},
+--         items = { [itemID] = { low, qty } } }   low = cheapest unit buyout, qty = units listed;
+--       nil once a full scan followed (its rows are in GetDepthSnapshot) or before the first one
 --   MidasAPI.GetItemKeys()            -> array           every archive key, this realm
 --   MidasAPI.GetNetWorth()            -> table | nil     account totals:
 --       { total, money, items, auctions, graveyard, graveyardCount,
@@ -205,6 +210,25 @@ function API.GetDepthSnapshot()
   end
   return {
     ts = d.ts,
+    market = { client = mk.client, region = mk.region, realm = mk.realm, faction = mk.faction, ruleset = mk.ruleset },
+    items = items,
+  }
+end
+
+function API.GetLastScanRows()
+  local r = M._lastScanRows
+  if not (r and type(r.acc) == "table") then return nil end
+  local mk = r.market or {}
+  local items = {}
+  for id, a in pairs(r.acc) do
+    local low = type(a) == "table" and tonumber(a.low)
+    if type(id) == "number" and low and low > 0 then
+      low = math.floor(low)
+      items[id] = { low = low < 1 and 1 or low, qty = math.max(0, math.floor(tonumber(a.qty) or 0)) }
+    end
+  end
+  return {
+    ts = r.ts, depth = false,
     market = { client = mk.client, region = mk.region, realm = mk.realm, faction = mk.faction, ruleset = mk.ruleset },
     items = items,
   }
