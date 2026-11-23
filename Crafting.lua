@@ -27,6 +27,30 @@ function M.SetCraftingOn(on)
   if M.RefreshUI then M.RefreshUI() end
 end
 
+-- Recipes on a cooldown (transmutes, Mooncloth ...) cannot be made at will: one
+-- Arcanite Bar every two days does not supply a craft. Spell -> seconds per
+-- recipe set, from the game's SpellCooldowns table of the builds the recipes
+-- come from (the larger of own and category cooldown).
+local RECIPE_CD = {
+  era = {
+    [25146] = 600, [22430] = 7200, [11479] = 86400, [17559] = 86400, [17560] = 86400, [17561] = 86400,
+    [17562] = 86400, [17563] = 86400, [17564] = 86400, [17565] = 86400, [17566] = 86400, [11480] = 172800,
+    [17187] = 172800, [18560] = 345600,
+  },
+  tbc = {
+    [11479] = 72000, [11480] = 72000, [17559] = 72000, [17560] = 72000, [17561] = 72000, [17562] = 72000,
+    [17563] = 72000, [17564] = 72000, [17565] = 72000, [17566] = 72000, [28566] = 72000, [28567] = 72000,
+    [28568] = 72000, [28569] = 72000, [28580] = 72000, [28581] = 72000, [28582] = 72000, [28583] = 72000,
+    [28584] = 72000, [28585] = 72000, [29688] = 72000, [32765] = 72000, [32766] = 72000, [47280] = 72000,
+    [28027] = 172800, [28028] = 172800, [26751] = 331200, [31373] = 331200, [36686] = 331200,
+  },
+  forever = {
+    [25146] = 600, [11479] = 3600, [11480] = 3600, [1302508] = 3600, [22430] = 7200, [17559] = 82800,
+    [17560] = 82800, [17561] = 82800, [17562] = 82800, [17563] = 82800, [17564] = 82800, [17565] = 82800,
+    [17566] = 82800, [17187] = 169200, [1317279] = 169200, [18560] = 342000,
+  },
+}
+
 -- ===== Recipe index (decoded on first use) ==================================
 local R
 function M.Recipes()
@@ -36,6 +60,8 @@ function M.Recipes()
   local D = M.RECIPE_DATA
   if type(D) ~= "table" then return R end
   R.prof, R.vend, R.build, R.flavor = D.prof or {}, D.vend or {}, D.build, D.flavor
+  -- a `cd` table in the recipe data, once it carries one, replaces the list above
+  local cds = (type(D.cd) == "table" and D.cd) or RECIPE_CD[D.flavor or M.CLIENT_FLAVOR or "era"] or {}
   for line in (D.rec or ""):gmatch("[^\n]+") do
     local item, lo, hi, prof, yel, grey, spell, mats =
       line:match("^(%d+):(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)|(.+)$")
@@ -43,6 +69,8 @@ function M.Recipes()
       local rec = { item = tonumber(item), lo = tonumber(lo), hi = tonumber(hi), prof = tonumber(prof),
                     yellow = tonumber(yel), grey = tonumber(grey), spell = tonumber(spell), mats = {} }
       rec.yield = (rec.lo + rec.hi) / 2
+      local cd = tonumber(cds[rec.spell])
+      if cd and cd > 0 then rec.cd = cd end
       for m, c in mats:gmatch("(%d+)%*(%d+)") do
         local mid = tonumber(m)
         rec.mats[#rec.mats + 1] = { id = mid, n = tonumber(c) }
@@ -169,22 +197,27 @@ end
 -- cost(id) = the cheaper of buying it and making it from its cheapest recipe;
 -- `path` keeps a chain from feeding on itself (transmute circles), `memo`
 -- remembers each decision of one calculation for the tree view.
+-- A MATERIAL that has a price is never made by a recipe on a cooldown (1.3.4,
+-- rec.cd): such a recipe only counts for a material without any price. The
+-- item a calculation is about keeps all its recipes.
 local cost
-local function makeCost(id, k, depth, path, mob, memo)
+local function makeCost(id, k, depth, path, mob, memo, free)
   local recs = M.Recipes().byItem[id]
   if not recs then return nil end
   path[id] = true
   local bestC, bestR, bestOk
   for _, rec in ipairs(recs) do
-    local sum, ok = 0, true
-    for _, mt in ipairs(rec.mats) do
-      local c, _, _, cok = cost(mt.id, k, depth + 1, path, mob, memo)
-      if c then sum = sum + c * mt.n else ok = false end
-      if not cok then ok = false end
-    end
-    local unit = sum / rec.yield
-    if not bestC or (ok and not bestOk) or (ok == bestOk and unit < bestC) then
-      bestC, bestR, bestOk = unit, rec, ok
+    if not (free and rec.cd) then
+      local sum, ok = 0, true
+      for _, mt in ipairs(rec.mats) do
+        local c, _, _, cok = cost(mt.id, k, depth + 1, path, mob, memo)
+        if c then sum = sum + c * mt.n else ok = false end
+        if not cok then ok = false end
+      end
+      local unit = sum / rec.yield
+      if not bestC or (ok and not bestOk) or (ok == bestOk and unit < bestC) then
+        bestC, bestR, bestOk = unit, rec, ok
+      end
     end
   end
   path[id] = nil
@@ -198,7 +231,7 @@ cost = function(id, k, depth, path, mob, memo)
   local buy = (k == NOW) and now or fair
   local e = { cost = buy, how = "buy", src = src, ok = buy ~= nil, buy = buy }
   if mob and depth < MAX_DEPTH and not path[id] then
-    local mc, mrec, mok = makeCost(id, k, depth, path, mob, memo)
+    local mc, mrec, mok = makeCost(id, k, depth, path, mob, memo, buy ~= nil)
     if mc and ((mok and (not buy or mc < buy)) or not buy) then
       e.cost, e.how, e.rec, e.ok, e.make = mc, "make", mrec, mok, mc
     elseif mc then

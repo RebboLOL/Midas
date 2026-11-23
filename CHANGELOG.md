@@ -1,5 +1,11 @@
 # Midas – Changelog
 
+## 1.3.4 – 2026-11-23
+- **WoW Forever: RP-PvP and PvP prices kept apart.** Fixed a bug where server prices of RP-PvP and PvP auction houses got mixed; prices loaded from the mixed data are cleaned once at login.
+- **Net Worth: reagent bag counts.** Items in the reagent bag are now part of your holdings and the sell helper.
+- **Net Worth: fixed items counting twice after they left a character.** The last tradeable item mailed, auctioned, banked or sold from the bags no longer stays on that character.
+- **Crafting: cooldown recipes no longer price materials.** A material made by a transmute or another recipe with a cooldown now counts at its auction house price.
+
 ## 1.3.3 – 2026-11-21
 - **WoW Forever: history back after the realm hotfix.** Since the hotfix of 20 November the game no longer tells addons the realm, so Midas filed new scans, net worth and trades under an empty realm and your history looked gone. Midas now keeps the realm of every character itself and moves what it stored since the hotfix back at login.
 - **Datalink on WoW Forever works again.** Scans shared since the hotfix carried no realm and were refused by midasmarket.app; they now carry realm and ruleset again, and server prices load for the right market.

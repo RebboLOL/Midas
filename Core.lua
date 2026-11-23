@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.3.3"
+M.version = "1.3.4"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -228,10 +228,16 @@ function M.ClientRealm()
   return r
 end
 
--- the ruleset word a realm name ends in, any case ("... PvE", "... PVP"), or nil
+-- the ruleset a realm name ends in, any case ("... PvE", "... PVP"), or nil.
+-- RP-PvP realms spell theirs in two words ("CAMWOW EU4 Realm 9 RP PvP"): up to
+-- 1.3.3 only the last one was read, which made them PvP realms - their scans
+-- went to the PvP market of midasmarket.app and its prices came back.
 local RULESET_WORDS = { pve = "PvE", pvp = "PvP", rp = "RP", rppvp = "RPPvP", hardcore = "Hardcore" }
 function M.RealmRuleset(realm)
-  local tail = type(realm) == "string" and realm:match("(%a+)%s*$")
+  if type(realm) ~= "string" then return nil end
+  local a, b = realm:match("(%a+)[%s%-]+(%a+)%s*$")
+  if a and a:lower() == "rp" and b:lower() == "pvp" then return "RPPvP" end
+  local tail = realm:match("(%a+)%s*$")
   return tail and RULESET_WORDS[tail:lower()] or nil
 end
 
@@ -687,6 +693,9 @@ function M.OnLogin()
   -- empty, or scanned for less than two weeks (the user may have scanned on
   -- the renamed realm before noticing) - while other realms hold data.
   if M.AdoptBorrowedKeys then M.AdoptBorrowedKeys() end   -- before the note: it may fill this key
+  -- RP-PvP realms were read as PvP realms up to 1.3.3 (Midas and server):
+  -- clean the server prices of that time, before the import below runs again
+  if M.RepairServerPrices then M.RepairServerPrices() end
   do
     local rk = M.RealmKey and M.RealmKey()
     local cur = rk and MidasDB.realms[rk]
@@ -965,12 +974,26 @@ function M.AdoptBorrowedKeys()
   local own = M.RealmKey()
   local suffix = "-" .. realm
   local function here(ck) return type(ck) == "string" and ck:sub(-#suffix) == suffix end
+  -- "<realm> <Faction>" of a realm characters are stored under is Midas' own
+  -- key of that realm, not a borrowed one: a character that carries it while
+  -- stored here (the realm Midas names for it changed, WoW Forever 20.11.2026)
+  -- gets its stamp at login - merging that market into this one would mix two
+  -- auction houses
+  local function ownKeyElsewhere(s)
+    local r = s:match("^(.+) Alliance$") or s:match("^(.+) Horde$")
+    if not r then return false end
+    for ck in pairs(db.chars) do
+      if keyRealm(ck) == r then return true end
+    end
+    return false
+  end
   local cand = {}
   for ck, c in pairs(db.chars) do
     local s = type(c) == "table" and c.scope
     -- keys of an empty realm (" Alliance", 1.3.2 on WoW Forever): M.AdoptHiddenRealm
     if type(s) == "string" and here(ck) and s ~= own and s:find("^%S")
-       and s ~= realm .. " Alliance" and s ~= realm .. " Horde" and not M.IsNeutralKey(s) then
+       and s ~= realm .. " Alliance" and s ~= realm .. " Horde" and not M.IsNeutralKey(s)
+       and not ownKeyElsewhere(s) then
       cand[s] = true
     end
   end

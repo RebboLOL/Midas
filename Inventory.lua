@@ -26,7 +26,7 @@ local function SlotItem(bag, slot)            -- -> itemID, stackCount, isBound
 end
 
 -- ===== Container lists =======================================================
-local BAGS = { 0, 1, 2, 3, 4 }                -- backpack + 4 bags (always readable)
+local BAGS = M.BagContainers()   -- Compat.lua: backpack + bags, plus the reagent bag (WoW Forever)
 
 local BANK = M.BankContainers()   -- Compat.lua: classic bank bags or modern bank tabs
 
@@ -127,10 +127,26 @@ function M.CacheBank()
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- net worth reads this
 end
 
+-- The last move before the bank closes (take an item, walk away) is still on
+-- its debounce when the frame is gone: read once more while the close event
+-- runs. A read that comes back empty proves nothing here - the client may
+-- have let go of the bank already - and never replaces a filled cache.
+local function cacheBankOnClose()
+  local c = CharCache(); if not c then return end
+  local scan = scanBags(BANK, {})
+  if next(scan) == nil and c.bank and next(c.bank) ~= nil then return end
+  c.bank = scan
+  c.bankTs = time()
+  if M.RequestUIRefresh then M.RequestUIRefresh() end
+end
+
 -- Classic holds sale proceeds for an hour before the mail goes out (plus a
 -- little clock slack): a listing that left the owner list longer ago than this
 -- has its mail in the inbox by now.
 local SALE_MAIL_DELAY = 3600 + 120
+
+-- The longest an auction can run (48 h on every client Midas supports).
+local AUCTION_MAX_RUN = 48 * 3600
 
 -- Expired and cancelled listings come back as inbox items, and their mail is
 -- not always read in time (19.11.2026 on WoW Forever: two expired Elixirs of
@@ -158,6 +174,14 @@ end
 
 local function atMailbox()
   return (mailOpen or (GetTime and GetTime() or 0) < mailUntil) and not bankOpen
+end
+
+-- a window is open (or just closed) at which the bags can lose their last item
+local function emptiedHere()
+  if mailOpen or bankOpen or M.AHOpen then return true end
+  if (GetTime and GetTime() or 0) < mailUntil then return true end
+  local mf = _G.MerchantFrame
+  return (mf and mf.IsShown and mf:IsShown()) and true or false
 end
 
 local function inboxItems()
@@ -221,12 +245,19 @@ function M.CacheMail()
   -- the inbox is the ground truth for pending entries older than the sale-mail
   -- delay; younger ones may still be in transit and stay until their mail
   -- resolves them (M.AuctionSettled)
+  local now = time()
   if c.pending then
-    local now = time()
     for id, p in pairs(c.pending) do
       if now - (p.ts or c.pendingTs or 0) >= SALE_MAIL_DELAY then c.pending[id] = nil end
     end
     if next(c.pending) == nil then c.pending, c.pendingTs = nil, nil end
+  end
+  -- the same holds for an owner list read longer ago than the longest listing
+  -- runs: every auction on it has ended, and its gold or its item is in this
+  -- inbox (or was taken from it). Kept, it counts a returned item a second
+  -- time - next to the bags it went to, or to the alt it was mailed to.
+  if c.auctions and now - (c.auctionsTs or 0) >= AUCTION_MAX_RUN + SALE_MAIL_DELAY then
+    c.auctions = {}
   end
   if M.RequestUIRefresh then M.RequestUIRefresh() end   -- net worth reads this
 end
@@ -238,7 +269,12 @@ function M.CacheBags()
   -- A scan during a loading screen / logout can come back empty. Never let that
   -- wipe a previously captured snapshot of this character's bags (that bug made
   -- every offline character read as 0c after their last clean logout).
-  if next(scan) == nil and c.bags and next(c.bags) ~= nil then return end
+  -- Bags do empty out for real, though - the last item mailed to an alt, put
+  -- up for auction, banked or sold: an empty read at one of those windows,
+  -- with the backpack readable, is the truth. Kept back, the item counted
+  -- twice (here and where it went).
+  if next(scan) == nil and c.bags and next(c.bags) ~= nil
+     and not (emptiedHere() and NumSlots(0) > 0) then return end
   settleFromBags(c, c.bags, scan)
   c.bags = scan
   c.bagsTs = time()
@@ -525,6 +561,7 @@ ev:SetScript("OnEvent", function(_, event)
     bankOpen = true
     debounce("bank", cacheBankIfOpen, 0.3)
   elseif event == "BANKFRAME_CLOSED" then
+    if bankOpen then cacheBankOnClose() end
     bankOpen = false
   elseif event == "PLAYERBANKSLOTS_CHANGED" then
     debounce("bank", cacheBankIfOpen, 0.3)

@@ -93,6 +93,7 @@ local NAME_CHUNK  = 500               -- item lookups per frame
 local META_V      = 1                 -- layout of MidasUplinkDB.meta
 local SEEN_MAX    = 20                -- remembered markets
 local SOURCE      = "Midas Server"    -- import source name shown by Midas
+local RPPVP_SPLIT_TS = 1795426260     -- 23.11.2026 09:31 UTC: server keeps RP-PvP and PvP apart
 local PRICES_V    = 1
 local LEGACY      = "Midas_Uplink"    -- the old separate addon
 -- Midas day index: days since 2020-01-01 LOCAL midnight (M.C.SCAN_DAY_0)
@@ -520,23 +521,37 @@ end
 -- entry whose market key is this character's counts as well - the companion
 -- app cannot know the realm name before the first logout and then writes
 -- match = {} - but an entry found through the match list comes first.
+-- A Forever entry of ANOTHER market never counts, match list or not: the
+-- server read RP-PvP realms ("... RP PvP") as PvP realms until 23.11.2026, and
+-- the match list then names this realm on the PvP entry - another auction house.
 local function priceEntry()
   local P = MidasUplinkPrices
   if type(P) ~= "table" or P.v ~= PRICES_V or type(P.markets) ~= "table" then return nil end
   local mk = marketInfo()
   if not marketOK(mk) then return nil end
   local fkey = foreverKey(mk)
+  -- the server names the market after the realm name first: a ruleset the game
+  -- rules report on top of it (hardcore) must not turn that entry away
+  local nrs = fkey and M.RealmRuleset and M.RealmRuleset(mk.realm)
+  local nkey = nrs and foreverKey({ client = mk.client, region = mk.region, faction = mk.faction, ruleset = nrs })
+  -- PvP and RP-PvP prices of a file written before the server separated them
+  -- (23.11.2026) carry the other auction house: wait for the companion app's next file
+  local stamp = math.max(tonumber(P.checked) or 0, tonumber(P.written) or 0)
+  local mixed = stamp < RPPVP_SPLIT_TS
   local byKey
   for _, e in ipairs(P.markets) do
     if type(e) == "table" and type(e.items) == "table" and type(e.match) == "table"
        and tonumber(e.day0) and tonumber(e.ts) and (type(e.market) == "string" or type(e.market) == "number") then
+      local foreign = fkey and type(e.market) == "string" and e.market:sub(1, 8) == "forever/"
+        and (e.market ~= fkey and e.market ~= nkey
+             or mixed and (e.market:find("^forever/[^/]+/pvp/") or e.market:find("^forever/[^/]+/rppvp/")) ~= nil)
       for _, m in ipairs(e.match) do
-        if type(m) == "table" and m.client == mk.client and m.region == mk.region
+        if not foreign and type(m) == "table" and m.client == mk.client and m.region == mk.region
            and m.realm == mk.realm and m.faction == mk.faction then
           return e
         end
       end
-      if fkey and not byKey and e.market == fkey then byKey = e end
+      if fkey and not byKey and not foreign and e.market == fkey then byKey = e end
     end
   end
   return byKey

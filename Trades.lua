@@ -1035,7 +1035,17 @@ local function isOwnChar(name)
   local chars = M.db and M.db.chars
   if not (name and name ~= "" and chars) then return false end
   local short, realm = name:match("^(.-)%-(.+)$")
-  return chars[(short or name) .. "-" .. (realm or M.RealmName())] ~= nil
+  if chars[(short or name) .. "-" .. (realm or M.RealmName())] ~= nil then return true end
+  -- WoW Forever hides the realm (20.11.2026): Midas names it per character, so
+  -- another character of the account can be stored under another realm name.
+  -- Full names are unique per region there - the name alone settles it.
+  if not realm and M.SurnameClient and M.SurnameClient() and not (M.ClientRealm and M.ClientRealm()) then
+    local pre = name .. "-"
+    for ck in pairs(chars) do
+      if type(ck) == "string" and ck:sub(1, #pre) == pre then return true end
+    end
+  end
+  return false
 end
 M.IsOwnChar = isOwnChar
 

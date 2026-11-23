@@ -1307,7 +1307,7 @@ end
 local function sellDockFill()
   local f = sdk
   local items, list = {}, {}
-  for bag = 0, 4 do
+  for _, bag in ipairs(M.BagContainers()) do   -- reagent bag included (WoW Forever)
     for slot = 1, sdNumSlots(bag) do
       local id, count, bound = sdSlot(bag, slot)
       if id and not bound then

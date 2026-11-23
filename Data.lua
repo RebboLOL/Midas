@@ -601,6 +601,70 @@ function M.RepairZeroPrices()
   return n
 end
 
+-- One-shot per market (1.3.4): up to 23.11.2026 the server filed RP-PvP realms
+-- ("... RP PvP") under PvP, and so did Midas. Server prices loaded since then
+-- were wrong in both directions, and the import keeps the lowest price of a
+-- day, so a wrong low stays until it is removed:
+-- * RP-PvP realms got the prices of the PvP auction house: the last 90 days
+--   (what the server hands out) are cleaned - rows no scan wrote (no time) go,
+--   and a day low below the day's last scanned price returns to that price;
+-- * three PvP markets carried RP-PvP scans (exports before and after the move
+--   compared: EU Horde, US Horde, EU Alliance, days 4.-22.11.): there only
+--   those days are cleaned, and only lows more than 20% below the day's last
+--   scanned price return to it (a normal day keeps its own low).
+-- Only where server prices were loaded. The import marks are dropped, so the
+-- clean server prices (Datalink.lua: never from a Prices.lua written before
+-- the move) and Auctionator / aux rows come back. Returns the values changed.
+local SERVER_DAYS = 90
+local TAINTED_PVP = { ["EU Horde"] = true, ["US Horde"] = true, ["EU Alliance"] = true }
+local function dayOf(y, m, d)
+  return math.floor((time({ year = y, month = m, day = d, hour = 12 }) - M.C.SCAN_DAY_0) / 86400)
+end
+function M.RepairServerPrices()
+  if not (M.db and M.RealmRuleset and M.RealmName and M.MODERN_AH) then return 0 end
+  local rs = M.RealmRuleset(M.RealmName())
+  local from, to, gap
+  if rs == "RPPvP" then
+    from, to, gap = M.GetScanDay() - SERVER_DAYS, math.huge, 1
+  elseif rs == "PvP" then
+    local mk = M.MarketInfo and M.MarketInfo()
+    if not (mk and TAINTED_PVP[tostring(mk.region) .. " " .. tostring(mk.faction)]) then return 0 end
+    from, to, gap = dayOf(2026, 11, 3), dayOf(2026, 11, 23), 1.25
+  else
+    return 0
+  end
+  M.db.config = M.db.config or {}
+  local cfg, rk = M.db.config, M.RealmKey()
+  cfg.srvFix = cfg.srvFix or {}
+  if cfg.srvFix[rk] then return 0 end
+  cfg.srvFix[rk] = 1
+  local imp = cfg.impSrc
+  local srv = type(imp) == "table" and type(imp["Midas Server"]) == "table" and imp["Midas Server"][rk]
+  local store = M.db.realms and M.db.realms[rk]
+  if not srv or type(store) ~= "table" then return 0 end
+  local n = 0
+  for key, it in pairs(store) do
+    for day, rec in pairs(it) do
+      if type(day) == "number" and day >= from and day <= to and type(rec) == "table" then
+        if not rec.ts then
+          it[day] = nil; n = n + 1
+        elseif rec.cur and rec.low and rec.low * gap < rec.cur then
+          rec.low = rec.cur; n = n + 1
+        end
+      end
+    end
+    if next(it) == nil then store[key] = nil end
+  end
+  for _, per in pairs(imp) do
+    if type(per) == "table" then per[rk] = nil end
+  end
+  if n > 0 then
+    if M.DirtyAnalysis then M.DirtyAnalysis() end
+    M.Print(string.format("Server prices: midasmarket.app mixed RP-PvP and PvP auction houses until 23 November. Cleaned %d daily values of that time - your own scans stay, the corrected prices load again.", n))
+  end
+  return n
+end
+
 -- Remove days older than the horizon
 function M.Prune()
   local cutoff = M.GetScanDay() - M.C.PRUNE_DAYS

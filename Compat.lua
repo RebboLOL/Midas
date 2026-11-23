@@ -69,6 +69,24 @@ function M.AuctionRowPrice(listType, index)
   return buyout, nextBid, itemID, count
 end
 
+-- Carried containers: backpack + bag slots, plus the reagent bag where the
+-- client has one (Enum.BagIndex.ReagentBag, WoW Forever). On Classic Era that
+-- index would be the first bank bag, so it only counts when the client names it
+-- and no bank container uses it.
+function M.BagContainers()
+  local list = {}
+  local last = NUM_BAG_SLOTS or 4
+  for b = 0, last do list[#list + 1] = b end
+  local rb = Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag
+  if type(rb) == "number" and rb > last then
+    for _, b in ipairs(M.BankContainers()) do
+      if b == rb then return list end
+    end
+    list[#list + 1] = rb
+  end
+  return list
+end
+
 -- Bank containers: classic = main bank (-1) + bank bags; modern = bank tabs from
 -- Enum.BagIndex (CharacterBankTab_1..n), whatever this client defines.
 function M.BankContainers()
