@@ -87,6 +87,50 @@ local function pushIntra(istore, key, low, qty, now)
   while st[1] and (st[1].ts < icut or #st > 16) do table.remove(st, 1) end
 end
 
+-- A scan that does not look like this faction's auction house: far fewer items
+-- than your own scans of today/yesterday hold AND many prices well away from
+-- your newest ones. The thresholds match the server's quarantine (SPEC 4):
+-- ordinary scans stay at >= 0.92 of the size with at most 40 % such prices,
+-- neutral auction house scans came in at 0.57-0.65 with 53-54 %.
+local FOREIGN_SIZE, FOREIGN_FACTOR, FOREIGN_SHARE = 0.80, 1.5, 0.45
+local FOREIGN_MIN_REF, FOREIGN_MIN_COMMON = 500, 50
+
+function M.LooksForeignScan(acc)
+  local store = M.db and M.db.realms and M.db.realms[M.RealmKey()]
+  if type(store) ~= "table" or type(acc) ~= "table" then return false end
+  local today = M.GetScanDay()
+  local size, ref = { [today] = 0, [today - 1] = 0 }, {}
+  for key, it in pairs(store) do
+    if type(it) == "table" and type(key) == "string" and key:match("^%d+$") then
+      local newest
+      for d = today - 1, today do
+        local rec = it[d]
+        -- scanned rows only (a scan time, not a quick scan): imports carry none
+        if type(rec) == "table" and rec.ts and not rec.quick then
+          size[d] = size[d] + 1
+          if rec.cur then newest = rec.cur end
+        end
+      end
+      if newest then ref[key] = newest end
+    end
+  end
+  local refSize = math.max(size[today], size[today - 1])
+  if refSize < FOREIGN_MIN_REF then return false end
+  local n, common, off = 0, 0, 0
+  for itemID, a in pairs(acc) do
+    if type(a) == "table" and a.low then
+      n = n + 1
+      local cur = ref[tostring(itemID)]
+      if cur and cur > 0 then
+        common = common + 1
+        local low = unitPrice(a.low)
+        if low >= cur * FOREIGN_FACTOR or cur >= low * FOREIGN_FACTOR then off = off + 1 end
+      end
+    end
+  end
+  return n < refSize * FOREIGN_SIZE and common >= FOREIGN_MIN_COMMON and off > common * FOREIGN_SHARE
+end
+
 -- Commit a scan snapshot {itemID = {low=copper, qty=n}} into MidasDB.
 -- One bucket per scan day; idempotent merge (low = MIN, qty = MAX). Each record
 -- also carries cur (latest scan price, last-write-wins) and ts (scan timestamp,
@@ -100,13 +144,27 @@ end
 function M.CommitScan(acc, opts)
   if not M.db or type(acc) ~= "table" then return end
   local noDepth = opts and opts.noDepth and true or false
-  if M.AtNeutralAH() then
+  local neutral = M.ScanFromNeutralAH()
+  local foreign = not neutral and M.LooksForeignScan(acc)
+  if foreign then
+    -- the zone and the auctioneer said "faction AH", the scan says otherwise:
+    -- keep it apart, and the rest of this visit with it
+    neutral = true
+    M._visitNeutral = true
+    if M.AHOpen then M._ahNeutral = true end
+  end
+  if neutral then
     local day, now, items = M.GetScanDay(), time(), 0
     for itemID, a in pairs(acc) do
       if a.low then items = items + 1; noteNeutral(itemID, unitPrice(a.low), a.qty, day, now) end
     end
-    M.Print(string.format("Neutral auction house scan stored apart: %d items, day %s - your %s prices stay as they were.",
-      items, M.DayLabel(day), UnitFactionGroup("player") or "faction"))
+    if foreign then
+      M.Print(string.format("This scan does not look like your %s auction house (%d items, many prices unlike your last scans) - stored apart like a neutral auction house scan. If this was your faction's auction house, please type /midas market here and post the lines in #bug-reports.",
+        UnitFactionGroup("player") or "faction", items))
+    else
+      M.Print(string.format("Neutral auction house scan stored apart: %d items, day %s - your %s prices stay as they were.",
+        items, M.DayLabel(day), UnitFactionGroup("player") or "faction"))
+    end
     return
   end
   local day = M.GetScanDay()
@@ -194,7 +252,7 @@ end
 function M.CommitQuick(acc)
   if not M.db or type(acc) ~= "table" then return 0 end
   local day, now, items = M.GetScanDay(), time(), 0
-  if M.AtNeutralAH() then
+  if M.ScanFromNeutralAH() then
     for itemID, a in pairs(acc) do
       if a.low then items = items + 1; noteNeutral(itemID, unitPrice(a.low), a.qty, day, now) end
     end
@@ -282,7 +340,7 @@ function M.ObserveLive(itemID, unit, qty)
   unit = unitPrice(math.floor(unit))
   if type(qty) ~= "number" or qty < 0 then qty = nil end
   -- the neutral AH's own prices never become the current price
-  if M.AtNeutralAH() then noteNeutral(id, unit, qty, M.GetScanDay(), time()); return end
+  if M.ScanFromNeutralAH() then noteNeutral(id, unit, qty, M.GetScanDay(), time()); return end
   local rk = M.RealmKey()
   M.db.live = M.db.live or {}
   local ls = M.db.live[rk]; if not ls then ls = {}; M.db.live[rk] = ls end

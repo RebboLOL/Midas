@@ -22,11 +22,12 @@ local ADDON, M = ...
 -- apiece would fake hundreds of gold of net worth. Their market Fair only counts
 -- when YOUR OWN sales prove it (limited-stock vendor items really do flip above
 -- vendor price); otherwise they are worth what an NPC pays, like unpriced items.
+-- A merchant who sells above the AH (Black Market caps on WoW Forever) does not
+-- set the price: there the AH Fair counts as for any other item (M.VendorPins).
 function M.ItemValue(id)
   local series = M.GetSeries(tostring(id))
   if series then
-    local vend = M.db and M.db.vendor and M.db.vendor[tonumber(id) or id]
-    local trusted = (vend == nil)
+    local trusted = not (M.VendorPins and M.VendorPins(id))
     if not trusted and M.RealizedSell then
       local _, rn = M.RealizedSell(tostring(id))
       trusted = (rn or 0) >= (M.C.SELL_MIN_N or 3)

@@ -20,6 +20,22 @@ function M.VendorPrice(id)
   return M.db and M.db.vendor and M.db.vendor[id] or nil
 end
 
+-- A merchant only sets an item's price while the AH asks more than he does
+-- (thread, vials, throwing knives). Where the AH trades below him, the AH is
+-- the market and he is just a ceiling: the WoW Forever Black Market sells
+-- herbs, Black Lotus and Arcane Crystals for 50g without a limit, far above
+-- their auction price. No AH data: the merchant price stands.
+function M.VendorPins(id)
+  id = tonumber(id)
+  local v = id and M.VendorPrice(id)
+  if not v or v <= 0 then return false end
+  local s = M.GetSeries and M.GetSeries(tostring(id))
+  local m = s and M.Metrics and M.Metrics(s, tostring(id))
+  local fair = m and m.fair
+  if not fair or fair <= 0 then return true end
+  return fair > v
+end
+
 -- counted once and kept until this file writes to the table again (the craft
 -- cache asks on every lookup)
 local vendorN, vendorT

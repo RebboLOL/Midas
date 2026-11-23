@@ -489,7 +489,7 @@ local function setCard(b, n)
   b.qb:SetVertexColor(r, g, bl, 1)
   b.name:SetText(known(id) and nameOf(id) or "?")
   local kn = n.root and #(M.CraftKnownBy(id)) > 0
-  b.border = (n.root and C.accent) or (kn and C.green) or ((n.e and n.e.how == "make") and C.mint) or C.border
+  b.border = (kn and C.green) or (n.root and C.accent) or ((n.e and n.e.how == "make") and C.mint) or C.border
   b:SetBackdropColor(T.Unpack(n.dim and C.bg0 or C.bg1))
   b:SetBackdropBorderColor(T.Unpack(b.border))
   b:SetAlpha(n.dim and 0.6 or 1)
@@ -791,7 +791,7 @@ local FOOT_COLS = {
   { key = "make", x = 44,  w = 86,  head = "MAKE", tip = { "Make",
     "What the materials for ONE item cost - each material bought or made from its own materials, whichever is cheaper (Make or buy). A craft that makes several items is divided by its yield." } },
   { key = "buy",  x = 134, w = 86,  head = "BUY", tip = { "Buy",
-    "What one item costs to buy: a merchant's price if a vendor sells it, else the cheapest listing of your newest scan (FAIR row: its Fair price)." } },
+    "What one item costs to buy: the cheaper of a merchant's price and the cheapest listing of your newest scan (FAIR row: its Fair price)." } },
   { key = "save", x = 224, w = 128, head = "MAKING SAVES", tip = { "Making saves",
     "Buy minus make: what crafting one yourself saves over buying it, then that as a share of the buy price. Red = buying is the cheaper way." } },
   { key = "sell", x = 356, w = 118, head = "SELL AFTER CUT", tip = { "Sell after the cut",
@@ -1030,9 +1030,16 @@ local function topRow(i)
   return r
 end
 
+-- "Known recipes": Top crafts and the profession list show only what one of
+-- your characters can make (config.craftKnownOnly)
+local function knownOnly()
+  return (M.db and M.db.config and M.db.config.craftKnownOnly) == true
+end
+
 local function drawTop()
   local H = ct.top:GetHeight() or 380
-  local list = M.TopCrafts(ct.prof)
+  local known = knownOnly()
+  local list = M.TopCrafts(ct.prof, nil, known)
   local n = max(1, floor((H - 26 - 16) / TOP_ROWH))
   ct.topOff = max(0, min(ct.topOff, #list - n))
   for _, r in ipairs(ct.topRows) do r:Hide() end
@@ -1056,9 +1063,18 @@ local function drawTop()
     c[6].a:SetText(e.speed and string.format("~%.1f/day", e.speed) or "-"); c[6].a:SetTextColor(T.Unpack(C.sub))
     c[6].b:SetText("")
   end
+  if #list == 0 then
+    if not known then
+      ct.topEmpty:SetText("No craft with market data yet - scan the AH to price materials and products.")
+    elseif M.db.crafts and next(M.db.crafts) then   -- a profession window was read (enchants count too)
+      ct.topEmpty:SetText("None of the recipes your characters know has market data here yet.")
+    else
+      ct.topEmpty:SetText("No known recipes yet - open each profession window once on every character.")
+    end
+  end
   ct.topEmpty:SetShown(#list == 0)
-  ct.topCount:SetText(string.format("%d crafts with market data  \194\183  %s", #list,
-    ct.prof and M.ProfName(ct.prof) or "all professions"))
+  ct.topCount:SetText(string.format("%d crafts with market data  \194\183  %s%s", #list,
+    ct.prof and M.ProfName(ct.prof) or "all professions", known and "  \194\183  known recipes" or ""))
 end
 
 -- ===== Search ===============================================================
@@ -1149,9 +1165,12 @@ local function profPop()
   if ct.pop:IsShown() then ct.pop:Hide(); return end
   local Rx = M.Recipes()
   local count = {}
+  local kset = knownOnly() and (M.CraftKnownItems() or {}) or nil
   for _, id in ipairs(Rx.items) do
-    local p = Rx.byItem[id][1].prof
-    count[p] = (count[p] or 0) + 1
+    if not kset or kset[id] then
+      local p = Rx.byItem[id][1].prof
+      count[p] = (count[p] or 0) + 1
+    end
   end
   local list = { { id = nil, name = "All professions" } }
   for p in pairs(count) do list[#list + 1] = { id = p, name = M.ProfName(p), n = count[p] } end
@@ -1316,6 +1335,18 @@ function M.BuildCrafting(panel)
   ct.topEmpty = T.Text(ct.top, T.SIZE.body, "muted")
   ct.topEmpty:SetPoint("TOP", 0, -80)
   ct.topEmpty:SetText("No craft with market data yet - scan the AH to price materials and products.")
+  ct.knownCb = T.Checkbox(ct.top, "Known recipes", function(on)
+    M.db.config.craftKnownOnly = on and true or nil
+    ct.topOff = 0
+    if ct.pop then ct.pop:Hide() end
+    drawTop()
+  end)
+  ct.knownCb:SetPoint("BOTTOMLEFT", 0, 0)
+  if T.HelpTip then
+    T.HelpTip(ct.knownCb, "Known recipes", {
+      "On: Top crafts and the profession list show only what one of your characters can make.",
+      "Midas reads a character's recipes when you open its profession window, so open each one once." })
+  end
   ct.top:EnableMouseWheel(true)
   ct.top:SetScript("OnMouseWheel", function(_, d)
     ct.topOff = max(0, ct.topOff - d * 3)
@@ -1445,6 +1476,7 @@ function M.RefreshCrafting()
     return
   end
   ct.mob:SetChecked(not (M.db.config and M.db.config.craftBuyOnly))
+  ct.knownCb:SetChecked(knownOnly())
   ct.profBtn.text:SetText(ct.prof and M.ProfName(ct.prof) or "All professions")
   ct.back:SetAlpha((#ct.hist > 0 or ct.id) and 1 or 0.4)
   ct.fwdBtn:SetAlpha((#ct.fwd > 0) and 1 or 0.4)
@@ -1549,7 +1581,8 @@ function M.CraftPeek(owner, id)
     local nm = known(n.id) and nameOf(n.id) or "?"
     local made = n.e and n.e.how == "make"
     b:SetBackdropColor(T.Unpack(n.dim and C.bg0 or C.bg1))
-    b:SetBackdropBorderColor(T.Unpack((n.root and C.accent) or (made and C.mint) or C.border))
+    local kn = n.root and #(M.CraftKnownBy(n.id)) > 0
+    b:SetBackdropBorderColor(T.Unpack((kn and C.green) or (n.root and C.accent) or (made and C.mint) or C.border))
     b:SetAlpha(n.dim and 0.6 or 1)
     if n.root then
       b.name:SetText(nm)

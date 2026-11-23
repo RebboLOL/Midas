@@ -345,6 +345,8 @@ The **Crafting (beta)** tab knows every recipe of your game version – Classic 
 each from the game's own data tables, so changed Forever recipes show as they are there. Pick an item
 (search, **Top crafts**, the *Craft tree* chip on the Charts tab, any item's right-click menu or
 `/midas tree <item>`):
+- **Top crafts** – the start view lists the crafts with market data by profit now; **All professions** narrows
+  it to one profession, **Known recipes** below the list to what one of your characters can make.
 - **The tree** – the item sits on the right, its materials fan out to the left, level by level. Every card
   shows the quantity for one craft, what this step costs in total (big) and per unit (small), **now**
   (cheapest listing of the newest scan, Fair when nothing is listed) in gold and **Fair** in purple below
@@ -364,7 +366,7 @@ each from the game's own data tables, so changed Forever recipes show as they ar
   crafting one to sell earns after the 5% AH cut. Next to it the numbers behind that for one item – make,
   buy, making saves, sell after cut, profit each – now (gold) over Fair (purple), every column explained
   on hover. Below it how much the materials you make yourself cut the cost and which of your characters
-  knows the recipe (Midas reads it when you open a profession window).
+  knows the recipe (Midas reads it when you open a profession window); the item's card then has a green frame.
 - **Cards** – click a card to put that item at the root, right-click it for the item menu (chart, offer
   book, your trades, your stock, watchlist).
 - **Side column** – on top the item's other pages as chips (chart, offer book, your trades, your stock,

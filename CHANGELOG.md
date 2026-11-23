@@ -1,5 +1,10 @@
 # Midas – Changelog
 
+## 1.3.5 – 2026-11-23
+- **WoW Forever: Black Market prices are a cap, not the price.** Materials the Black Market sells above their auction house price now count at the auction house price in crafting, Top Picks and Net Worth.
+- **Neutral auction houses: scans stay apart.** A scan at Booty Bay, Gadgetzan or Everlook no longer ends up in your faction's prices.
+- **Crafting: Known recipes filter.** A tick box under Top crafts shows only what one of your characters can make, the profession list follows it.
+
 ## 1.3.4 – 2026-11-23
 - **WoW Forever: RP-PvP and PvP prices kept apart.** Fixed a bug where server prices of RP-PvP and PvP auction houses got mixed; prices loaded from the mixed data are cleaned once at login.
 - **Net Worth: reagent bag counts.** Items in the reagent bag are now part of your holdings and the sell helper.

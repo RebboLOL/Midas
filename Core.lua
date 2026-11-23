@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.3.4"
+M.version = "1.3.5"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -412,11 +412,33 @@ function M.InNeutralZone()
   return false
 end
 
--- true while a neutral auction house is open (zone looked up once per visit)
+-- Second sign: the auctioneer. Faction auction houses are run by Horde or
+-- Alliance NPCs, the neutral ones by the Steamwheedle Cartel (no faction group).
+-- nil = no auctioneer to ask (no "npc" unit). The zone check alone missed some
+-- neutral visits on WoW Forever (their scans landed in the Horde market, 22./23.11.2026).
+function M.NeutralAuctioneer()
+  if not (UnitExists and UnitFactionGroup and UnitExists("npc")) then return nil end
+  local fg = UnitFactionGroup("npc")
+  return fg ~= "Horde" and fg ~= "Alliance"
+end
+
+-- true while a neutral auction house is open (looked up once per visit)
 function M.AtNeutralAH()
   if not M.AHOpen then return false end
-  if M._ahNeutral == nil then M._ahNeutral = M.InNeutralZone() end
+  if M._ahNeutral == nil then
+    M._ahNeutral = M.InNeutralZone() or M.NeutralAuctioneer() == true
+    M._visitNeutral = M._ahNeutral
+  end
   return M._ahNeutral
+end
+
+-- Where a scan being stored comes from. With the AH open: this AH. With it
+-- closed: the last one visited - a quick or price scan cut short by closing the
+-- AH is stored right after AUCTION_HOUSE_CLOSED and belongs to that visit.
+function M.ScanFromNeutralAH()
+  if M.AtNeutralAH() then return true end
+  if M.AHOpen then return false end
+  return M._visitNeutral == true
 end
 
 function M.NeutralKey() return M.RealmName() .. " Neutral" end
@@ -523,6 +545,13 @@ function M.PrintMarketProbe()
   put("GetCurrentRegion", GetCurrentRegion and GetCurrentRegion())
   put("GetCurrentRegionName", GetCurrentRegionName and GetCurrentRegionName())
   put("WOW_PROJECT_ID", WOW_PROJECT_ID)
+  -- neutral auction house signs (only meaningful with the AH open)
+  local okMap, mapID = false, nil
+  if C_Map and C_Map.GetBestMapForUnit then okMap, mapID = pcall(C_Map.GetBestMapForUnit, "player") end
+  put("map", okMap and mapID or "none")
+  put("auctioneer faction", (UnitExists and UnitExists("npc")) and (UnitFactionGroup("npc") or "none") or "no auctioneer")
+  put("neutral AH", M.AHOpen and tostring(M.AtNeutralAH()) .. " (zone " .. tostring(M.InNeutralZone())
+    .. ", auctioneer " .. tostring(M.NeutralAuctioneer()) .. ")" or "AH closed")
   -- every zero-argument Is*/Get*/Has* getter the game-rules / seasons APIs offer
   for _, ns in ipairs({ "C_GameRules", "C_Seasons" }) do
     local t = _G[ns]
@@ -571,6 +600,26 @@ f:SetScript("OnEvent", function(_, event, ...)
     M.OnItemInfo(...)
   elseif event == "AUCTION_HOUSE_SHOW" or event == "AUCTION_HOUSE_CLOSED" then
     M._ahNeutral = nil
+    if event == "AUCTION_HOUSE_SHOW" then
+      -- decide right away, while the auctioneer is the "npc" unit; it holds for
+      -- this visit and for what is stored once it closes (M.ScanFromNeutralAH)
+      local zone, npc = M.InNeutralZone(), M.NeutralAuctioneer()
+      M._visitNeutral = zone or npc == true
+      M._ahNeutral = M._visitNeutral
+      -- the zone said "faction AH", the auctioneer "neutral": keep the last few
+      -- such visits for bug reports (why the zone check misses some)
+      if not zone and npc == true and M.db and M.db.config then
+        local okM, mapID = false, nil
+        if C_Map and C_Map.GetBestMapForUnit then okM, mapID = pcall(C_Map.GetBestMapForUnit, "player") end
+        local guid = UnitGUID and UnitGUID("npc")
+        local log = M.db.config.neutralProbe or {}
+        M.db.config.neutralProbe = log
+        log[#log + 1] = { ts = time(), map = okM and mapID or nil,
+          -- Creature-0-server-instance-zone-npcID-spawn
+          npc = type(guid) == "string" and tonumber(guid:match("^%a+%-%d+%-%d+%-%d+%-%d+%-(%d+)")) or nil }
+        while #log > 5 do table.remove(log, 1) end
+      end
+    end
     -- once per session: say why the Midas numbers don't follow this AH
     if event == "AUCTION_HOUSE_SHOW" and not M._neutralNoted then
       C_Timer.After(1, function()

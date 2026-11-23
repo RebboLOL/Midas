@@ -435,7 +435,7 @@ function M.CacheAuctions()
   -- a neutral AH lists only its own auctions: they must neither replace the
   -- cached faction listings (net worth, undercut alerts, your ask) nor set
   -- listed prices for the sell odds
-  if M.AtNeutralAH and M.AtNeutralAH() then return end
+  if M.ScanFromNeutralAH and M.ScanFromNeutralAH() then return end
   if M.MODERN_AH then return cacheAuctionsModern(c) end
   local n = (GetNumAuctionItems and GetNumAuctionItems("owner")) or 0
   local au = {}

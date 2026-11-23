@@ -75,7 +75,7 @@ local BIND_OK     = { [0] = true, [2] = true, [3] = true } -- none / BoE / BoU
 function M.IsTradeable(key)
   local id = BaseID(key)
   if not id then return false end          -- pets etc. are not on the Classic AH
-  if M.IsVendorItem and M.IsVendorItem(id) then return false end -- unlimited vendor supply
+  if M.VendorPins and M.VendorPins(id) then return false end -- unlimited vendor supply sets the price
   local cached = tradeCache[key]
   if cached ~= nil then return cached end
   local _, _, quality, _, _, _, _, _, _, _, _, classID, _, bindType = M.GetItemInfo(id)

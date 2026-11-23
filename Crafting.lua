@@ -165,19 +165,26 @@ local function metrics(id)
 end
 M.CraftMetrics = metrics
 
--- one unit to BUY, both ways: now, fair, source ("vendor" / "ah" / "est")
+-- one unit to BUY, both ways: now, fair, source ("vendor" / "ah" / "est").
+-- A merchant price only wins where it is the cheaper way to buy: the WoW
+-- Forever Black Market sells herbs and crystals at a 50g cap, far above the AH.
 function M.UnitPrice(id)
   id = tonumber(id)
   if not id then return nil end
   local v = M.VendorPrice and M.VendorPrice(id)
-  if v and v > 0 then return v, v, "vendor" end
+  if not (v and v > 0) then v = nil end
   local m = metrics(id)
   if m and ((m.fair and m.fair > 0) or (m.cur and m.cur > 0)) then
     local fair = (m.fair and m.fair > 0) and m.fair or m.cur
     local now = m.cur
     if not now or now <= 0 or (M.NotListed and M.NotListed(m)) then now = fair end
+    if v then
+      local n = math.min(now, v)
+      return n, math.min(fair, v), (n < v) and "ah" or "vendor"
+    end
     return now, fair, "ah"
   end
+  if v then return v, v, "vendor" end
   local est = M.Recipes().vend[id]
   if est then return est, est, "est" end
   return nil, nil, nil
@@ -319,7 +326,8 @@ function M.CraftProfit(id)
 end
 
 -- best crafts by profit (now) among items with market data: { {id, profit}, ... }
-function M.TopCrafts(prof, n)
+-- known = true: only items one of your characters can make
+function M.TopCrafts(prof, n, known)
   fresh()
   local key = "top:" .. tostring(prof) .. ":" .. tostring(mobOn())
   local list = cache[key]
@@ -341,6 +349,14 @@ function M.TopCrafts(prof, n)
       return a.id < b.id
     end)
     cache[key] = list
+  end
+  -- filtered after the cache: recipes learned meanwhile count at once
+  if known then
+    local set, f = M.CraftKnownItems() or {}, {}
+    for _, e in ipairs(list) do
+      if set[e.id] then f[#f + 1] = e end
+    end
+    list = f
   end
   if not n or n >= #list then return list end
   local out = {}
@@ -557,6 +573,19 @@ function M.CraftKnownBy(id, enchant)
   end
   table.sort(out)
   return out
+end
+
+-- every item one of your characters can make: { [itemID] = true }, nil while
+-- no profession window has been read yet
+function M.CraftKnownItems()
+  local set, any = {}, false
+  for _, c in pairs((M.db and M.db.crafts) or {}) do
+    for id in pairs(c.items or {}) do
+      local n = tonumber(id)
+      if n then set[n] = true; any = true end
+    end
+  end
+  return any and set or nil
 end
 
 do
