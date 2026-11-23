@@ -1035,7 +1035,7 @@ local function isOwnChar(name)
   local chars = M.db and M.db.chars
   if not (name and name ~= "" and chars) then return false end
   local short, realm = name:match("^(.-)%-(.+)$")
-  return chars[(short or name) .. "-" .. (realm or GetRealmName() or "?")] ~= nil
+  return chars[(short or name) .. "-" .. (realm or M.RealmName())] ~= nil
 end
 M.IsOwnChar = isOwnChar
 

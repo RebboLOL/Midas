@@ -53,7 +53,10 @@ local function dec36(s) return s and tonumber(s, 36) or nil end
 -- Deliberately NOT M.RealmKey(): that borrows Auctionator's realm key when present,
 -- so a user with Auctionator and one without would hash different strings and
 -- silently reject each other's messages. Normalised (lowercase, no spaces) so a
--- stray space or case difference can never split a realm.
+-- stray space or case difference can never split a realm. Also not
+-- M.RealmName(): WoW Forever answers "" since 20.11.2026, on every client and
+-- version alike, so the scope there is the faction alone - a realm name Midas
+-- keeps itself could differ between users.
 local function commScope()
   local realm = GetRealmName() or "?"
   local fac = UnitFactionGroup("player") or "?"

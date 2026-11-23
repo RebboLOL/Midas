@@ -23,6 +23,17 @@ local ARROW = "  \226\128\186"
 local CUT = 0.95                          -- the AH keeps 5% of a sale
 local HIT_FRESH = 24 * 3600               -- a fired alert counts as news this long
 local SZ_HERO, SZ_VALUE, SZ_ROW, SZ_LABEL = 28, 17, 12, 11
+-- TRADING card geometry by text size (Settings > Text size); 100 %: the
+-- label/figure/note blocks put their note at -13-20, the trade rows start at
+-- 84 and come every 19 px
+local function trGeo()
+  local Ts = M.Theme.Scaled
+  local vy = -max(13, math.ceil(Ts(SZ_LABEL) * 1.15))
+  local sy = vy - max(20, math.ceil(Ts(SZ_VALUE) * 1.15))
+  local top = max(84, 32 - sy + math.ceil(Ts(SZ_LABEL) * 1.2) + 4)
+  local pitch = max(19, math.ceil(Ts(SZ_ROW) * 1.55))
+  return vy, sy, top, pitch
+end
 
 -- ===== small helpers ==========================================================
 local function colorize(fs, rgb, a) fs:SetTextColor(rgb[1], rgb[2], rgb[3], a or 1) end
@@ -645,6 +656,7 @@ do
     local ul = card:CreateTexture(nil, "ARTWORK")
     ul:SetColorTexture(ur[1], ur[2], ur[3], 0.45)
     ul:SetHeight(2); ul:SetPoint("TOPLEFT", 12, -26); ul:SetWidth(head:GetStringWidth() + 2)
+    T.OnFontScale(function() ul:SetWidth(head:GetStringWidth() + 2) end)
     card.head = head
     if tabName then
       local b = CreateFrame("Button", nil, card)
@@ -1229,9 +1241,19 @@ function M.BuildHome(panel)
   local function block(parent)
     local b = CreateFrame("Button", nil, parent)
     b:SetFrameLevel(parent:GetFrameLevel() + 3)
-    b.lbl = T.Text(b, SZ_LABEL, "muted", T.FONT_MED); b.lbl:SetPoint("TOPLEFT", 0, 0)
-    b.val = T.Text(b, SZ_VALUE, "text", T.FONT_SEMI); b.val:SetPoint("TOPLEFT", 0, -13)
-    b.sub = T.Text(b, SZ_LABEL, "sub"); b.sub:SetPoint("TOPLEFT", 0, -33)
+    b.lbl = T.Text(b, SZ_LABEL, "muted", T.FONT_MED); b.lbl:SetJustifyH("LEFT")
+    b.val = T.Text(b, SZ_VALUE, "text", T.FONT_SEMI)
+    b.sub = T.Text(b, SZ_LABEL, "sub"); b.sub:SetJustifyH("LEFT")
+    -- label / figure / note stacked by text size (100 %: at 0, -13, -33) and
+    -- held to the block's width, so the two blocks never run into each other
+    local function lay()
+      local vy, sy = trGeo()
+      b.lbl:ClearAllPoints(); b.lbl:SetPoint("TOPLEFT", 0, 0); b.lbl:SetPoint("TOPRIGHT", 0, 0)
+      b.val:ClearAllPoints(); b.val:SetPoint("TOPLEFT", 0, vy)
+      b.sub:ClearAllPoints(); b.sub:SetPoint("TOPLEFT", 0, sy); b.sub:SetPoint("TOPRIGHT", 0, sy)
+    end
+    lay()
+    T.OnFontScale(lay)
     b:SetScript("OnLeave", tipClose)
     b:SetScript("OnClick", function() M.SelectTab(M.TAB.Trades) end)
     return b
@@ -1529,14 +1551,15 @@ local function refreshTrading(h, mo)
     h.tr.barBg:Hide(); h.tr.bar:Hide()
   end
   -- latest trades
-  local nRows = max(1, floor((g.r1 - 84 - 6) / 19))
+  local _, _, rTop, rP = trGeo()
+  local nRows = max(1, floor((g.r1 - rTop - 6) / rP))
   local list = td.trades
   local rowW = g.trW - 2 * PAD
   for i = 1, max(nRows, #h.tr.rows) do
     local e = (i <= nRows) and list[i] or nil
     if i <= nRows then
       local r = trRow(h, i)
-      place(r, PAD, 84 + (i - 1) * 19, rowW, 18)
+      place(r, PAD, rTop + (i - 1) * rP, rowW, rP - 1)
       -- a narrow card gives the item name the room of the date column
       local showDate = rowW >= 330
       r.pill:ClearAllPoints(); r.pill:SetPoint("LEFT", showDate and 44 or 0, 0)
@@ -1563,7 +1586,7 @@ local function refreshTrading(h, mo)
     end
   end
   h.tr.empty:ClearAllPoints()
-  h.tr.empty:SetPoint("TOPLEFT", h.cards.trading, "TOPLEFT", PAD, -86); h.tr.empty:SetWidth(rowW)
+  h.tr.empty:SetPoint("TOPLEFT", h.cards.trading, "TOPLEFT", PAD, -(rTop + 2)); h.tr.empty:SetWidth(rowW)
   h.tr.empty:SetShown(#list == 0)
 end
 
@@ -1994,7 +2017,8 @@ function M.RefreshHome()
   layout(h)
   local g = h.geo
   local rows = max(1, floor((g.r2 - HEAD - 26) / MV_ROWH))
-  local trades = max(1, floor((g.r1 - 84 - 6) / 19))
+  local _, _, rTop, rP = trGeo()
+  local trades = max(1, floor((g.r1 - rTop - 6) / rP))
   local mo = M.HomeModel({ rows = rows, trades = trades, unwatched = h.unwatched,
                           tradeDays = (g.trW - 2 * PAD) >= 330 })
   h.model = mo

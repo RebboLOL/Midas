@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.3.2"
+M.version = "1.3.3"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -208,13 +208,176 @@ function M.DayLabel(day) -- e.g. "Jun 05"
   return date("%b %d", day * 86400 + M.C.SCAN_DAY_0)
 end
 
+-- ===== Realm name ============================================================
+-- WoW Forever hides the realm since its hotfix of 20.11.2026: GetRealmName()
+-- and GetNormalizedRealmName() answer "" and GetRealmID() 0. Every store keys
+-- by realm, so Midas names it itself: the client's answer while there is one
+-- (kept per character in MidasDB.realmSeen, by player GUID), else the realm
+-- this character is stored under, else the realm of its ruleset the account
+-- played on last (one auction house per ruleset; a Forever beta realm may hold
+-- more characters, but not the latest). Without any of these: "Forever
+-- <region> <ruleset>", which ends in its ruleset like the client's own names
+-- ("CAMWOW EU5 Realm 7 PvE"). The character's entry, stored under that realm
+-- at login, keeps the answer the same from then on.
+local function secret(v) return issecretvalue and issecretvalue(v) end
+
+-- the realm the client names, or nil when it names none
+function M.ClientRealm()
+  local r = GetRealmName and GetRealmName()
+  if type(r) ~= "string" or secret(r) or not r:find("%S") then return nil end
+  return r
+end
+
+-- the ruleset word a realm name ends in, any case ("... PvE", "... PVP"), or nil
+local RULESET_WORDS = { pve = "PvE", pvp = "PvP", rp = "RP", rppvp = "RPPvP", hardcore = "Hardcore" }
+function M.RealmRuleset(realm)
+  local tail = type(realm) == "string" and realm:match("(%a+)%s*$")
+  return tail and RULESET_WORDS[tail:lower()] or nil
+end
+
+-- the ruleset from the game rules (WoW Forever), nil when the client cannot tell
+local function rulesRuleset()
+  local GR, E = C_GameRules, Enum and Enum.GameRule
+  if not (GR and GR.IsGameRuleActive and E) then return nil end
+  local function on(rule)
+    if rule == nil then return nil end
+    local ok, v = pcall(GR.IsGameRuleActive, rule)
+    if ok and not secret(v) and type(v) == "boolean" then return v end
+  end
+  if on(E.HardcoreRuleset) then return "Hardcore" end
+  local pvp, rp = on(E.PvPRuleset), on(E.RPRuleset)
+  if pvp == nil or rp == nil then return nil end
+  if rp then return pvp and "RPPvP" or "RP" end
+  return pvp and "PvP" or "PvE"
+end
+
+local REGIONS = { "US", "KR", "EU", "TW", "CN" }
+local function regionCode()
+  return GetCurrentRegion and REGIONS[GetCurrentRegion()] or "?"
+end
+
+local function playerGUID()
+  local g = UnitGUID and UnitGUID("player")
+  if type(g) == "string" and not secret(g) and g ~= "" then return g end
+end
+
+-- realm part of a stored character key "<name>-<realm>" ("" in the keys
+-- Midas 1.3.2 wrote while the realm was hidden), nil for anything else
+local function keyRealm(ck)
+  return type(ck) == "string" and ck:match("^[^%-]*%-(.*)$") or nil
+end
+M.KeyRealm = keyRealm
+
+-- newest bag, bank, mail or auction reading of a stored character (0 = none)
+local CHAR_TS = { "bagsTs", "bankTs", "mailTs", "auctionsTs", "pendingTs" }
+local function charLast(c)
+  local t = 0
+  if type(c) == "table" then
+    for _, f in ipairs(CHAR_TS) do t = math.max(t, tonumber(c[f]) or 0) end
+  end
+  return t
+end
+
+-- the realm a character is stored under ("<full name>-<realm>"); with several
+-- (an old entry of the same name on a Forever beta realm), the one of its
+-- ruleset, then the one it played on last
+local function storedRealm(chars, full, ruleset)
+  local pre, cands = full .. "-", {}
+  for ck, c in pairs(chars) do
+    if type(ck) == "string" and #ck > #pre and ck:sub(1, #pre) == pre then
+      local r = ck:sub(#pre + 1)
+      if r:find("%S") then cands[#cands + 1] = { r = r, t = charLast(c) } end
+    end
+  end
+  if #cands <= 1 then return cands[1] and cands[1].r end
+  if ruleset then
+    local keep = {}
+    for _, x in ipairs(cands) do if M.RealmRuleset(x.r) == ruleset then keep[#keep + 1] = x end end
+    if #keep > 0 then cands = keep end
+  end
+  local best, bt
+  for _, x in ipairs(cands) do
+    if not best or x.t > bt or (x.t == bt and x.r < best) then best, bt = x.r, x.t end
+  end
+  return best
+end
+M.StoredRealm = storedRealm
+
+-- the realm of this ruleset the account played on last: the newest reading of
+-- its characters or offer-book scan there; ties go to the realm with more
+-- characters. A Forever beta realm can hold the most characters, never the
+-- latest activity.
+local function realmOfRuleset(db, chars, ruleset)
+  if not ruleset then return nil end
+  local last, count = {}, {}
+  for ck, c in pairs(chars) do
+    local r = keyRealm(ck)
+    if r and r:find("%S") and M.RealmRuleset(r) == ruleset then
+      count[r] = (count[r] or 0) + 1
+      last[r] = math.max(last[r] or 0, charLast(c))
+    end
+  end
+  local depth = db and type(db.depth) == "table" and db.depth
+  if depth then
+    for key, d in pairs(depth) do
+      local r = type(key) == "string" and key:match("^(.-) %a+$")   -- "<realm> <Faction>"
+      if r and last[r] and type(d) == "table" then last[r] = math.max(last[r], tonumber(d.ts) or 0) end
+    end
+  end
+  local best, bt, bn
+  for r, t in pairs(last) do
+    local n = count[r]
+    if not best or t > bt or (t == bt and (n > bn or (n == bn and r < best))) then best, bt, bn = r, t, n end
+  end
+  return best
+end
+
+-- The realm every store keys by. Second value: where the name comes from -
+-- "client", "kept" (the client's last answer), "char" (own entry),
+-- "ruleset" or "new".
+local realmCache, realmKept
+function M.RealmName()
+  local r = M.ClientRealm()
+  local db = type(MidasDB) == "table" and MidasDB or nil
+  if r then
+    if db and r ~= realmKept then
+      local g = playerGUID()
+      if g then
+        if type(db.realmSeen) ~= "table" then db.realmSeen = {} end
+        db.realmSeen[g] = r
+        realmKept = r
+      end
+    end
+    return r, "client"
+  end
+  if realmCache then return realmCache[1], realmCache[2] end
+  local g = playerGUID()
+  local kept = db and g and type(db.realmSeen) == "table" and db.realmSeen[g]
+  local name, src
+  if type(kept) == "string" and kept:find("%S") then
+    name, src = kept, "kept"
+  else
+    local chars = db and type(db.chars) == "table" and db.chars or {}
+    local rs = rulesRuleset()
+    name, src = storedRealm(chars, M.PlayerFullName(), rs), "char"
+    if not name then name, src = realmOfRuleset(db, chars, rs), "ruleset" end
+    if not name then
+      name = (M.CLIENT_FLAVOR == "forever" and "Forever " or "Classic ") .. regionCode() .. (rs and (" " .. rs) or "")
+      src = "new"
+    end
+  end
+  -- answered once per session (the saved data is there from login on)
+  if db then realmCache = { name, src } end
+  return name, src
+end
+
 -- Current realm key: realm + faction (every faction has its own auction house).
--- Always built from the client's own answers. Up to 1.2.25 a loaded Auctionator
+-- Always built from Midas' own realm name (M.RealmName). Up to 1.2.25 a loaded Auctionator
 -- supplied the key instead ("PvP" on WoW Forever), which split one account's
 -- characters as soon as Auctionator was on for some and off for others -
 -- M.AdoptBorrowedKeys moves data stored under such a key home.
 function M.RealmKey()
-  local realm = GetRealmName() or "Realm"
+  local realm = M.RealmName()
   local faction = UnitFactionGroup("player")
   if faction and faction ~= "Neutral" then
     return realm .. " " .. faction
@@ -250,7 +413,7 @@ function M.AtNeutralAH()
   return M._ahNeutral
 end
 
-function M.NeutralKey() return (GetRealmName() or "Realm") .. " Neutral" end
+function M.NeutralKey() return M.RealmName() .. " Neutral" end
 function M.IsNeutralKey(k) return type(k) == "string" and k:sub(-8) == " Neutral" end
 
 -- An auction sale that paid the neutral 15% cut (the faction AH keeps 5%).
@@ -263,7 +426,6 @@ end
 -- SECOND value (Era: the realm, nil for yourself). UnitNameUnmodified ignores
 -- the "show my surname" display setting. Returns the full name and, when a
 -- surname was found, the first name alone.
-local function secret(v) return issecretvalue and issecretvalue(v) end
 function M.PlayerFullName()
   local name, sur = (UnitNameUnmodified or UnitName)("player")
   if type(name) ~= "string" or name == "" or secret(name) then
@@ -290,7 +452,7 @@ end
 -- reuses that key (the 1.2.4 beta-client fork guard).
 function M.CharKey()
   local name, first = M.PlayerFullName()
-  local realm = GetRealmName() or "?"
+  local realm = M.RealmName()
   local exact = name .. "-" .. realm
   local chars = M.db and M.db.chars
   if not chars or chars[exact] or first then return exact end
@@ -309,23 +471,19 @@ end
 
 -- Where the scanned market lives, for exports/uploads: Era markets are per
 -- realm + faction; Forever mega-realms are grouped by region + ruleset later.
-local REGIONS = { "US", "KR", "EU", "TW", "CN" }
 function M.MarketInfo()
-  local region = GetCurrentRegion and REGIONS[GetCurrentRegion()] or "?"
-  local ruleset = "Normal"
-  -- Forever realm names end in their ruleset ("CAMWOW EU5 Realm 7 PvE");
-  -- no game-rules API reports it (probe 12.11.2026: IsStandard only)
-  local tail = (GetRealmName() or ""):match("(%a+)$")
-  local RULESETS = { PvE = true, PvP = true, RP = true, RPPvP = true, Hardcore = true }
-  if tail and RULESETS[tail] then ruleset = tail end
+  local realm, src = M.RealmName()
+  -- Forever realm names end in their ruleset ("CAMWOW EU5 Realm 7 PvE"); while
+  -- the client hides the realm (20.11.2026) the game rules can tell it too
+  local ruleset = M.RealmRuleset(realm) or (src ~= "client" and rulesRuleset()) or "Normal"
   if C_GameRules and C_GameRules.IsHardcoreActive then
     local ok, hc = pcall(C_GameRules.IsHardcoreActive)
     if ok and hc then ruleset = "Hardcore" end
   end
   return {
     client = M.MODERN_AH and "forever" or "era",
-    region = region,
-    realm = GetRealmName() or "?",
+    region = regionCode(),
+    realm = realm,
     faction = UnitFactionGroup("player") or "Neutral",
     ruleset = ruleset,
   }
@@ -341,7 +499,7 @@ function M.HCMode()
     local ok, hc = pcall(C_GameRules.IsHardcoreActive)
     if ok and hc then return true end
   end
-  return ((GetRealmName and GetRealmName() or ""):match("(%a+)$")) == "Hardcore"
+  return M.RealmRuleset(M.RealmName()) == "Hardcore"
 end
 
 -- /midas market: what Midas detects as this character's market, plus the raw
@@ -353,6 +511,9 @@ function M.PrintMarketProbe()
   local function put(k, v) raw[#raw + 1] = { k, tostring(v) } end
   put("GetRealmName", GetRealmName and GetRealmName())
   put("GetNormalizedRealmName", GetNormalizedRealmName and GetNormalizedRealmName())
+  local rn, rsrc = M.RealmName()
+  put("Midas realm", rn .. " (" .. rsrc .. ")")
+  put("ruleset from game rules", rulesRuleset())
   put("GetCurrentRegion", GetCurrentRegion and GetCurrentRegion())
   put("GetCurrentRegionName", GetCurrentRegionName and GetCurrentRegionName())
   put("WOW_PROJECT_ID", WOW_PROJECT_ID)
@@ -462,6 +623,12 @@ function M.OnLogin()
   -- send pump keeps it under the client throttle. "/midas vicinity off" opts out.
   if MidasDB.config.vicinity == nil then MidasDB.config.vicinity = "yell" end
   M.db = MidasDB
+  -- text size (Settings): before anything builds its font strings
+  if M.Theme and M.Theme.SetFontScale then M.Theme.SetFontScale(MidasDB.config.fontScale or 1) end
+  -- WoW Forever hides the realm since 20.11.2026: what 1.3.2 filed under an
+  -- empty realm moves to the realm Midas names now, before anything else writes
+  if M.AdoptHiddenRealm then M.AdoptHiddenRealm() end
+  MidasDB.realmOf = nil   -- the first 1.3.3 test build kept guessed realms here
   if M.NWMigrate then M.NWMigrate() end   -- net worth history per realm+faction (1.2.1)
   if M.MergeForkedChars then M.MergeForkedChars() end   -- Forever short-name fork (1.2.4)
   if M.MergeImport then M.MergeImport() end
@@ -642,16 +809,20 @@ end
 function M.MergeRealm(old)
   local db = MidasDB
   local new = M.RealmKey()
-  if not old or old == "" then return false, "same" end
-  -- accept any case; resolve against the keys that actually exist
+  if not old or not old:find("%S") then return false, "same" end
+  -- accept any case and outer spaces (the empty-realm keys of 1.3.2 on WoW
+  -- Forever, " Alliance", are typed as "Alliance"); resolve against the keys
+  -- that actually exist
+  local want = old:lower():match("^%s*(.-)%s*$")
   local function resolve(tbl)
-    if not tbl then return nil end
+    if type(tbl) ~= "table" then return nil end
     if tbl[old] then return old end
     for k in pairs(tbl) do
-      if type(k) == "string" and k:lower() == old:lower() then return k end
+      if type(k) == "string" and k:lower():match("^%s*(.-)%s*$") == want then return k end
     end
   end
   local oldKey = resolve(db.realms) or resolve(db.nw) or resolve(db.depth) or resolve(db.alerts)
+    or (type(db.ledger) == "table" and resolve(db.ledger.d))
   if not oldKey then return false, "notfound" end
   if oldKey == new then return false, "same" end
   if M.IsNeutralKey(oldKey) then return false, "neutral" end   -- kept apart on purpose
@@ -695,7 +866,19 @@ function M.MergeRealm(old)
     db.nw[oldKey] = nil
   end
   if db.config and db.config.nwHome == oldKey then db.config.nwHome = new end
-  -- ledger: days and months per character; the new key's own bookings win
+  -- ledger: days and months per character; a character booked under both
+  -- keys in one span (the day a realm went hidden) gets both bookings summed
+  local function addTo(dst, src)
+    for k, v in pairs(src) do
+      if type(v) == "table" then
+        if type(dst[k]) ~= "table" then dst[k] = {} end
+        addTo(dst[k], v)
+      elseif type(v) == "number" then
+        local nv = (tonumber(dst[k]) or 0) + v
+        if nv == 0 then dst[k] = nil else dst[k] = nv end
+      end
+    end
+  end
   local L = db.ledger
   if type(L) == "table" then
     for _, fld in ipairs({ "d", "mo" }) do
@@ -706,20 +889,33 @@ function M.MergeRealm(old)
           local d2 = dst[span]
           if d2 == nil then dst[span] = chars
           elseif type(chars) == "table" and type(d2) == "table" then
-            for ck, rec in pairs(chars) do if d2[ck] == nil then d2[ck] = rec end end
+            for ck, rec in pairs(chars) do
+              if d2[ck] == nil then d2[ck] = rec
+              elseif type(rec) == "table" and type(d2[ck]) == "table" then addTo(d2[ck], rec) end
+            end
           end
         end
         t[oldKey] = nil
       end
     end
   end
-  -- sell-odds calibration and live prices: move where the new key has none
+  -- sell-odds calibration: move where the new key has none; live prices: the
+  -- newer reading of an item stays
   if db.trade and type(db.trade.curve) == "table" and db.trade.curve[oldKey] then
     if db.trade.curve[new] == nil then db.trade.curve[new] = db.trade.curve[oldKey] end
     db.trade.curve[oldKey] = nil
   end
   if type(db.live) == "table" and db.live[oldKey] then
-    if db.live[new] == nil then db.live[new] = db.live[oldKey] end
+    local o, n = db.live[oldKey], db.live[new]
+    if n == nil then db.live[new] = o
+    elseif type(o) == "table" and type(n) == "table" then
+      for key, v in pairs(o) do
+        local w = n[key]
+        if w == nil or (type(v) == "table" and type(w) == "table" and (tonumber(v.ts) or 0) > (tonumber(w.ts) or 0)) then
+          n[key] = v
+        end
+      end
+    end
     db.live[oldKey] = nil
   end
   -- alerts: keep the new realm's own limits, adopt the rest
@@ -731,10 +927,15 @@ function M.MergeRealm(old)
     db.alerts[oldKey] = nil
   end
   -- short-lived per-realm tails: move only where the new key has nothing yet
+  -- (the offer book: the newer scan stays)
   for _, fld in ipairs({ "nwi", "intra", "depth" }) do
     local t = db[fld]
     if t and t[oldKey] then
-      if t[new] == nil then t[new] = t[oldKey] end
+      local o, n = t[oldKey], t[new]
+      if n == nil or (fld == "depth" and type(o) == "table" and type(n) == "table"
+                      and (tonumber(o.ts) or 0) > (tonumber(n.ts) or 0)) then
+        t[new] = o
+      end
       t[oldKey] = nil
     end
   end
@@ -758,8 +959,8 @@ end
 -- another realm or of the other faction - that data cannot be told apart.
 function M.AdoptBorrowedKeys()
   local db = MidasDB
-  if not (db and type(db.chars) == "table" and GetRealmName and UnitFactionGroup) then return 0 end
-  local realm, faction = GetRealmName(), UnitFactionGroup("player")
+  if not (db and type(db.chars) == "table" and UnitFactionGroup) then return 0 end
+  local realm, faction = M.RealmName(), UnitFactionGroup("player")
   if not realm or not faction or faction == "Neutral" then return 0 end
   local own = M.RealmKey()
   local suffix = "-" .. realm
@@ -767,7 +968,8 @@ function M.AdoptBorrowedKeys()
   local cand = {}
   for ck, c in pairs(db.chars) do
     local s = type(c) == "table" and c.scope
-    if type(s) == "string" and here(ck) and s ~= own
+    -- keys of an empty realm (" Alliance", 1.3.2 on WoW Forever): M.AdoptHiddenRealm
+    if type(s) == "string" and here(ck) and s ~= own and s:find("^%S")
        and s ~= realm .. " Alliance" and s ~= realm .. " Horde" and not M.IsNeutralKey(s) then
       cand[s] = true
     end
@@ -803,6 +1005,70 @@ function M.AdoptBorrowedKeys()
     end
   end
   return n
+end
+
+-- ===== Hidden realm (WoW Forever, 20.11.2026) ================================
+-- Up to 1.3.2 Midas filed everything after the hotfix under an empty realm:
+-- markets " Alliance" / " Horde", characters "<name>-". At login, while the
+-- client hides the realm: every such character entry moves to its realm (this
+-- character's to M.RealmName, any other one to the realm its own stored entry
+-- names, the latest played of several) and this faction's market to
+-- M.RealmKey() - unless a character of another realm wrote into it too: a
+-- chat note then names the manual merge.
+function M.AdoptHiddenRealm()
+  local db = MidasDB
+  if M.ClientRealm() or not (db and type(db.chars) == "table" and M.FoldChars) then return end
+  local realm = M.RealmName()
+  local chars = db.chars
+  local mine = M.PlayerFullName() .. "-"
+  local moves, n = {}, 0
+  for ck, c in pairs(chars) do
+    if type(c) == "table" and keyRealm(ck) == "" then
+      local r = (ck == mine) and realm or storedRealm(chars, ck:sub(1, -2), nil)
+      if r then moves[ck] = ck .. r; n = n + 1 end
+    end
+  end
+  -- the empty-realm entry is the live one: its balances win
+  if n > 0 then
+    M.FoldChars(moves, false, true)
+    M.Print(string.format("WoW Forever no longer names the realm: %d character entr%s moved back to %s realm.",
+      n, n == 1 and "y" or "ies", n == 1 and "its" or "their"))
+  end
+  local faction = UnitFactionGroup and UnitFactionGroup("player")
+  if not faction or faction == "Neutral" then return end
+  local old, own = " " .. faction, M.RealmKey()
+  if old == own then return end
+  -- characters of another realm counted under the empty key: its data cannot be told apart
+  local other
+  for ck, c in pairs(chars) do
+    local r = keyRealm(ck)
+    if type(c) == "table" and c.scope == old and r and r ~= "" and r ~= realm then other = r; break end
+  end
+  -- every character of a known realm counts under its own key again (the fold
+  -- above handed the empty key on to it)
+  for ck, c in pairs(chars) do
+    local r = keyRealm(ck)
+    if type(c) == "table" and c.scope == old and r and r ~= "" then c.scope = r .. " " .. faction end
+  end
+  if not other then
+    local ok, info = M.MergeRealm(old)
+    if ok then
+      M.Print(string.format('WoW Forever no longer names the realm: what Midas stored since then moved back to "%s" - %d items, %d trade entries, %d net-worth days.',
+        own, info.items or 0, info.trades or 0, info.days or 0))
+    end
+  else
+    db.config = db.config or {}
+    db.config.hiddenHint = db.config.hiddenHint or {}
+    local any = false
+    for _, fld in ipairs({ "realms", "nw", "depth", "alerts" }) do
+      if type(db[fld]) == "table" and db[fld][old] ~= nil then any = true; break end
+    end
+    if any and not db.config.hiddenHint[old] then
+      db.config.hiddenHint[old] = 1
+      M.Print(string.format('Data from the days WoW Forever stopped naming the realm is stored under "%s" for characters of several realms ("%s" too). "/midas realmmerge %s" moves it to "%s" - run it on a character of the realm it belongs to.',
+        faction, other, faction, own))
+    end
+  end
 end
 
 -- Slash ----------------------------------------------------------------------

@@ -210,7 +210,7 @@ function M.ClaimShortChar()
   if not (M.PlayerFullName and M.db and M.db.chars) then return end
   local full, first = M.PlayerFullName()
   if not first then return end
-  local realm = GetRealmName() or "?"
+  local realm = M.RealmName()
   local fk, sk = full .. "-" .. realm, first .. "-" .. realm
   local sc = M.db.chars[sk]
   if fk == sk or type(sc) ~= "table" then return end
@@ -223,7 +223,8 @@ end
 -- recipes and daily snapshots follow. keepTarget = the TARGET is the live
 -- entry (its balances win; on days where both were counted the source was
 -- the double). Otherwise the SOURCE is the live one (the 1.2.4 fork merge).
-function M.FoldChars(moves, keepTarget)
+-- quiet = no chat line per character (the caller sums it up).
+function M.FoldChars(moves, keepTarget, quiet)
   local chars = M.db.chars
   for sk, fk in pairs(moves) do
     local sc, fc = chars[sk], chars[fk]
@@ -250,7 +251,7 @@ function M.FoldChars(moves, keepTarget)
       if cr[fk] == nil then cr[fk] = cr[sk] end
       cr[sk] = nil
     end
-    if M.Print then
+    if M.Print and not quiet then
       M.Print(keepTarget and ("this character's data moved from '" .. sk .. "' to its full name '" .. fk .. "'.")
         or ("merged duplicate character '" .. sk .. "' into '" .. fk .. "'."))
     end

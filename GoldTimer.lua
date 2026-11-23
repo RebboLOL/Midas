@@ -437,7 +437,7 @@ end
 
 local function smallButton(parent, text, w)
   local b = T.Button(parent, text, w, 18)
-  b.text:SetFont(T.FONT_MED, T.SIZE.small, "")
+  T.RegFont(b.text, T.FONT_MED, T.SIZE.small)
   return b
 end
 

@@ -1,5 +1,10 @@
 # Midas – Changelog
 
+## 1.3.3 – 2026-11-21
+- **WoW Forever: history back after the realm hotfix.** Since the hotfix of 20 November the game no longer tells addons the realm, so Midas filed new scans, net worth and trades under an empty realm and your history looked gone. Midas now keeps the realm of every character itself and moves what it stored since the hotfix back at login.
+- **Datalink on WoW Forever works again.** Scans shared since the hotfix carried no realm and were refused by midasmarket.app; they now carry realm and ruleset again, and server prices load for the right market.
+- **Settings: text size.** A new slider in the Settings tab makes all Midas text larger or smaller, from 90 to 130%.
+
 ## 1.3.2 – 2026-11-19
 - **Net Worth: fixed a bug where returned auctions count twice.** Items of an expired or cancelled auction no longer count as auction once they are back in your mailbox or bags.
 

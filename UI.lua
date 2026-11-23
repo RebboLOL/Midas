@@ -86,6 +86,7 @@ end
 -- ===== Build ================================================================
 function M.EnsureUI()
   if M.frame then return end
+  if M.db and M.db.config then T.SetFontScale(M.db.config.fontScale or 1) end
   local f = CreateFrame("Frame", "MidasFrame", UIParent, "BackdropTemplate")
   M.frame = f
   f:SetSize(980, 560); f:SetPoint("CENTER")
@@ -165,7 +166,7 @@ function M.EnsureUI()
   end)
   if T.HelpTip then
     T.HelpTip(grip, "Resize", {
-      "Drag to resize the window - width and height move independently, the top-left corner stays put. Charts grow into the room; text keeps its normal size. The size is remembered." })
+      "Drag to resize the window - width and height move independently, the top-left corner stays put. Charts grow into the room; text keeps its size (Settings > Text size). The size is remembered." })
   end
 
   -- Header bar (borderless soft band; mouse passes through so it stays draggable)
@@ -253,10 +254,15 @@ function M.EnsureUI()
     T.HelpTip(fairToggle, "Fair line", T.HELP.fair[2])
   end
   -- nine tabs share the row with the three toggles: at the minimum window width
-  -- the tab padding shrinks until the bar ends before the first toggle
+  -- the tab padding shrinks until the bar ends before the first toggle (again
+  -- after a new text size, once the toggles have measured themselves)
   if M.tabBar.Fit then
-    local togW = maToggle:GetWidth() + trToggle:GetWidth() + fairToggle:GetWidth() + 28
-    M.tabBar:Fit(980 - 28 - togW - 16)
+    local function fitTabs()
+      local togW = maToggle:GetWidth() + trToggle:GetWidth() + fairToggle:GetWidth() + 28
+      M.tabBar:Fit(980 - 28 - togW - 16)
+    end
+    fitTabs()
+    T.OnFontScale(fitTabs)
   end
 
   local div = T.Divider(f)
@@ -482,6 +488,20 @@ function M.SetChartRange(key)
   -- the Net-Worth hero decomposition, movers and class deltas read the same
   -- window: refresh the active tab's texts too
   if M.RefreshUI then M.RefreshUI() end
+end
+
+-- ===== Text size (Settings) =================================================
+-- config.fontScale (nil = 100 %): every Midas text follows it at once (Theme
+-- RegFont registry); the tabs then lay out again around the new text widths.
+function M.SetFontScale(v)
+  if not (M.db and M.db.config) then return end
+  v = math.max(T.FONT_SCALE_MIN, math.min(T.FONT_SCALE_MAX, tonumber(v) or 1))
+  v = math.floor(v * 20 + 0.5) / 20
+  M.db.config.fontScale = (v ~= 1) and v or nil
+  if T.SetFontScale(v) then
+    if M.RerenderCharts then M.RerenderCharts() end
+    if M.RefreshUI then M.RefreshUI() end
+  end
 end
 
 local function makeRangeSeg(parent)
@@ -1493,9 +1513,16 @@ local function CreateChartCard(parent, x0, w, h)
 end
 
 local function setStat(obj, i, label, value, rgb)
-  obj.stats[i].lbl:SetText(label)
-  obj.stats[i].val:SetText(value)
-  if rgb then colorize(obj.stats[i].val, rgb) else colorize(obj.stats[i].val, C.text) end
+  local st = obj.stats[i]
+  st.lbl:SetText(label)
+  st.val:SetText(value)
+  if rgb then colorize(st.val, rgb) else colorize(st.val, C.text) end
+  -- the label ends before the value (cut, never under it at large text sizes)
+  local cw = obj.frame:GetWidth() or 0
+  if cw > 0 then
+    st.lbl:SetJustifyH("LEFT")
+    st.lbl:SetWidth(math.max(40, cw - 24 - (st.val:GetStringWidth() or 0) - 4))
+  end
 end
 
 -- Re-fills only when the item OR the data generation changed: a scan, sync,
@@ -1521,7 +1548,7 @@ function M.FillChartCard(obj, key)
   cardLinks(obj, key)
   if not key then
     obj.title:SetText("No data"); colorize(obj.title, C.sub); obj.cat:SetText("")
-    for i = 1, 5 do obj.stats[i].lbl:SetText(""); obj.stats[i].val:SetText("") end
+    for i = 1, 5 do obj.stats[i].lbl:SetText(""); obj.stats[i].lbl:SetWidth(0); obj.stats[i].val:SetText("") end
     if M.RenderItemChart then M.RenderItemChart(obj.canvas, nil) end
     return
   end
@@ -1531,7 +1558,7 @@ function M.FillChartCard(obj, key)
   local series = M.GetSeries(key)
   local m = series and M.Metrics(series, key)
   if not m then
-    for i = 1, 5 do obj.stats[i].lbl:SetText(""); obj.stats[i].val:SetText("") end
+    for i = 1, 5 do obj.stats[i].lbl:SetText(""); obj.stats[i].lbl:SetWidth(0); obj.stats[i].val:SetText("") end
     obj.stats[1].lbl:SetText("No price data on this realm yet"); colorize(obj.stats[1].lbl, C.muted)
     if M.RenderItemChart then M.RenderItemChart(obj.canvas, nil) end
     return
@@ -1596,8 +1623,9 @@ end
 -- The old Sync tab, rededicated: everything configurable lives HERE (plus the
 -- three chart toggles in the window header, which stay next to the charts).
 -- height of the scrolling left column of the Settings tab (general options,
--- sync status, live log); a taller window simply shows more of the log
-local SET_LEFT_H = 890
+-- sync status, live log) at 100 % text; a taller window simply shows more of
+-- the log, a larger text size makes the column taller (s.flow)
+local SET_LEFT_H = 918
 -- DATALINK row: status text left, download box right of it (no overlap)
 local DL_APP_W, DL_BOX_X = 170, 180
 
@@ -1672,12 +1700,14 @@ function M.BuildSettings(panel)
     { "|cff5CD178Sell odds at current price  ~44%|r", "" },
     { "You paid  8g 20s avg  (12 bought)",        "" },
   }
+  -- the preview lines keep their size: item tooltips use the game's own font,
+  -- which the Midas text size does not change
   for i, ln in ipairs(PREVIEW) do
     local y = -7 - (i - 1) * 15
-    pvL[i] = T.Text(pv, T.SIZE.small, "sub"); pvL[i]:SetPoint("TOPLEFT", 12, y); pvL[i]:SetText(ln[1])
-    pvR[i] = T.Text(pv, T.SIZE.small, "sub"); pvR[i]:SetPoint("TOPRIGHT", -12, y); pvR[i]:SetJustifyH("RIGHT"); pvR[i]:SetText(ln[2])
+    pvL[i] = T.Text(pv, T.SIZE.small, "sub", nil, true); pvL[i]:SetPoint("TOPLEFT", 12, y); pvL[i]:SetText(ln[1])
+    pvR[i] = T.Text(pv, T.SIZE.small, "sub", nil, true); pvR[i]:SetPoint("TOPRIGHT", -12, y); pvR[i]:SetJustifyH("RIGHT"); pvR[i]:SetText(ln[2])
   end
-  local pvOff = T.Text(pv, T.SIZE.small, "muted")
+  local pvOff = T.Text(pv, T.SIZE.small, "muted", nil, true)
   pvOff:SetPoint("CENTER", 0, 0); pvOff:SetText("no Midas lines on item tooltips"); pvOff:Hide()
   local pvCap = T.Text(left, T.SIZE.tiny, "muted", T.FONT_MED)
   pvCap:SetPoint("TOPLEFT", pv, "BOTTOMLEFT", 0, -4)
@@ -1908,27 +1938,45 @@ function M.BuildSettings(panel)
       "Off hides the chart. The Midas text lines follow their own \"Item tooltip\" setting above." })
   end
 
+  -- text size of every Midas window (M.SetFontScale): 90-130 % in 5 % steps;
+  -- dragging shows the value, the release applies it
+  local tsl = T.Text(left, T.SIZE.body, "sub")
+  tsl:SetText("Text size")
+  local tsVal = T.Text(left, T.SIZE.small, "accent", T.FONT_SEMI)
+  local tsMin, tsMax = math.floor(T.FONT_SCALE_MIN * 20 + 0.5), math.floor(T.FONT_SCALE_MAX * 20 + 0.5)
+  local tsSl = T.Slider(left, 160, tsMin, tsMax, function(v, done)
+    tsVal:SetText(v * 5 .. "%")
+    if done then M.SetFontScale(v / 20) end
+  end)
+  tsVal:SetPoint("LEFT", tsSl, "RIGHT", 12, 0)
+  s.textSl, s.textVal = tsSl, tsVal
+  if T.HelpTip then
+    T.HelpTip(tsSl, "Text size", {
+      "Makes all Midas text larger or smaller, from 90 to 130%. The windows keep their size: if a line gets cut, drag the window larger at its bottom-right corner.",
+      "Item tooltips use the game's own font and keep their size." })
+  end
+
   -- ----- SYNC STATUS + LIVE LOG (left column, below the timeframes) --------
   -- the FAIR PRICE block lives in the right column now, where its demo graph
   -- gets real height; the status read-out is monitoring and sits fine here
   local sdiv = T.Divider(left)
-  sdiv:SetPoint("TOPLEFT", 0, -434); sdiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -434)
+  sdiv:SetPoint("TOPLEFT", 0, -462); sdiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -462)
 
   -- ----- DATALINK (left column, under the timeframes; Datalink.lua) --------
   -- the Midas Companion desktop app (midasmarket.app): is it there, the
   -- opt-in switch with what it shares, the server prices it delivers
   local dh = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
-  dh:SetPoint("TOPLEFT", 0, -446); dh:SetText("DATALINK")
+  dh:SetPoint("TOPLEFT", 0, -474); dh:SetText("DATALINK")
   local dsub = T.Text(left, T.SIZE.tiny, "muted", T.FONT_MED)
   dsub:SetPoint("LEFT", dh, "RIGHT", 10, 0)
   dsub:SetText("MIDASMARKET.APP COMPANION  \194\183  NEW IN 1.3.0")
   local dApp = T.Text(left, T.SIZE.body, "sub")
-  dApp:SetPoint("TOPLEFT", 0, -470); dApp:SetWidth(430); dApp:SetJustifyH("LEFT")
+  dApp:SetPoint("TOPLEFT", 0, -498); dApp:SetWidth(430); dApp:SetJustifyH("LEFT")
   s.dlApp = dApp
   -- app not found: the download link in a read-only edit box (click, Ctrl+C)
   local dlBox = T.Surface(left, "bg0", "border")
   -- the box starts right of the "not found" line (dApp is held to DL_APP_W then)
-  dlBox:SetPoint("TOPLEFT", DL_BOX_X, -465); dlBox:SetSize(430 - DL_BOX_X, 22)
+  dlBox:SetPoint("TOPLEFT", DL_BOX_X, -493); dlBox:SetSize(430 - DL_BOX_X, 22)
   local dlEdit = CreateFrame("EditBox", nil, dlBox)
   dlEdit:SetPoint("TOPLEFT", 7, -1); dlEdit:SetPoint("BOTTOMRIGHT", -7, 1)
   T.RegFont(dlEdit, T.FONT, T.SIZE.small); dlEdit:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
@@ -1960,10 +2008,10 @@ function M.BuildSettings(panel)
     if M.DatalinkSetShare then M.DatalinkSetShare(on) end
     M.RefreshSettings()
   end)
-  shCb:SetPoint("TOPLEFT", 0, -496)
+  shCb:SetPoint("TOPLEFT", 0, -524)
   s.dlShare = shCb
   local shSub = T.Text(left, T.SIZE.small, "muted")
-  shSub:SetPoint("TOPLEFT", 23, -516); shSub:SetWidth(407); shSub:SetJustifyH("LEFT"); shSub:SetWordWrap(true)
+  shSub:SetPoint("TOPLEFT", 23, -544); shSub:SetWidth(407); shSub:SetJustifyH("LEFT"); shSub:SetWordWrap(true)
   shSub:SetText("Off until you switch it on: shares the prices and amounts of your auction house scans and once your last 90 days of prices - never character, guild or gold data.")
   if T.HelpTip then
     T.HelpTip(shCb, "Share my scans", {
@@ -1976,7 +2024,7 @@ function M.BuildSettings(panel)
     if M.DatalinkSetPrices then M.DatalinkSetPrices(on) end
     M.RefreshSettings()
   end)
-  prCb:SetPoint("TOPLEFT", 0, -552)
+  prCb:SetPoint("TOPLEFT", 0, -580)
   s.dlPrices = prCb
   if T.HelpTip then
     T.HelpTip(prCb, "Load server prices", {
@@ -1985,14 +2033,14 @@ function M.BuildSettings(panel)
       "Changes take effect at the next login or /reload." })
   end
   local dPr = T.Text(left, T.SIZE.small, "sub")
-  dPr:SetPoint("TOPLEFT", 23, -572); dPr:SetWidth(407); dPr:SetJustifyH("LEFT")
+  dPr:SetPoint("TOPLEFT", 23, -600); dPr:SetWidth(407); dPr:SetJustifyH("LEFT"); dPr:SetWordWrap(true)
   s.dlPriceLine = dPr
   local dLeg = T.Text(left, T.SIZE.small, "sub")
-  dLeg:SetPoint("TOPLEFT", 0, -592); dLeg:SetWidth(430); dLeg:SetJustifyH("LEFT"); dLeg:SetWordWrap(true)
+  dLeg:SetPoint("TOPLEFT", 0, -620); dLeg:SetWidth(430); dLeg:SetJustifyH("LEFT"); dLeg:SetWordWrap(true)
   s.dlLegacy = dLeg
 
   local ddiv = T.Divider(left)
-  ddiv:SetPoint("TOPLEFT", 0, -624); ddiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -624)
+  ddiv:SetPoint("TOPLEFT", 0, -652); ddiv:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, -652)
 
   -- ----- COMMUNITY SYNC (right column) -------------------------------------
   local X = 464
@@ -2048,9 +2096,9 @@ function M.BuildSettings(panel)
   -- status + live log in the LEFT column (monitoring, below the timeframes);
   -- the stats anchor keeps the log below however many import-source lines show
   local sh = T.Text(left, T.SIZE.small, "muted", T.FONT_MED)
-  sh:SetPoint("TOPLEFT", 0, -636); sh:SetText("SYNC \194\183 STATUS")
+  sh:SetPoint("TOPLEFT", 0, -664); sh:SetText("SYNC \194\183 STATUS")
   local stats = T.Text(left, T.SIZE.body, "sub")
-  stats:SetPoint("TOPLEFT", 0, -656); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
+  stats:SetPoint("TOPLEFT", 0, -684); stats:SetJustifyH("LEFT"); stats:SetJustifyV("TOP")
   stats:SetWidth(430); stats:SetSpacing(5); stats:SetWordWrap(true)
   s.stats = stats
   -- live log: every entry tagged PUSH (sent by you) / PULL (received or asked
@@ -2065,7 +2113,7 @@ function M.BuildSettings(panel)
   box:SetPoint("BOTTOMRIGHT", left, "BOTTOMLEFT", 430, 30)
   local log = CreateFrame("ScrollingMessageFrame", nil, box)
   log:SetPoint("TOPLEFT", 7, -6); log:SetPoint("BOTTOMRIGHT", -7, 6)
-  log:SetFont(T.FONT, T.SIZE.tiny, "")
+  T.RegFont(log, T.FONT, T.SIZE.tiny)
   log:SetJustifyH("LEFT")
   log:SetFading(false)
   log:SetMaxLines(300)
@@ -2107,7 +2155,7 @@ function M.BuildSettings(panel)
   local flabel = T.Text(panel, T.SIZE.small, "sub")
   flabel:SetPoint("TOPLEFT", X, -226); flabel:SetText("Recency bias")
   local fval = T.Text(panel, T.SIZE.small, "accent", T.FONT_SEMI)
-  fval:SetPoint("TOPLEFT", X + 404, -226); fval:SetWidth(76); fval:SetJustifyH("RIGHT")
+  fval:SetPoint("TOPLEFT", X + 370, -226); fval:SetWidth(110); fval:SetJustifyH("RIGHT")
   local fbox = T.Surface(panel)
   fbox:SetPoint("TOPLEFT", X, -262)
   fbox:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 4)
@@ -2128,7 +2176,7 @@ function M.BuildSettings(panel)
   local fr = T.Text(panel, T.SIZE.tiny, "muted")
   fr:SetPoint("TOPLEFT", X + 130, -244); fr:SetText("reactive \194\183 2d")
   local fs2 = T.Text(panel, T.SIZE.tiny, "muted")
-  fs2:SetPoint("TOPLEFT", X + 330, -244); fs2:SetWidth(60); fs2:SetJustifyH("RIGHT")
+  fs2:SetPoint("TOPLEFT", X + 300, -244); fs2:SetWidth(90); fs2:SetJustifyH("RIGHT")
   fs2:SetText("steady \194\183 14d")
   s.fairSl, s.fairVal, s.fairDemo = fsl, fval, fdemo
   if T.HelpTip then
@@ -2136,6 +2184,83 @@ function M.BuildSettings(panel)
       "How fast the Fair price forgets old scan days: the market base behind Fair weighs each scan day by 0.5^(age/half-life).",
       "SHORT half-life (2-4 days): Fair chases the latest days - reacts fast, jumpy on thin items. LONG (10-14 days): Fair smooths over the whole two-week window and shrugs off short dips.",
       "Default 7 days. The graph below shows a market that dropped from 12g to 8g a week before today - drag and watch the base line change character. Changing it re-prices everything (Fair, signals, net-worth valuation); scanned history stays untouched." })
+  end
+
+  -- ----- flowing layout (follows the text size) ----------------------------
+  -- Places everything from the tooltip row down: label columns as wide as
+  -- their longest label, two checkbox columns while both fit into the 430px
+  -- column (always at 100 %), one column at large sizes, and wrapped lines
+  -- push what follows down. At 100 % this is exactly the fixed grid set up
+  -- above. Runs from RefreshSettings (after the Datalink texts are set).
+  local GRID = { { mmCb, alCb }, { autoCb, sdCb }, { ahCb, mcCb }, { swCb, gsBtn }, { owCb, lgCb }, { hcCb, crCb } }
+  local ROWS = { { rl, rangeSeg.frame }, { pl, prevSeg.frame }, { tcl, ttSeg.frame }, { tsl, tsSl } }
+  local function at(w, x, y)
+    w:ClearAllPoints(); w:SetPoint("TOPLEFT", left, "TOPLEFT", x, y)
+  end
+  local function line(t, y)
+    t:ClearAllPoints(); t:SetPoint("TOPLEFT", left, "TOPLEFT", 0, y); t:SetPoint("TOPRIGHT", left, "TOPLEFT", 430, y)
+  end
+  function s.flow()
+    local W = 430
+    -- tooltip row: the segment, "Craft lines" right of it (tight at large sizes)
+    local tipW, tcW = tipSeg.frame:GetWidth(), tcCb:GetWidth()
+    local tipX, tcX = 150, math.max(318, 150 + tipW + 16)
+    if tcX + tcW > W then
+      tcX = W - tcW
+      tipX = math.max(math.ceil(tl:GetStringWidth()) + 12, tcX - 16 - tipW)
+    end
+    at(tipSeg.frame, tipX, -22); at(tcCb, tcX, -24)
+    ciCb:ClearAllPoints(); ciCb:SetPoint("TOPLEFT", pv, "BOTTOMLEFT", math.min(318, W - ciCb:GetWidth()), -1)
+    -- checkbox grid
+    local pitch = math.max(22, math.ceil(T.Scaled(T.SIZE.body) * 1.25) + 4)
+    local lw, rw = 0, 0
+    for _, r in ipairs(GRID) do lw = math.max(lw, r[1]:GetWidth()); rw = math.max(rw, r[2]:GetWidth()) end
+    local col2 = math.max(250, math.ceil(lw) + 16)
+    local y = -196
+    if col2 + rw <= W then
+      for _, r in ipairs(GRID) do
+        at(r[1], 0, y); at(r[2], col2, (r[2] == gsBtn) and (y + 4) or y)
+        y = y - pitch
+      end
+    else
+      for _, r in ipairs(GRID) do at(r[1], 0, y); y = y - pitch end
+      for _, r in ipairs(GRID) do
+        at(r[2], 0, y)
+        y = y - pitch - ((r[2] == gsBtn) and 4 or 0)
+      end
+    end
+    -- timeframe + text size rows: label left, control at the label column
+    local labX = 150
+    for _, r in ipairs(ROWS) do labX = math.max(labX, math.ceil(r[1]:GetStringWidth()) + 14) end
+    local rowP = pitch + 6
+    y = y + pitch - 38
+    for _, r in ipairs(ROWS) do
+      at(r[1], 0, y); at(r[2], labX, y + ((r[2] == tsSl) and 2 or 4))
+      y = y - rowP
+    end
+    -- DATALINK: the share note wraps, the legacy line may be empty or long
+    local sp = pitch - 2
+    local d = y + rowP - 34
+    line(sdiv, d)
+    at(dh, 0, d - 12)
+    at(dApp, 0, d - 36)
+    at(dlBox, dlBox._x or DL_BOX_X, d - 31)
+    at(shCb, 0, d - 62)
+    at(shSub, 23, d - 62 - sp)
+    local p = d - 62 - sp - math.max(36, math.ceil(shSub:GetStringHeight() or 0) + 9)
+    at(prCb, 0, p); at(dPr, 23, p - sp)
+    local pl2 = p - sp - math.max(sp, math.ceil(dPr:GetStringHeight() or 0) + 6)
+    at(dLeg, 0, pl2)
+    local q = pl2 - math.max(32, math.ceil(dLeg:GetStringHeight() or 0) + 8)
+    line(ddiv, q)
+    at(sh, 0, q - 12); at(stats, 0, q - 32)
+    lh:SetWidth(math.max(40, W - math.ceil(ah:GetStringWidth()) - 10))
+    -- the status + log part below grows with the text, the window shows more
+    s.leftNeed = math.floor(-q + (SET_LEFT_H - 652) * T.fontScale + 0.5)
+    -- right column: the segments start after the longest label
+    local rx = math.max(140, math.ceil(math.max(tlabel:GetStringWidth(), vlabel:GetStringWidth())) + 12)
+    seg.frame:ClearAllPoints(); seg.frame:SetPoint("TOPLEFT", panel, "TOPLEFT", X + rx, -88)
+    vseg.frame:ClearAllPoints(); vseg.frame:SetPoint("TOPLEFT", panel, "TOPLEFT", X + rx, -118)
   end
 
   -- keep it live while the tab is on screen (panels only OnUpdate while shown)
@@ -2170,8 +2295,18 @@ function M.RefreshDatalink(s)
     s.dlApp:SetText("Companion app  " .. RED .. "not found|r")
   end
   s.dlBox:SetShown(not found)
-  -- never under the link box: the line is held to the room left of it
-  s.dlApp:SetWidth(found and 430 or DL_APP_W)
+  -- never under the link box: the line is held to the room left of it, and
+  -- the box moves right when a larger text size needs more room
+  if found then
+    s.dlApp:SetWidth(430)
+  else
+    local fs = s.dlApp
+    local nat = (fs.GetUnboundedStringWidth or fs.GetStringWidth)(fs) or 0
+    local appW = math.max(DL_APP_W, math.ceil(nat) + 4)
+    s.dlApp:SetWidth(appW)
+    s.dlBox._x = appW + DL_BOX_X - DL_APP_W
+    s.dlBox:SetWidth(430 - s.dlBox._x)
+  end
   s.dlShare:SetChecked(dl.share)
   s.dlPrices:SetChecked(dl.prices)
   if not dl.prices then
@@ -2207,11 +2342,6 @@ end
 function M.RefreshSettings()
   local s = M.setUI
   if not s then return end
-  if s.left then
-    -- the log box grows with the window; below SET_LEFT_H the column scrolls
-    local vis = ((M.frame and M.frame:GetHeight()) or 560) - 134
-    s.left:SetHeight(math.max(SET_LEFT_H, math.floor(vis)))
-  end
   local cfg = M.db.config
   local mode = cfg.tooltipMode or "full"
   s.tipSeg:Select(mode)
@@ -2230,6 +2360,17 @@ function M.RefreshSettings()
   if s.lgCb then s.lgCb:SetChecked(cfg.ledgerOff ~= true) end
   if s.crCb then s.crCb:SetChecked(cfg.craftOff ~= true) end
   if s.dlApp and M.DatalinkInfo then M.RefreshDatalink(s) end
+  if s.flow then s.flow() end
+  if s.left then
+    -- the log box grows with the window; below the needed height the column scrolls
+    local vis = ((M.frame and M.frame:GetHeight()) or 560) - 134
+    s.left:SetHeight(math.max(s.leftNeed or SET_LEFT_H, math.floor(vis)))
+  end
+  if s.textSl and not s.textSl.dragging then
+    local v = math.floor(T.fontScale * 20 + 0.5)
+    s.textSl:Set(v)
+    s.textVal:SetText(v * 5 .. "%")
+  end
   s.cb:SetChecked(cfg.share == true)
   s.trustSeg:Select(cfg.shareTrust == "guild" and "guild" or "all")
   if s.prevSeg then s.prevSeg:Select(cfg.previewRange or "all") end
@@ -2437,7 +2578,7 @@ local function CreateRankTab(panel, opts)
     local tg = CreateFrame("Button", nil, panel)
     tg:SetSize(160, 16); tg:SetPoint("LEFT", count, "RIGHT", 16, 0)
     local tf = tg:CreateFontString(nil, "OVERLAY"); T.RegFont(tf, T.FONT_MED, T.SIZE.small)
-    tf:SetPoint("LEFT", 0, 0); tf:SetJustifyH("LEFT"); tf:SetTextColor(T.Unpack(C.sub))
+    tf:SetPoint("LEFT", 0, 0); tf:SetJustifyH("LEFT"); tf:SetTextColor(T.Unpack(C.sub)); tf:SetWordWrap(false)
     tg.tf = tf
     tg:SetScript("OnClick", function()
       if M.alertsView then M.alertsView:Hide() end
@@ -2609,7 +2750,7 @@ local function CreateRankTab(panel, opts)
       b:SetSize(d.w, 16); b:SetPoint("TOPLEFT", hx, -32 - TOP_OFF)
       local tt = b:CreateFontString(nil, "OVERLAY")
       T.RegFont(tt, T.FONT_MED, T.SIZE.tiny); tt:SetAllPoints(); tt:SetJustifyH(d.just)
-      tt:SetText(d.name:upper()); tt:SetTextColor(T.Unpack(C.muted))
+      tt:SetText(d.name:upper()); tt:SetTextColor(T.Unpack(C.muted)); T.FitLabel(tt, d.w)
       b.tt, b.field = tt, d.sort
       b:SetScript("OnClick", function()
         if st.sort.field == d.sort then st.sort.asc = not st.sort.asc
@@ -3009,6 +3150,14 @@ local function CreateRankTab(panel, opts)
         st.browseToggle.tf:SetText("browse all items \194\187"); st.browseToggle.tf:SetTextColor(T.Unpack(C.sub))
       end
     end
+    -- the removed-items toggle ends before the browse link (cut at large text sizes)
+    if st.toggle and st.browseToggle then
+      local tf, bf = st.toggle.tf, st.browseToggle.tf
+      local l, r = st.toggle:GetLeft(), st.browseToggle:GetRight()
+      if l and r then
+        tf:SetWidth(math.max(40, r - (bf:GetStringWidth() or 0) - 12 - l))
+      end
+    end
     if updateChips then updateChips(not removedView and not browseView) end
     -- taller window -> more visible rows (the scroll frame already tracks the panel)
     local vis = availRows(panel, 50 + TOP_OFF, CH_ROWH, 10)
@@ -3337,7 +3486,7 @@ function M.BuildTrades(panel)
       b:SetSize(d.w, 16); b:SetPoint("TOPLEFT", hx, -2)
       local tt = b:CreateFontString(nil, "OVERLAY")
       T.RegFont(tt, T.FONT_MED, T.SIZE.tiny); tt:SetAllPoints(); tt:SetJustifyH(d.just)
-      tt:SetText(d.name:upper()); tt:SetTextColor(T.Unpack(C.muted))
+      tt:SetText(d.name:upper()); tt:SetTextColor(T.Unpack(C.muted)); T.FitLabel(tt, d.w)
       b.tt, b.field = tt, d.sort
       b:SetScript("OnClick", function()
         if st.logSort.field == d.sort then st.logSort.asc = not st.logSort.asc
@@ -3413,7 +3562,7 @@ function M.BuildTrades(panel)
         b:SetSize(d.w, 16); b:SetPoint("TOPLEFT", hx, -2)
         local tt = b:CreateFontString(nil, "OVERLAY")
         T.RegFont(tt, T.FONT_MED, T.SIZE.tiny); tt:SetAllPoints(); tt:SetJustifyH(d.just)
-        tt:SetText(d.name:upper()); tt:SetTextColor(T.Unpack(C.muted))
+        tt:SetText(d.name:upper()); tt:SetTextColor(T.Unpack(C.muted)); T.FitLabel(tt, d.w)
         b.tt, b.field = tt, d.sort
         b:SetScript("OnClick", function()
           if st.sort.field == d.sort then st.sort.asc = not st.sort.asc
@@ -4073,6 +4222,7 @@ function M.BuildWealth(panel)
   local w = {}; M.wealth = w
   local lbl = T.Text(panel, T.SIZE.tiny, "muted", T.FONT_MED)
   lbl:SetPoint("TOPLEFT", 2, -2); lbl:SetText("NET WORTH \194\183 ALL CHARACTERS   \194\183   hover any value for its breakdown")
+  lbl:SetWidth(352); lbl:SetJustifyH("LEFT")   -- ends before the movers columns at any text size
   w.total = T.Text(panel, 26, "text", T.FONT_SEMI); w.total:SetPoint("TOPLEFT", 0, -14)
   -- two fixed-width lines: the headline delta and, below it, the decomposition.
   -- Width-capped at 350 so they can never run under the movers columns again.
@@ -4202,7 +4352,7 @@ function M.BuildWealth(panel)
     local rows = {}
     for i = 1, 3 do
       local y = -16 - (i - 1) * 15
-      local r = {}
+      local r = { x = x }
       r.name = T.Text(panel, T.SIZE.small); r.name:SetPoint("TOPLEFT", x, y); r.name:SetWidth(132)
       r.val = T.Text(panel, T.SIZE.small, "sub", T.FONT_MED)
       r.val:SetPoint("TOPLEFT", x + 136, y); r.val:SetWidth(70); r.val:SetJustifyH("RIGHT")
@@ -4241,6 +4391,34 @@ function M.BuildWealth(panel)
   -- timeframe switch for the history chart (shared with the Charts tab)
   local rangeSeg = makeRangeSeg(panel)
   rangeSeg.frame:SetPoint("TOPRIGHT", 0, -44)
+  -- the hero band packs its lines by text size: at 100 % the fixed grid above
+  -- (total 26 pt, delta lines from -48, mini rows every 15 px, chart at -72);
+  -- larger text pushes the lines, the mini rows and the chart down, and the
+  -- range switch then sits below the loser rows instead of beside them
+  function w.layoutHero()
+    local function px(size, f) return math.ceil(T.Scaled(size) * f) end
+    local rowP = math.max(15, px(T.SIZE.small, 1.3))
+    for i = 1, 3 do
+      local y = -16 - (i - 1) * rowP
+      for _, rows in ipairs({ w.gainRows, w.loseRows }) do
+        local r = rows[i]
+        r.name:SetPoint("TOPLEFT", r.x, y); r.val:SetPoint("TOPLEFT", r.x + 136, y)
+        r.btn:SetPoint("TOPLEFT", r.x - 2, y + 2); r.btn:SetHeight(rowP - 1)
+      end
+    end
+    local dy = -14 - math.max(34, px(26, 1.3))
+    local sy = dy - math.max(12, px(T.SIZE.body, 1))
+    local top = math.max(72, -sy + px(T.SIZE.tiny, 1.2))
+    if T.fontScale > 1 then top = math.max(top, 16 + 2 * rowP + px(T.SIZE.small, 1.2) + 30) end
+    w.delta:SetPoint("TOPLEFT", 2, dy); w.deltaSub:SetPoint("TOPLEFT", 2, sy)
+    w.totalBtn:SetHeight(-dy - 10)
+    db:SetPoint("TOPLEFT", 0, dy + 2); db:SetHeight((dy + 2) - (sy - px(T.SIZE.tiny, 1.2)))
+    chart:SetPoint("TOPLEFT", 0, -top); chart:SetPoint("TOPRIGHT", 0, -top)
+    rangeSeg.frame:SetPoint("TOPRIGHT", 0, -(top - 28))
+    w.heroTop = top
+  end
+  w.layoutHero()
+  T.OnFontScale(w.layoutHero)
   -- scrubbing the history chart shows each character AS OF that day + the change to now
   chart._onHover = function(best) if M.FillCharRows then M.FillCharRows(best.day) end end
   chart._onHoverEnd = function() if M.FillCharRows then M.FillCharRows(nil) end end
@@ -4417,6 +4595,14 @@ function M.BuildWealth(panel)
       iv.chips[#iv.chips + 1] = b
       cx = cx + b:GetWidth() + 10
     end
+    T.OnFontScale(function()
+      local x = 2
+      for _, c in ipairs(iv.chips) do
+        c:SetWidth(c.fs:GetStringWidth() + 14)
+        c:SetPoint("TOPLEFT", x, -44)
+        x = x + c:GetWidth() + 10
+      end
+    end)
   end
 
   -- the character's own worth history: total line + cumulative class stack
@@ -5610,9 +5796,11 @@ function M.RefreshWealth()
   -- taller window: the chart takes ~45% of the extra room (capped), the
   -- character list grows with the rest instead of staying fixed at 8 rows
   local ex = extraH(M.panels and M.panels[TAB["Net Worth"]])
-  local chartH = 170 + math.min(math.floor(ex * 0.45), 200)
+  -- a taller hero band (larger text) comes out of the chart, not the list
+  local heroTop = w.heroTop or 72
+  local chartH = math.max(120, 170 + math.min(math.floor(ex * 0.45), 200) - (heroTop - 72))
   if w.chart then w.chart:SetHeight(chartH) end
-  local anchorY = 82 + chartH
+  local anchorY = heroTop + 10 + chartH
   if w.lowerAnchor then w.lowerAnchor:SetPoint("TOPLEFT", 0, -anchorY) end
   if w.chart and M.RenderNetWorthChart then
     C_Timer.After(0, function() M.RenderNetWorthChart(w.chart) end)
@@ -6683,6 +6871,17 @@ function M.BuildCharts(panel)
   local rangeSeg = makeRangeSeg(panel)
   rangeSeg.frame:SetPoint("TOPRIGHT", -64, -108)
   rangeSeg.frame:SetFrameLevel(panel:GetFrameLevel() + 10)
+  -- the offer-book switch stays joined to the timeframe switch when a larger
+  -- text size widens it (at 100 % its fixed spot), and the alert bar gives
+  -- up its spare room on the right so it keeps clear of the chart legend
+  local function placeDepthSeg()
+    local x = -228
+    if T.fontScale > 1 then x = math.min(x, -(64 + math.ceil(rangeSeg.frame:GetWidth()) - 4)) end
+    depthSeg.frame:SetPoint("TOPRIGHT", x, -108)
+    alertBar:SetWidth(T.fontScale > 1 and 222 or 252)
+  end
+  placeDepthSeg()
+  T.OnFontScale(placeDepthSeg)
 
   -- one function owns the chart/offer-book geometry. Split view puts the
   -- chart on the LEFT half and a REDUCED book (the ladder alone, no verdict
@@ -6830,6 +7029,10 @@ function M.BuildLedger(panel)
 
   local rangeSeg = makeRangeSeg(panel)
   rangeSeg.frame:SetPoint("TOPRIGHT", 0, -1)
+  -- the note ends before the range switch (cut at large text sizes; the
+  -- width follows in RefreshLedger, once both are laid out)
+  betaNote:SetJustifyH("LEFT")
+  lg.betaNote, lg.rangeSegFrame = betaNote, rangeSeg.frame
 
   -- summary strip
   local function stat(x, w, label, tip)
@@ -6986,6 +7189,10 @@ function M.RefreshLedger()
   local ck = cfg.ledgerChar
   lg.charBtn.text:SetText(ck and (ck:match("^(.-)%-") or ck) or "All characters")
   if lg.recCb then lg.recCb:SetChecked(cfg.ledgerOff ~= true) end
+  if lg.betaNote then
+    local l, r = lg.betaNote:GetLeft(), lg.rangeSegFrame:GetLeft()
+    if l and r then lg.betaNote:SetWidth(math.max(40, r - 12 - l)) end
+  end
   -- the canvas has no size before the first layout pass: draw one frame later
   if (lg.canvas:GetWidth() or 0) < 50 and not lg.waited then
     lg.waited = true
@@ -7140,21 +7347,37 @@ function M.BuildHelp(panel)
     { "Item pages", "right-click any item: chart, tree, offer book, trades, stock." },
     { "Back", "the header pill returns from a jump to another tab." },
   }
+  local glL, glT = {}, {}
   for i, e in ipairs(GL) do
-    local col = (i - 1) % 2
-    local row = math.floor((i - 1) / 2)
-    local y = -8 - row * 16
-    local lbl = T.Text(content, T.SIZE.small, "text", T.FONT_MED)
-    lbl:SetPoint("TOPLEFT", h.head3, "BOTTOMLEFT", 2 + col * 440, y)
-    lbl:SetText(e[1])
-    local txt = T.Text(content, T.SIZE.small, "muted")
-    txt:SetPoint("TOPLEFT", h.head3, "BOTTOMLEFT", 100 + col * 440, y)
-    txt:SetWidth(330); txt:SetJustifyH("LEFT")
-    txt:SetText(e[2])
+    glL[i] = T.Text(content, T.SIZE.small, "text", T.FONT_MED)
+    glL[i]:SetText(e[1])
+    glT[i] = T.Text(content, T.SIZE.small, "muted")
+    glT[i]:SetJustifyH("LEFT")
+    glT[i]:SetText(e[2])
   end
-
   h.head4 = head("4.  Questions, bugs, ideas")
-  h.head4:SetPoint("TOPLEFT", h.head3, "BOTTOMLEFT", 0, -8 - math.ceil(#GL / 2) * 16 - 18)
+  -- two glossary columns; row pitch and the text column follow the text size
+  -- (100 %: 16 px rows, text at +100, each column 440 wide)
+  local function layoutGL()
+    local pitch = math.max(16, math.ceil(T.Scaled(T.SIZE.small) * 1.3))
+    local tx = 100
+    if T.fontScale > 1 then
+      for i = 1, #GL do tx = math.max(tx, math.ceil(glL[i]:GetStringWidth() or 0) + 8) end
+    end
+    for i = 1, #GL do
+      local col = (i - 1) % 2
+      local y = -8 - math.floor((i - 1) / 2) * pitch
+      glL[i]:SetPoint("TOPLEFT", h.head3, "BOTTOMLEFT", 2 + col * 440, y)
+      glT[i]:SetPoint("TOPLEFT", h.head3, "BOTTOMLEFT", tx + col * 440, y)
+      glT[i]:SetWidth(430 - tx)
+    end
+    h.head4:SetPoint("TOPLEFT", h.head3, "BOTTOMLEFT", 0, -8 - math.ceil(#GL / 2) * pitch - 18)
+    -- the example charts grow with their labels
+    local ch = math.floor(128 * math.max(1, T.fontScale) + 0.5)
+    h.fairCanvas:SetHeight(ch); h.oddsCanvas:SetHeight(ch)
+  end
+  layoutGL()
+  T.OnFontScale(layoutGL)
   h.para4 = para(h.head4, "Ask in #help, report bugs in #bug-reports (your Midas version and the "
     .. "error text from \"/console scriptErrors 1\" help a lot) and suggest features - all on "
     .. "the Midas Discord. Click the link to copy it, or type \"/midas discord\".")

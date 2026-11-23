@@ -85,10 +85,29 @@ local function u(c) return c[1], c[2], c[3], c[4] or 1 end
 T.Unpack = u
 
 -- ---- Fonts on font strings --------------------------------------------------
--- (The window resizes for real instead of scaling, so text simply keeps its
--- requested size - the old scale-compensating font registry is gone.)
-function T.RegFont(fs, font, size)
-  fs:SetFont(font, size, "")
+-- The window resizes for real instead of scaling, so the layout keeps its
+-- pixels; only the TEXT follows the "Text size" setting (config.fontScale,
+-- 90-130 %). RegFont remembers each font string's base font and size, so a
+-- new text size reaches everything already built (#fontscale). fixed = true
+-- keeps the base size (texts that mirror the game's own tooltip font).
+T.fontScale = 1
+T.FONT_SCALE_MIN, T.FONT_SCALE_MAX = 0.9, 1.3
+local fontReg = setmetatable({}, { __mode = "k" })
+local relayout = {}
+local function scaled(size)
+  size = size or T.SIZE.body
+  local k = T.fontScale
+  if k == 1 then return size end
+  local s = size * k
+  if s < 9 and size >= 9 then s = 9 end   -- the 9 pt readability floor holds at any size
+  return math.floor(s * 2 + 0.5) / 2      -- half-point steps
+end
+T.Scaled = scaled
+
+function T.RegFont(fs, font, size, fixed)
+  fs._mFont, fs._mSize = font, size
+  if fixed then fontReg[fs] = nil else fontReg[fs] = true end
+  fs:SetFont(font, fixed and size or scaled(size), "")
   -- CJK clients: this font string filters its own text (instance field only,
   -- the shared FontString methods stay untouched)
   if T.CJK and not fs._midasSafe and fs.GetObjectType and fs:GetObjectType() == "FontString" then
@@ -98,10 +117,48 @@ function T.RegFont(fs, font, size)
   end
 end
 
+-- Widgets that size themselves from their text measure again after a new
+-- text size; fn runs once the fonts carry it.
+function T.OnFontScale(fn) relayout[#relayout + 1] = fn end
+
+-- A one-line label with a fixed room (column header, tag): at a large text
+-- size it steps back towards its 100 % size instead of running into its
+-- neighbour. Call after SetText; it follows later text size changes itself.
+local function fitNow(fs)
+  local base, w = fs._mSize, fs._mFit
+  local size = scaled(base)
+  fs:SetFont(fs._mFont, size, "")
+  if T.fontScale <= 1 or not w or w <= 0 then return end
+  local nat = (fs.GetUnboundedStringWidth or fs.GetStringWidth)(fs) or 0
+  if nat > w then fs:SetFont(fs._mFont, math.max(base, math.floor(size * w / nat * 2) / 2), "") end
+end
+function T.FitLabel(fs, w)
+  if not fs._mSize then return end
+  local first = fs._mFit == nil
+  fs._mFit = w
+  fitNow(fs)
+  if first then T.OnFontScale(function() fitNow(fs) end) end
+end
+
+-- Set the text size (1 = 100 %, 5 % steps); returns true when it changed.
+function T.SetFontScale(v)
+  v = tonumber(v) or 1
+  v = math.max(T.FONT_SCALE_MIN, math.min(T.FONT_SCALE_MAX, v))
+  v = math.floor(v * 20 + 0.5) / 20
+  if v == T.fontScale then return false end
+  T.fontScale = v
+  for fs in pairs(fontReg) do fs:SetFont(fs._mFont, scaled(fs._mSize), "") end
+  for _, fn in ipairs(relayout) do
+    local ok, err = pcall(fn)
+    if not ok and geterrorhandler then geterrorhandler()(err) end
+  end
+  return true
+end
+
 -- ---- Text ------------------------------------------------------------------
-function T.Text(parent, size, colorKey, variant)
+function T.Text(parent, size, colorKey, variant, fixed)
   local fs = parent:CreateFontString(nil, "OVERLAY")
-  T.RegFont(fs, variant or T.FONT, size or T.SIZE.body)
+  T.RegFont(fs, variant or T.FONT, size or T.SIZE.body, fixed)
   fs:SetWordWrap(false)
   if colorKey then fs:SetTextColor(u(T.C[colorKey])) end
   return fs
@@ -212,7 +269,9 @@ function T.Checkbox(parent, label, onToggle)
   local fs = b:CreateFontString(nil, "OVERLAY")
   T.RegFont(fs, T.FONT, T.SIZE.body); fs:SetPoint("LEFT", box, "RIGHT", 6, 0)
   fs:SetText(label or ""); fs:SetTextColor(u(T.C.sub))
-  b:SetSize(23 + math.floor(fs:GetStringWidth() + 0.5), 18)
+  local function fit() b:SetSize(23 + math.floor(fs:GetStringWidth() + 0.5), 18) end
+  fit()
+  T.OnFontScale(fit)
   b.checked = false
   function b:SetChecked(v)
     self.checked = v and true or false
@@ -233,13 +292,11 @@ function T.Segment(parent, options, onSelect)
   local frame = CreateFrame("Frame", nil, parent, "BackdropTemplate")
   frame:SetBackdrop(T.FLAT); frame:SetBackdropColor(u(T.C.bg0)); frame:SetBackdropBorderColor(u(T.C.border))
   local seg = { frame = frame, buttons = {}, current = nil }
-  local x, h = 2, 20
+  local h = 20
   for i, opt in ipairs(options) do
     local b = CreateFrame("Button", nil, frame)
     local fs = b:CreateFontString(nil, "OVERLAY")
     T.RegFont(fs, T.FONT_MED, T.SIZE.small); fs:SetPoint("CENTER", 0, 0); fs:SetText(opt.label)
-    local w = math.floor(fs:GetStringWidth() + 0.5) + 18
-    b:SetSize(w, h); b:SetPoint("LEFT", x, 0)
     local bg = b:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints()
     bg:SetColorTexture(T.C.accent[1], T.C.accent[2], T.C.accent[3], 0.22); bg:Hide()
     b.fs, b.bg, b.key = fs, bg, opt.key
@@ -247,9 +304,19 @@ function T.Segment(parent, options, onSelect)
     b:SetScript("OnEnter", function() if seg.current ~= opt.key then fs:SetTextColor(u(T.C.text)) end end)
     b:SetScript("OnLeave", function() if seg.current ~= opt.key then fs:SetTextColor(u(T.C.sub)) end end)
     seg.buttons[i] = b
-    x = x + w
   end
-  frame:SetSize(x + 2, h + 4)
+  -- each option as wide as its label; again after a new text size
+  function seg:Layout()
+    local x = 2
+    for _, b in ipairs(self.buttons) do
+      local w = math.floor(b.fs:GetStringWidth() + 0.5) + 18
+      b:SetSize(w, h); b:ClearAllPoints(); b:SetPoint("LEFT", x, 0)
+      x = x + w
+    end
+    frame:SetSize(x + 2, h + 4)
+  end
+  seg:Layout()
+  T.OnFontScale(function() seg:Layout() end)
   function seg:Select(key)
     self.current = key
     for _, b in ipairs(self.buttons) do
@@ -305,23 +372,46 @@ function T.TabBar(parent, labels, onSelect)
     x = x + tw + 8
   end
   frame:SetWidth(math.max(x - 8, 1))
-  -- squeeze the padding (never the labels) until the bar fits into maxW
+  -- squeeze the padding until the bar fits into maxW; only when even the
+  -- tightest padding is too wide (a large text size) do the labels shrink,
+  -- never below their 100 % size
   function bar:Fit(maxW)
+    self._maxW = maxW
+    local n = #self.buttons
+    for _, b in ipairs(self.buttons) do
+      b.fs:SetFont(T.FONT_MED, scaled(13), "")
+      b.textW = math.floor(b.fs:GetStringWidth() + 0.5)
+    end
+    local function place(pad, gap)
+      local bx = 0
+      for _, b in ipairs(self.buttons) do
+        b:SetWidth(b.textW + pad); b:ClearAllPoints(); b:SetPoint("LEFT", bx, 0)
+        bx = bx + b.textW + pad + gap
+      end
+      self.frame:SetWidth(math.max(bx - gap, 1))
+    end
     for _, pg in ipairs({ { 22, 8 }, { 18, 6 }, { 14, 5 }, { 12, 4 }, { 10, 3 } }) do
       local w = 0
       for _, b in ipairs(self.buttons) do w = w + b.textW + pg[1] end
-      w = w + pg[2] * (#self.buttons - 1)
+      w = w + pg[2] * (n - 1)
       if w <= maxW or pg[1] == 10 then
-        local bx = 0
-        for _, b in ipairs(self.buttons) do
-          b:SetWidth(b.textW + pg[1]); b:ClearAllPoints(); b:SetPoint("LEFT", bx, 0)
-          bx = bx + b.textW + pg[1] + pg[2]
+        if w > maxW and T.fontScale > 1 then
+          local text = w - 10 * n - 3 * (n - 1)
+          local size = math.max(13, scaled(13) * (maxW - (w - text)) / text)
+          for _, b in ipairs(self.buttons) do
+            b.fs:SetFont(T.FONT_MED, math.floor(size * 2) / 2, "")
+            b.textW = math.floor(b.fs:GetStringWidth() + 0.5)
+          end
+          w = 0
+          for _, b in ipairs(self.buttons) do w = w + b.textW + 10 end
+          w = w + 3 * (n - 1)
         end
-        self.frame:SetWidth(math.max(bx - pg[2], 1))
+        place(pg[1], pg[2])
         return w
       end
     end
   end
+  T.OnFontScale(function() bar:Fit(bar._maxW or math.huge) end)
   function bar:Select(i)
     self.current = i
     for j, b in ipairs(self.buttons) do
@@ -349,6 +439,7 @@ function T.Input(parent, w, h, placeholder, onChanged)
   edit:SetAutoFocus(false)
   local ph = box:CreateFontString(nil, "OVERLAY")
   T.RegFont(ph, T.FONT, T.SIZE.body); ph:SetPoint("LEFT", edit, "LEFT", 1, 0)
+  ph:SetPoint("RIGHT", edit, "RIGHT", 0, 0); ph:SetJustifyH("LEFT"); ph:SetWordWrap(false)
   ph:SetTextColor(u(T.C.muted)); ph:SetText(placeholder or "")
   -- clear (x) button, shown only while there is text
   local clear = CreateFrame("Button", nil, box)

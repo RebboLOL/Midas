@@ -13,6 +13,14 @@ local AA_LINE = "Interface\\AddOns\\" .. (ADDON or "Midas") .. "\\Media\\AALine"
 local AA_PAD = 1.5
 local aaOK = true          -- false once the texture failed to load: plain lines
 
+-- label gutters grow with the text size (Settings > Text size), so axis
+-- labels stay inside the canvas; at 100 % or below they are as drawn
+local function gut(v)
+  local k = M.Theme and M.Theme.fontScale or 1
+  if k <= 1 then return v end
+  return math.ceil(v * k)
+end
+
 local function TC(key)
   local c = M.Theme and M.Theme.C[key]
   if c then return c[1], c[2], c[3] else return 0.8, 0.8, 0.8 end
@@ -757,7 +765,7 @@ function M.RenderAllTime(canvas, key)
   vmin, vmax = math.max(0, vmin - pad), vmax + pad
 
   local W, H = canvas:GetWidth(), canvas:GetHeight()
-  local left, right, top, bottom = 10, 56, 14, 18
+  local left, right, top, bottom = 10, gut(56), 14, gut(18)
   local pw, ph = W - left - right, H - top - bottom
   -- TIME-based X axis: missing scan days now show as real horizontal gaps
   -- (the old index-based axis hid them and the downsample made duplicate points).
@@ -1087,12 +1095,25 @@ function M.RenderAllTime(canvas, key)
   if win0 then hourLabels(canvas, X, bottom, win0); return end
   local ldSpan = dMax - dMin
   local labelN = (dMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
+  local placed = {}
   for k = 0, labelN - 1 do
     local day = (labelN <= 1) and dMin or (dMin + math.floor(ldSpan * k / (labelN - 1) + 0.5))
     local anchor = (k == 0) and "LEFT" or ((k == labelN - 1) and (capped and "LEFT" or "RIGHT") or "CENTER")
     local lx = X(day)
     if lx < left then lx = left end
-    Label(canvas, lx, bottom - 12, M.DayLabel(day), anchor, TC("muted"))
+    local s = Label(canvas, lx, bottom - 12, M.DayLabel(day), anchor, TC("muted"))
+    local w = s:GetStringWidth() or 0
+    local l = (anchor == "LEFT") and lx or ((anchor == "RIGHT") and (lx - w) or (lx - w / 2))
+    placed[#placed + 1] = { s = s, l = l, r = l + w }
+  end
+  -- a narrow chart at a large text size: keep both ends, drop the middle
+  -- labels that would run into a neighbour
+  if #placed > 2 and not capped then
+    local prev, last = placed[1], placed[#placed]
+    for i = 2, #placed - 1 do
+      local p = placed[i]
+      if p.l < prev.r or p.r > last.l then p.s:Hide() else prev = p end
+    end
   end
 end
 
@@ -1226,7 +1247,7 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   -- top pad 18: the class legend sits ABOVE the plot ceiling (it used to poke
   -- 4px into the plot, so the total line ran through the legend text)
-  local left, right, top, bottom = 10, 70, 18, 20
+  local left, right, top, bottom = 10, gut(70), gut(18), gut(20)
   local pw, ph = W - left - right, H - top - bottom
   -- float span: intraday points sit at their time of day between the day marks
   local tMin = plotArr[1].t or plotArr[1].day
@@ -1334,12 +1355,25 @@ function M.RenderNetWorthChart(canvas, ck, clsName)
   local dMin, dMax = plotArr[1].day, plotArr[pn].day
   local ldSpan = dMax - dMin
   local labelN = (dMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
+  local placed = {}
   for k = 0, labelN - 1 do
     local day = (labelN <= 1) and dMin or (dMin + math.floor(ldSpan * k / (labelN - 1) + 0.5))
     local anchor = (k == 0) and "LEFT" or ((k == labelN - 1) and (capped and "LEFT" or "RIGHT") or "CENTER")
     local lx = X(day)
     if lx < left then lx = left end
-    Label(canvas, lx, bottom - 12, M.DayLabel(day), anchor, TC("muted"))
+    local s = Label(canvas, lx, bottom - 12, M.DayLabel(day), anchor, TC("muted"))
+    local w = s:GetStringWidth() or 0
+    local l = (anchor == "LEFT") and lx or ((anchor == "RIGHT") and (lx - w) or (lx - w / 2))
+    placed[#placed + 1] = { s = s, l = l, r = l + w }
+  end
+  -- a narrow chart at a large text size: keep both ends, drop the middle
+  -- labels that would run into a neighbour
+  if #placed > 2 and not capped then
+    local prev, last = placed[1], placed[#placed]
+    for i = 2, #placed - 1 do
+      local p = placed[i]
+      if p.l < prev.r or p.r > last.l then p.s:Hide() else prev = p end
+    end
   end
 end
 
@@ -1468,7 +1502,7 @@ function M.RenderHoldingChart(canvas, key, qty)
   end
   -- layout: one plot, price scale on the left, value scale on the right
   local W, H = canvas:GetWidth(), canvas:GetHeight()
-  local left, right, top, bottom = 64, 70, 16, 20
+  local left, right, top, bottom = gut(64), gut(70), 16, gut(20)
   local pw, ph = W - left - right, H - top - bottom
   local dMin, dMax = arr[1].day, arr[n].day
   local dSpan = math.max(1, dMax - dMin)
@@ -1735,7 +1769,7 @@ function M.RenderHelpFair(canvas)
   ResetPools(canvas)
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   if W < 50 then return end
-  local left, right, top, bottom = 30, 8, 14, 16
+  local left, right, top, bottom = gut(30), 8, 14, gut(16)
   local pw, ph = W - left - right, H - top - bottom
   -- 14 example daily lows in gold; day 5 is a 30g no-demand spike (trimmed)
   local lows = { 10, 11, 9.5, 10.5, 30, 10, 11, 12, 10.5, 11, 11.5, 10.5, 11, 11.5 }
@@ -1804,7 +1838,7 @@ function M.RenderFairBiasDemo(canvas, hl)
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   if W < 50 or H < 40 then return end   -- at the minimum window the demo zone collapses
   hl = hl or 7
-  local left, right, top, bottom = 34, 8, 12, 16
+  local left, right, top, bottom = gut(34), 8, 12, gut(16)
   local pw, ph = W - left - right, H - top - bottom
   local lows = { 11.6, 12.9, 10.9, 13.1, 11.4, 12.6, 10.8, 13.2, 11.5, 12.8,
                  11.0, 12.5, 11.3, 9.4, 7.8, 8.9, 7.3, 8.8, 7.5, 8.7, 7.9 }
@@ -1844,7 +1878,7 @@ function M.RenderHelpOdds(canvas)
   ResetPools(canvas)
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   if W < 50 then return end
-  local left, right, top, bottom = 34, 8, 10, 30
+  local left, right, top, bottom = gut(34), 8, 10, gut(30)
   local pw, ph = W - left - right, H - top - bottom
   -- NOT a price-over-time chart: x is YOUR ASKING PRICE for an item whose
   -- floor is 10g (same numbers as the Fair example above); y answers "how
@@ -1877,10 +1911,13 @@ function M.RenderHelpOdds(canvas)
   RoundDot(canvas, X(13), Y(odds(13)), 8, rr, rg, rb)
   Label(canvas, X(13) + 4, Y(odds(13)) + 10,
     string.format("ask 13g (+30%%) \194\183 ~%.0f%%", odds(13) * 100), "LEFT", rr, rg, rb)
-  Label(canvas, X(10), bottom - 9, "10g", "CENTER", mr, mg, mb)
-  Label(canvas, X(15), bottom - 9, "15g", "CENTER", mr, mg, mb)
-  Label(canvas, X(20) - 4, bottom - 9, "20g", "CENTER", mr, mg, mb)
-  Label(canvas, left + pw / 2, bottom - 20, "your asking price", "CENTER", mr, mg, mb)
+  -- tick row and axis title move apart with the text size
+  local kk = math.max(1, M.Theme and M.Theme.fontScale or 1)
+  local tickY, titleY = bottom - 9 * kk, bottom - 20 * kk - (kk > 1 and 2 or 0)
+  Label(canvas, X(10), tickY, "10g", "CENTER", mr, mg, mb)
+  Label(canvas, X(15), tickY, "15g", "CENTER", mr, mg, mb)
+  Label(canvas, X(20) - 4, tickY, "20g", "CENTER", mr, mg, mb)
+  Label(canvas, left + pw / 2, titleY, "your asking price", "CENTER", mr, mg, mb)
 end
 
 -- ===== "Why these numbers?" charts: the Help examples with REAL item data ===
@@ -1894,7 +1931,7 @@ function M.RenderWhyFair(canvas, key)
     Label(canvas, W / 2, H / 2, "no price data", "CENTER", TC("muted"))
     return
   end
-  local left, right, top, bottom = 46, 10, 16, 20
+  local left, right, top, bottom = gut(46), 10, 16, gut(20)
   local pw, ph = W - left - right, H - top - bottom
   local arr = {}
   for day, v in pairs(series) do if v.low then arr[#arr + 1] = { day = day, low = v.low } end end
@@ -2026,7 +2063,7 @@ function M.RenderWhyOdds(canvas, key)
     Label(canvas, W / 2, H / 2 - 6, "outcomes to estimate odds yet", "CENTER", TC("muted"))
     return
   end
-  local left, right, top, bottom = 46, 10, 14, 32
+  local left, right, top, bottom = gut(46), 10, 14, gut(32)
   local pw, ph = W - left - right, H - top - bottom
   -- the EXACT model curve: logit(odds) is linear in ln(price) with slope
   -- -FAIR_SLOPE, anchored at (fair, oddsAtFair) -- identical to Metrics' oddsAt
@@ -2098,9 +2135,11 @@ function M.RenderWhyOdds(canvas, key)
   local anch = (X(cur) > left + pw * 0.6) and "RIGHT" or "LEFT"
   Label(canvas, X(cur) + ((anch == "LEFT") and 6 or -6), Y(odds(cur)) - 9,
     string.format("current %s (%+.0f%%) \194\183 ~%.0f%%", M.MoneyPlain(cur), m.delta * 100, curOdds * 100), anch, cr, cg, cb)
-  Label(canvas, left, bottom - 9, M.MoneyPlain(pLo), "LEFT", mr, mg, mb)
-  Label(canvas, left + pw, bottom - 9, M.MoneyPlain(pHi), "RIGHT", mr, mg, mb)
-  Label(canvas, left + pw / 2, bottom - 20, "your asking price (not time)", "CENTER", mr, mg, mb)
+  local kk = math.max(1, M.Theme and M.Theme.fontScale or 1)
+  local tickY, titleY = bottom - 9 * kk, bottom - 20 * kk - (kk > 1 and 2 or 0)
+  Label(canvas, left, tickY, M.MoneyPlain(pLo), "LEFT", mr, mg, mb)
+  Label(canvas, left + pw, tickY, M.MoneyPlain(pHi), "RIGHT", mr, mg, mb)
+  Label(canvas, left + pw / 2, titleY, "your asking price (not time)", "CENTER", mr, mg, mb)
   -- legend row along the top edge
   local ly = bottom + ph + 4
   local lx = left + 2

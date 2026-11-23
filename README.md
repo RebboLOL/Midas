@@ -181,8 +181,9 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
 
 8. **Settings** – everything configurable in one place. **General:** the item-tooltip style
    (**Full / Reduced / Off**, with a live preview of exactly what each produces), the minimap
-   button on/off, auto-scan on AH open, the default chart timeframe and a separate
-   timeframe for the small preview cards. **Community sync:**
+   button on/off, auto-scan on AH open, the default chart timeframe, a separate
+   timeframe for the small preview cards and the **text size** of every Midas window (90-130%;
+   item tooltips keep the game's font size). **Community sync:**
    on/off, whose data to accept (everyone / guild only), the **cross-guild (nearby)** channel
    (Off / Say / Yell), a compact status (peers, rows in/out, throttle counter) and a **live log**
    of each scan, beacon and backfill. (`/midas share on|off`, `/midas vicinity` and
@@ -452,6 +453,11 @@ a full **item link**, or a raw archive key (`gr:...` for suffixed gear).
   that older versions stored under Auctionator's realm name moves over at login; if that name is
   shared with characters of another realm or faction, a chat note names the
   `/midas realmmerge <old name>` to run instead.
+- **WoW Forever hides the realm** from addons since the hotfix of 20 November 2026. Midas keeps the
+  realm of every character itself (the name the game last gave, else the realm the character is
+  stored under, else the realm of its ruleset you played on last); a new account starts as
+  "Forever <region> <ruleset>".
+  What 1.3.2 stored under an empty realm moves back at login. `/midas market` shows the realm used.
 - Accuracy grows with regular scanning incl. weekends.
 - Data source = only what you scan yourself at the AH.
 - Vendor items are learned automatically whenever you open a merchant (unlimited, gold-only items),
