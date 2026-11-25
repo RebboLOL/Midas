@@ -1,5 +1,13 @@
 # Midas – Changelog
 
+## 1.3.6 – 2026-11-25
+- **Crafting: table view with your own make or buy.** A Tree | Table switch shows the chain as rows with make, buy, saving and profit side by side and a total under the last step, and lets you choose make or buy for each material.
+- **Crafting: totals for several items.** A number box at the table under the tree shows every value for that many items and warns when your last full scan lists too few materials.
+- **Crafting: pick the columns of Top crafts.** The new Columns button adds profit with bought or made materials, margin and making saves, and a click on a column header sorts the list by it.
+- **Crafting: zoom and drag the tree.** The mouse wheel zooms the tree, dragging moves it, and − / + / Fit sit in the corner of the field.
+- **Crafting: known recipes.** A red card marks a step none of your characters knows, the new Buy unknown tick box only counts a material as made when one of them knows its recipe, and Known recipes moved to the top bar.
+- **Crafting: fixed bugs where the side column's scroll bar could not be dragged and a profession name overlapped the saving on a card.** The bar now follows the mouse, and the name is cut where the saving starts.
+
 ## 1.3.5 – 2026-11-23
 - **WoW Forever: Black Market prices are a cap, not the price.** Materials the Black Market sells above their auction house price now count at the auction house price in crafting, Top Picks and Net Worth.
 - **Neutral auction houses: scans stay apart.** A scan at Booty Bay, Gadgetzan or Everlook no longer ends up in your faction's prices.

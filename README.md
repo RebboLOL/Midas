@@ -346,27 +346,42 @@ each from the game's own data tables, so changed Forever recipes show as they ar
 (search, **Top crafts**, the *Craft tree* chip on the Charts tab, any item's right-click menu or
 `/midas tree <item>`):
 - **Top crafts** – the start view lists the crafts with market data by profit now; **All professions** narrows
-  it to one profession, **Known recipes** below the list to what one of your characters can make.
+  it to one profession, **Known recipes** in the bar above to what one of your characters can make.
+  **Columns** under the list picks what it shows – profession, materials, AH price, profit, profit with every
+  material bought or with make or buy, margin, making saves, sales per day; a column that does not fit next to the
+  item name says "no room" there. Click a column header to sort the list by it, highest first.
 - **The tree** – the item sits on the right, its materials fan out to the left, level by level. Every card
   shows the quantity for one craft, what this step costs in total (big) and per unit (small), **now**
   (cheapest listing of the newest scan, Fair when nothing is listed) in gold and **Fair** in purple below
   it, and on its bottom line where it comes from (AH, vendor, CRAFT) and what making it **saves** over
   buying it (or what it would cost extra). Hover a card for the step in numbers: needed, buy, make, saving.
 - **The field** – the tree sits in its own framed field with a scroll bar on the right and one at the
-  bottom: the mouse wheel scrolls up and down (sideways when the tree is not taller than the field), the
-  bars move it in every direction. A small tree sits in the middle, and a new item opens with the item
-  in view.
+  bottom. Drag the field to move the tree, also past its own edges, or use the bars. The mouse wheel zooms around the mouse
+  pointer, **−** / **+** in the field's corner zoom in steps of 10%, and **Fit** shows the whole tree
+  (click again for 100%). A small tree sits in the middle, and a new item opens with the item in view.
+- **Tree or table** – **Tree | Table** in the field's top right corner shows the chain as a table instead: one
+  row per step, indented by level, with what making and what buying it costs (the way Midas counts it is
+  bright), what making saves and what making it to sell would earn, and **Make | Buy** for each material.
+  Your choice counts for this item's tree, table and footer (a gold tag on its card); Top crafts and the
+  tooltips keep the cheapest way, and **Reset choices** drops them. The rows count for the items set in the
+  footer box. The **TOTAL** row under the last step sums it up: MAKE is everything you buy for the craft, BUY
+  the items themselves instead, then the saving, the profit and how many materials you buy.
 - **Make or buy** – each material is bought or made from its own materials, whichever is cheaper right now
   (a green *CRAFT* tag); **+** opens a material's recipe for reference even when buying is cheaper. Off, every
-  material is bought.
+  material is bought. **Buy unknown** next to it only makes a material when one of your characters knows
+  its recipe; every other material with a price is bought.
 - **Prices** – AH prices from your scans, vendor materials at what a merchant charged you (visit one once;
   until then a marked estimate from the game data). A card without any price says so, and the totals are
   flagged as partial.
 - **The footer** – the answer first: **MAKE IT** or **BUY IT** at today's prices and by how much, and what
-  crafting one to sell earns after the 5% AH cut. Next to it the numbers behind that for one item – make,
-  buy, making saves, sell after cut, profit each – now (gold) over Fair (purple), every column explained
-  on hover. Below it how much the materials you make yourself cut the cost and which of your characters
+  crafting one to sell earns after the 5% AH cut. Next to it the numbers behind that – make, buy, making
+  saves, sell after cut, profit – now (gold) over Fair (purple), every column explained on hover, for as
+  many items as set in the box in its corner (type a number or turn the mouse wheel; 1 = one item). For
+  more than one, the bottom line checks your newest full scan: whether enough of each material you buy is
+  listed, and how far the prices climb when you buy them all. Below it how much the materials you make yourself cut the cost and which of your characters
   knows the recipe (Midas reads it when you open a profession window); the item's card then has a green frame.
+  A red card marks a step none of your characters has the recipe for – the item itself or a material made
+  on the way.
 - **Cards** – click a card to put that item at the root, right-click it for the item menu (chart, offer
   book, your trades, your stock, watchlist).
 - **Side column** – on top the item's other pages as chips (chart, offer book, your trades, your stock,

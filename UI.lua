@@ -393,7 +393,7 @@ function M.RefreshUI()
     if M.CraftingOn and not M.CraftingOn() then
       hint = "beta: crafting is switched off   \194\183   tick \"Enable crafting\" above to turn it on"
     else
-      hint = "beta   \194\183   click a card to open it   \194\183   + shows how a material is made   \194\183   right-click: all its pages   \194\183   bottom bar: sideways"
+      hint = "beta   \194\183   click a card to open it   \194\183   + shows how a material is made   \194\183   right-click: all its pages   \194\183   wheel: zoom   \194\183   drag: move"
     end
   elseif t == TAB.Settings then
     hint = "general options + community sync   \194\183   sync is invisible to other players"

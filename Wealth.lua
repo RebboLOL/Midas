@@ -251,6 +251,7 @@ function M.FoldChars(moves, keepTarget, quiet)
     if type(cr) == "table" and cr[sk] ~= nil then
       if cr[fk] == nil then cr[fk] = cr[sk] end
       cr[sk] = nil
+      if M.CraftCacheReset then M.CraftCacheReset() end   -- the known recipes may have changed
     end
     if M.Print and not quiet then
       M.Print(keepTarget and ("this character's data moved from '" .. sk .. "' to its full name '" .. fk .. "'.")

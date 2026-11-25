@@ -207,6 +207,16 @@ end
 -- A MATERIAL that has a price is never made by a recipe on a cooldown (1.3.4,
 -- rec.cd): such a recipe only counts for a material without any price. The
 -- item a calculation is about keeps all its recipes.
+-- "Buy unknown" (config.craftBuyUnknown): a material that has a price is only
+-- made when one of your characters knows its recipe. `kset` holds what they
+-- can make for the current cache generation - nil while the switch is off or
+-- no profession window was read yet.
+-- Your own choice (Crafting tab, table view): `force` = { [itemID] = "make" |
+-- "buy" } for the materials of the item a calculation is about. It wins over
+-- Make or buy and Buy unknown; a choice the item cannot follow (no recipe, no
+-- price) is left out. Set by M.CraftCost for its own calculation only.
+local kset
+local force
 local cost
 local function makeCost(id, k, depth, path, mob, memo, free)
   local recs = M.Recipes().byItem[id]
@@ -237,12 +247,21 @@ cost = function(id, k, depth, path, mob, memo)
   local now, fair, src = M.UnitPrice(id)
   local buy = (k == NOW) and now or fair
   local e = { cost = buy, how = "buy", src = src, ok = buy ~= nil, buy = buy }
-  if mob and depth < MAX_DEPTH and not path[id] then
-    local mc, mrec, mok = makeCost(id, k, depth, path, mob, memo, buy ~= nil)
-    if mc and ((mok and (not buy or mc < buy)) or not buy) then
+  local f = force and force[id]
+  if (mob or f) and depth < MAX_DEPTH and not path[id] then
+    -- your "make" may use a cooldown recipe too
+    local mc, mrec, mok = makeCost(id, k, depth, path, mob, memo, buy ~= nil and f ~= "make")
+    local barred = kset ~= nil and buy ~= nil and not kset[id]
+    if f == "make" and mc then
+      e.cost, e.how, e.rec, e.ok, e.make, e.forced = mc, "make", mrec, mok, mc, "make"
+    elseif f == "buy" and buy then
+      e.make, e.forced = mc, "buy"
+    elseif mob and mc and not barred and ((mok and (not buy or mc < buy)) or not buy) then
       e.cost, e.how, e.rec, e.ok, e.make = mc, "make", mrec, mok, mc
     elseif mc then
       e.make = mc
+      -- cheaper to make, but none of your characters knows the recipe
+      if barred and mok and mc < buy then e.barred = true end
     end
   end
   memo[id] = e
@@ -250,9 +269,19 @@ cost = function(id, k, depth, path, mob, memo)
 end
 
 local cache, cacheGen = {}, nil
+local knownGen = 0      -- counts up when a character learns a recipe
+local function buyUnknown()
+  local d = M.db
+  return (d and d.config and d.config.craftBuyUnknown == true and d.crafts and next(d.crafts) ~= nil) or false
+end
 local function fresh()
+  local bu = buyUnknown()
   local g = tostring(M._analysisGen or 0) .. ":" .. tostring(M.VendorCount and M.VendorCount() or 0)
-  if cacheGen ~= g then cache, cacheGen = {}, g end
+    .. (bu and (":k" .. knownGen) or "")
+  if cacheGen ~= g then
+    cache, cacheGen = {}, g
+    kset = bu and (M.CraftKnownItems() or {}) or nil
+  end
 end
 function M.CraftCacheReset() cacheGen = nil end
 
@@ -260,16 +289,27 @@ local function mobOn()
   return not (M.db and M.db.config and M.db.config.craftBuyOnly)
 end
 
+-- the cache key of a set of your choices ("" for none), the same for any order
+local function forceKey(fc)
+  if not fc or next(fc) == nil then return "" end
+  local t = {}
+  for mid, how in pairs(fc) do t[#t + 1] = tostring(mid) .. ((how == "make") and "m" or "b") end
+  table.sort(t)
+  return "|" .. table.concat(t, ",")
+end
+
 -- what it costs to MAKE one unit of id, now and fair:
 -- { now, fair, rec, complete, nowOk, fairOk, memo = { [NOW] = {...}, [FAIR] = {...} } }
-function M.CraftCost(id, mob)
+-- fc = your make / buy choices for its materials (see `force`), nil for none
+function M.CraftCost(id, mob, fc)
   id = tonumber(id)
   if not id or not M.Recipes().byItem[id] then return nil end
   if mob == nil then mob = mobOn() end
   fresh()
-  local key = id .. (mob and ":m" or ":b")
+  local key = id .. (mob and ":m" or ":b") .. forceKey(fc)
   if cache[key] then return cache[key] end
   local res = { memo = {} }
+  force = (fc and next(fc) ~= nil) and fc or nil
   for k = NOW, FAIR do
     local mm = {}
     local c, rec, ok = makeCost(id, k, 0, {}, mob, mm)
@@ -277,6 +317,7 @@ function M.CraftCost(id, mob)
     if k == NOW then res.now, res.rec, res.nowOk = c, rec, ok
     else res.fair, res.fairRec, res.fairOk = c, rec, ok end
   end
+  force = nil
   res.complete = res.nowOk and res.fairOk
   cache[key] = res
   return res
@@ -290,6 +331,7 @@ function M.EnchantCost(spell, mob)
   if not rec then return nil end
   if mob == nil then mob = mobOn() end
   fresh()
+  force = nil
   local key = "e" .. rec.spell .. (mob and ":m" or ":b")
   if cache[key] then return cache[key] end
   local res = { mat = { {}, {} } }
@@ -308,9 +350,11 @@ function M.EnchantCost(spell, mob)
   return res
 end
 
--- AH price after the 5% cut minus the cost of making it, now and fair
-function M.CraftProfit(id)
-  local cc = M.CraftCost(id)
+-- AH price after the 5% cut minus the cost of making it, now and fair;
+-- mob = true / false asks for one way of sourcing (nil: the Make or buy switch),
+-- fc = your make / buy choices for its materials
+function M.CraftProfit(id, mob, fc)
+  local cc = M.CraftCost(id, mob, fc)
   if not cc then return nil end
   local sNow, sFair = M.SellPrice(id)
   local p = { cost = cc, sellNow = sNow, sellFair = sFair }
@@ -323,6 +367,68 @@ function M.CraftProfit(id)
     p.fairPct = (cc.fair > 0) and (p.fair / cc.fair) or nil
   end
   return p
+end
+
+-- What `n` items of id need to BUY, along the same route as CraftCost (now
+-- prices): every material bought there counts with its units, a material made
+-- there is followed into its own recipe. { [itemID] = { units, src, price } }
+-- fc = your make / buy choices for its materials
+function M.CraftNeeds(id, n, mob, fc)
+  local cc = M.CraftCost(id, mob, fc)
+  if not (cc and cc.rec and n and n > 0) then return nil end
+  local memo = cc.memo[NOW]
+  local need, path = {}, { [tonumber(id)] = true }
+  -- `path` ends every circle; a made material is followed however deep its
+  -- memo entry sits, as CraftCost counted it
+  local function walk(mid, units)
+    local e = memo[mid]
+    if e and e.how == "make" and e.rec and not path[mid] then
+      path[mid] = true
+      local runs = units / e.rec.yield
+      for _, mt in ipairs(e.rec.mats) do walk(mt.id, mt.n * runs) end
+      path[mid] = nil
+    else
+      local t = need[mid]
+      if not t then
+        t = { units = 0, src = e and e.src, price = e and e.buy }
+        need[mid] = t
+      end
+      t.units = t.units + units
+    end
+  end
+  local runs = n / cc.rec.yield
+  for _, mt in ipairs(cc.rec.mats) do walk(mt.id, mt.n * runs) end
+  return need
+end
+
+-- true when this realm has the price ladder of a full scan (the offer book)
+function M.HasDepth()
+  local d = M.db and M.db.depth and M.RealmKey and M.db.depth[M.RealmKey()]
+  return d ~= nil and d.items ~= nil
+end
+
+-- What buying `units` of id costs at the listings of your newest full scan,
+-- cheapest first: { want, got, listed, cost, climb, ts }, climb = what that
+-- costs over buying them all at its cheapest listing. Units listed above the
+-- stored price levels count at the dearest stored price. nil when that scan
+-- did not list the item.
+function M.DepthCost(id, units)
+  local d = M.GetDepth and M.GetDepth(id)
+  local lv1 = d and d.levels and d.levels[1]
+  if not lv1 then return nil end
+  local want = math.ceil((units or 0) - 1e-6)
+  local got, sum, last = 0, 0, lv1.price
+  for _, lv in ipairs(d.levels) do
+    if got >= want then break end
+    local take = min(lv.qty, want - got)
+    got, sum, last = got + take, sum + take * lv.price, lv.price
+  end
+  local listed = max(d.listed or got, d.units or got)
+  local rest = min(want, listed) - got
+  if rest > 0 then
+    got, sum = got + rest, sum + rest * last
+  end
+  return { want = want, got = got, listed = listed, cost = sum, climb = sum - got * lv1.price, ts = d.ts }
 end
 
 -- best crafts by profit (now) among items with market data: { {id, profit}, ... }
@@ -549,14 +655,25 @@ local function readModern(c)
 end
 
 function M.CraftLearn(kind)
+  local first = not (M.db and M.db.crafts and next(M.db.crafts) ~= nil)   -- no profession window read yet
   local c = charStore()
   if not c then return 0 end
+  local function size()
+    local n = 0
+    for _ in pairs(c.items) do n = n + 1 end
+    for _ in pairs(c.ench) do n = n + 1 end
+    return n
+  end
+  local before = size()
   local ok, got = pcall(function()
     if kind == "craft" then return readCraft(c) end
     if GetNumTradeSkills then return readLegacy(c) end
     return readModern(c)
   end)
-  return ok and got or 0
+  -- a new recipe, or the first record at all (red cards and "Buy unknown" start with it)
+  local grew = size() ~= before or first
+  if grew then knownGen = knownGen + 1 end   -- "Buy unknown" recalculates
+  return ok and got or 0, grew
 end
 
 -- names of your characters who can make this item (enchant = true: who
@@ -600,7 +717,9 @@ do
     pending = true
     C_Timer.After(0.5, function()
       pending = nil
-      M.CraftLearn((event == "CRAFT_SHOW" or event == "CRAFT_UPDATE") and "craft" or "trade")
+      local _, grew = M.CraftLearn((event == "CRAFT_SHOW" or event == "CRAFT_UPDATE") and "craft" or "trade")
+      -- an open Crafting tab shows the new recipes at once (red cards, costs)
+      if grew and M.RefreshCrafting then M.RefreshCrafting() end
     end)
   end)
 end
