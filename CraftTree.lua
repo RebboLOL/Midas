@@ -1389,6 +1389,15 @@ function fillFoot(root, cc)
   if #who > 0 then
     parts[#parts + 1] = GRNH .. "recipe known by " .. table.concat(who, ", ") .. "|r"
   else
+    -- what the recipe item costs and how many crafts pay for it (your choices count)
+    local pay = M.ProductPayoff(id, nil, ct.force)
+    if pay then
+      local c = pay.crafts[1]
+      parts[#parts + 1] = "recipe " .. GOLDH .. money(pay.price[1]) .. "|r "
+        .. ((c == false) and (REDH .. "does not pay off - no profit|r")
+            or ("pays off after " .. GOLDH .. M.CraftsText(c) .. "|r"))
+        .. (pay.partial and (MUTH .. " (partial)|r") or "")
+    end
     parts[#parts + 1] = MUTH .. "no character of yours knows the recipe yet (open the profession window once)|r"
   end
   -- red cards among the materials: steps of the chain nobody can craft yet
@@ -1468,6 +1477,8 @@ local TOP_COLS = {
     tip = { "Making saves", "Buying one minus making one: what crafting it yourself saves over buying the item. Red = buying is the cheaper way." } },
   { key = "sells", head = "SELLS", w = 80, on = true, sort = true, by = "sales per day",
     tip = { "Sells", "Your own sales of the item per day, once you have sold it a few times." } },
+  { key = "payoff", head = "PAYOFF", w = 110, sort = true, by = "recipe payoff",
+    tip = { "Recipe payoff", "How many crafts it takes until their profit after the 5% AH cut pays for the recipe item (Recipe, Pattern, Plans ...), with your Make or buy setting. Below: what the recipe costs, or \"known\" when one of your characters knows it. Grey = some material has no price. - = no recipe item with a price (trainer recipes, not scanned yet)." } },
 }
 
 -- "Known recipes": Top crafts and the profession list show only what one of
@@ -1542,6 +1553,12 @@ local function routeProfit(e, mob)
   return e[k] or nil
 end
 
+-- the recipe payoff of a row (M.ProductPayoff), false when there is none
+local function rowPayoff(e)
+  if e._pay == nil then e._pay = M.ProductPayoff(e.id) or false end
+  return e._pay or nil
+end
+
 local function makeSaves(e)
   if e._saves == nil then
     local cc = e.profit.cost
@@ -1558,6 +1575,11 @@ local function sortVal(e, key)
   elseif key == "margin" then return p.nowPct
   elseif key == "sells" then return e.speed
   elseif key == "saves" then return makeSaves(e)[1]
+  elseif key == "payoff" then
+    -- fewest crafts first, then the ones without profit, rows without a recipe item last
+    local q = rowPayoff(e)
+    if not q then return nil end
+    return q.crafts[1] and -q.crafts[1] or -1e12
   elseif key == "pbuy" or key == "pmake" then
     local q = routeProfit(e, key == "pmake")
     return q and q[1]
@@ -1672,6 +1694,20 @@ local function fillTopCell(cell, key, e)
   elseif key == "sells" then
     a:SetText(e.speed and string.format("~%.1f/day", e.speed) or "-"); a:SetTextColor(T.Unpack(C.sub))
     b:SetText("")
+  elseif key == "payoff" then
+    local q = rowPayoff(e)
+    if not q then
+      a:SetText("-"); a:SetTextColor(T.Unpack(C.muted)); b:SetText("")
+      return
+    end
+    local n = q.crafts[1]
+    a:SetText(M.CraftsText(n))
+    a:SetTextColor(T.Unpack((n == false) and C.red or (q.partial and C.muted or C.teal)))
+    if #M.CraftKnownBy(e.id) > 0 then
+      b:SetText("known"); b:SetTextColor(T.Unpack(C.green))
+    else
+      b:SetText("recipe " .. money(q.price[1])); b:SetTextColor(T.Unpack(C.sub))
+    end
   end
 end
 
@@ -2491,7 +2527,10 @@ function M.BuildCrafting(panel)
     end
     if T.HelpTip then
       local lines = { def.tip[2] }
-      if def.sort then lines[#lines + 1] = "Click to sort the list by this column, highest first." end
+      if def.sort then
+        lines[#lines + 1] = (def.key == "payoff") and "Click to sort the list by this column, fewest crafts first."
+          or "Click to sort the list by this column, highest first."
+      end
       T.HelpTip(h, def.tip[1], lines, "ANCHOR_TOP")
     end
     ct.topHeads[def.key] = h

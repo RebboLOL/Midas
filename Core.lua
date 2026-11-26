@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.3.6"
+M.version = "1.3.7"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -112,13 +112,17 @@ end
 -- keepLastDay: the caller did not move the newest full-scan day (or raised the
 -- cached one itself), so M.LastScanDay keeps its answer instead of walking the
 -- whole archive again.
-function M.DirtyAnalysis(keepLastDay)
+-- pastSame: the change left every earlier day's row alone (live prices, quick
+-- rows of today), so what was built from past days only - the Crafted line's
+-- day costs (Crafting.lua M.CraftCostOn) - stays valid; M._pastGen counts the rest.
+function M.DirtyAnalysis(keepLastDay, pastSame)
   M._analysisStale = true   -- keep M._analysis on screen until the rebuild lands
   M._rankCache    = nil
   if not keepLastDay then M._lastDayCache = nil end
   M._curveAnchor  = nil   -- sell-odds class anchors (Logic.lua) depend on trade data
   M._mCache       = nil   -- per-item metrics memo (Logic.lua), generation-stamped
   M._analysisGen  = (M._analysisGen or 0) + 1
+  if not pastSame then M._pastGen = (M._pastGen or 0) + 1 end
 end
 
 -- Money: copper -> short text ------------------------------------------------

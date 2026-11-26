@@ -56,7 +56,7 @@ local R
 function M.Recipes()
   if R then return R end
   R = { byItem = {}, bySpell = {}, usedIn = {}, items = {}, prof = {}, vend = {}, n = 0,
-        enchants = {}, enchBySpell = {}, enchIn = {} }
+        enchants = {}, enchBySpell = {}, enchIn = {}, teach = {}, taughtBy = {} }
   local D = M.RECIPE_DATA
   if type(D) ~= "table" then return R end
   R.prof, R.vend, R.build, R.flavor = D.prof or {}, D.vend or {}, D.build, D.flavor
@@ -103,7 +103,19 @@ function M.Recipes()
       R.enchBySpell[rec.spell] = rec
     end
   end
-  D.rec, D.ench = nil, nil   -- the index is all we need from here on
+  -- recipe items (Recipe:, Pattern:, Plans: ...): item -> the recipe it
+  -- teaches, and per product the recipe items that teach one of its recipes
+  for key, spell in pairs(type(D.teach) == "table" and D.teach or {}) do
+    local rec, item = R.bySpell[tonumber(spell)], tonumber(key)
+    if rec and item then
+      R.teach[item] = rec
+      local t = R.taughtBy[rec.item]
+      if not t then t = {}; R.taughtBy[rec.item] = t end
+      t[#t + 1] = item
+    end
+  end
+  for _, t in pairs(R.taughtBy) do table.sort(t) end
+  D.rec, D.ench, D.teach = nil, nil, nil   -- the index is all we need from here on
   return R
 end
 
@@ -218,6 +230,87 @@ end
 local kset
 local force
 local cost
+
+-- A past day instead of the newest prices (M.CraftCostOn sets it for its own
+-- calculation only): a material's AH price is its daily low of that day, or of
+-- its last scan day up to DAY_LOOKBACK days before - never a later day, so a
+-- material that only reached the auction house later has no price yet. A
+-- merchant price wins where it is cheaper, as in M.UnitPrice; without an AH
+-- price the merchant price or the recipe data's estimate counts.
+-- A moment instead (`priceTs`, M.CraftCostAt, the 1D chart): the material's
+-- price is its newest scan at or before that moment - an own scan or a server
+-- point (M.ServerIntra), else its daily row: today's when its last scan lay
+-- before the moment, an earlier day's otherwise (up to DAY_LOOKBACK days).
+local DAY_LOOKBACK = 7
+local priceDay, priceTs
+
+-- the newest point of an ascending intraday list at or before t, when it is
+-- newer than `best` and has a price
+local function intraBefore(list, t, best)
+  for i = #(list or {}), 1, -1 do
+    local e = list[i]
+    if type(e) == "table" and tonumber(e.ts) and e.ts <= t then
+      local p = tonumber(e.low)
+      if p and p > 0 and (not best or e.ts > best.ts) then return { ts = e.ts, p = p } end
+      if p and p > 0 then return best end
+    end
+  end
+  return best
+end
+
+-- AH price of a material at the moment priceTs (nil: none known)
+local function ahAt(id, s)
+  local t, D0 = priceTs, M.C.SCAN_DAY_0
+  local key = tostring(id)
+  local ist = M.db and M.db.intra and M.RealmKey and M.db.intra[M.RealmKey()]
+  local best = intraBefore(ist and ist[key], t, nil)
+  best = intraBefore(M.ServerIntra and M.ServerIntra(key), t, best)
+  if best and best.ts < t - DAY_LOOKBACK * 86400 then best = nil end
+  if s then
+    local d0 = floor((t - D0) / 86400)
+    for d = d0, d0 - DAY_LOOKBACK, -1 do
+      local r = s[d]
+      if type(r) == "table" then
+        local rts, rp = tonumber(r.ts), nil
+        if rts and rts <= t and tonumber(r.cur) and r.cur > 0 then
+          rp = r.cur
+        elseif d < d0 and tonumber(r.low) and r.low > 0 then
+          rp, rts = r.low, (rts and rts <= t) and rts or (D0 + (d + 1) * 86400 - 1)
+        end
+        if rp then
+          if not best or rts > best.ts then best = { ts = rts, p = rp } end
+          break
+        end
+      end
+    end
+  end
+  return best and best.p
+end
+
+local function unitOn(id)
+  local v = M.VendorPrice and M.VendorPrice(id)
+  if not (v and v > 0) then v = nil end
+  local s = M.GetSeries and M.GetSeries(tostring(id))
+  local p
+  if priceTs then
+    p = ahAt(id, s)
+  elseif s then
+    for d = priceDay, priceDay - DAY_LOOKBACK, -1 do
+      local r = s[d]
+      local q = type(r) == "table" and tonumber(r.low)
+      if q and q > 0 then p = q; break end
+    end
+  end
+  if p then
+    if v and v <= p then return v, "vendor" end
+    return p, "ah"
+  end
+  if v then return v, "vendor" end
+  local est = M.Recipes().vend[id]
+  if est then return est, "est" end
+  return nil, nil
+end
+
 local function makeCost(id, k, depth, path, mob, memo, free)
   local recs = M.Recipes().byItem[id]
   if not recs then return nil end
@@ -244,7 +337,13 @@ end
 cost = function(id, k, depth, path, mob, memo)
   local hit = memo[id]
   if hit then return hit.cost, hit.how, hit.rec, hit.ok end
-  local now, fair, src = M.UnitPrice(id)
+  local now, fair, src
+  if priceDay or priceTs then
+    now, src = unitOn(id)
+    fair = now
+  else
+    now, fair, src = M.UnitPrice(id)
+  end
   local buy = (k == NOW) and now or fair
   local e = { cost = buy, how = "buy", src = src, ok = buy ~= nil, buy = buy }
   local f = force and force[id]
@@ -283,7 +382,8 @@ local function fresh()
     kset = bu and (M.CraftKnownItems() or {}) or nil
   end
 end
-function M.CraftCacheReset() cacheGen = nil end
+local dayCache, dayGen = {}, nil   -- M.CraftCostOn's own cache (see there)
+function M.CraftCacheReset() cacheGen = nil; dayGen = nil end
 
 local function mobOn()
   return not (M.db and M.db.config and M.db.config.craftBuyOnly)
@@ -321,6 +421,51 @@ function M.CraftCost(id, mob, fc)
   res.complete = res.nowOk and res.fairOk
   cache[key] = res
   return res
+end
+
+-- what it cost to MAKE one unit of id on a past day (scan day number), along
+-- the route of M.CraftCost without your own choices: each level bought or
+-- made, whichever was cheaper with that day's prices (see `priceDay`).
+-- Returns cost, complete - incomplete when some material had no price yet.
+-- Its own cache outlives the newest-price cache: live prices and today's quick
+-- rows (M.DirtyAnalysis pastSame) leave every past day's row alone, so only
+-- M._pastGen, merchant prices and the known recipes (Buy unknown) renew it.
+-- Today (or a synced row from a fast clock ahead of it) is never cached: its
+-- rows still change with every quick scan.
+function M.CraftCostOn(id, day, mob)
+  id, day = tonumber(id), tonumber(day)
+  if not id or not day or not M.Recipes().byItem[id] then return nil end
+  if mob == nil then mob = mobOn() end
+  fresh()
+  local g = tostring(M._pastGen or 0) .. ":" .. tostring(M.VendorCount and M.VendorCount() or 0)
+    .. (buyUnknown() and (":k" .. knownGen) or "")
+  if dayGen ~= g then dayCache, dayGen = {}, g end
+  local key = id .. ":" .. day .. (mob and ":m" or ":b")
+  local hit = dayCache[key]
+  if hit then return hit.c, hit.ok end
+  force, priceDay, priceTs = nil, day, nil
+  local fine, c, _, ok = pcall(makeCost, id, NOW, 0, {}, mob, {})
+  priceDay = nil
+  if not fine then return nil end
+  hit = { c = c, ok = ok and c ~= nil and c > 0 }
+  if not (M.GetScanDay and day >= M.GetScanDay()) then dayCache[key] = hit end
+  return hit.c, hit.ok
+end
+
+-- the same at a moment of the last day (unix time; the 1D chart): each
+-- material at its newest scan before it (see `priceTs`). Not cached - the
+-- server's points come and go with the companion app's file, and a 1D chart
+-- asks for a few dozen moments only. Returns cost, complete.
+function M.CraftCostAt(id, ts, mob)
+  id, ts = tonumber(id), tonumber(ts)
+  if not id or not ts or not M.Recipes().byItem[id] then return nil end
+  if mob == nil then mob = mobOn() end
+  fresh()
+  force, priceDay, priceTs = nil, nil, ts
+  local fine, c, _, ok = pcall(makeCost, id, NOW, 0, {}, mob, {})
+  priceTs = nil
+  if not fine then return nil end
+  return c, (ok and c ~= nil and c > 0) or false
 end
 
 -- what the materials of one enchant cost, now and fair (each bought or made,
@@ -468,6 +613,84 @@ function M.TopCrafts(prof, n, known)
   local out = {}
   for i = 1, n do out[i] = list[i] end
   return out
+end
+
+-- ===== Recipe payoff ========================================================
+-- A recipe item (Recipe:, Pattern:, Plans: ...) teaches one recipe. Its payoff
+-- is how many crafts of that recipe it takes until their profit after the 5%
+-- AH cut has paid for the recipe item: ceil(price / profit of one craft), now
+-- and fair. Each material counts as CraftCost decided it (Make or buy, Buy
+-- unknown, your choices), but always the materials of THIS recipe, even where
+-- the item has a cheaper one.
+-- { item, rec, product, price = { now, fair }, src, per = { now, fair },
+--   crafts = { now, fair }, partial } - crafts false = the craft makes no
+-- profit; nil when the recipe item, its price or the product's AH price is
+-- unknown
+
+-- one craft of rec (all its yield) along the route of a CraftCost result
+local function recipeRun(rec, cc, k)
+  local memo = cc.memo[k]
+  local sum, ok = 0, true
+  for _, mt in ipairs(rec.mats) do
+    local e = memo and memo[mt.id]
+    if not (e and e.cost) then return nil end
+    sum = sum + e.cost * mt.n
+    if not e.ok then ok = false end
+  end
+  return sum, ok
+end
+
+function M.RecipePayoff(item, mob, fc)
+  item = tonumber(item)
+  local rec = item and M.Recipes().teach[item]
+  if not rec then return nil end
+  local pNow, pFair, src = M.UnitPrice(item)
+  if not (pNow and pNow > 0) then return nil end
+  local cc = M.CraftCost(rec.item, mob, fc)
+  local sNow, sFair = M.SellPrice(rec.item)
+  if not (cc and sNow) then return nil end
+  local res = { item = item, rec = rec, product = rec.item, price = { pNow, pFair or pNow }, src = src,
+                per = {}, crafts = {} }
+  local sells = { sNow, sFair }
+  for k = NOW, FAIR do
+    local run, ok = recipeRun(rec, cc, k)
+    if run and sells[k] then
+      local per = sells[k] * (1 - AH_CUT) * rec.yield - run
+      res.per[k] = per
+      -- under one copper a craft is no profit (it would take billions of crafts)
+      res.crafts[k] = (per >= 1) and max(1, math.ceil(res.price[k] / per - 1e-9)) or false
+      if not ok then res.partial = true end
+    end
+  end
+  if res.crafts[NOW] == nil then return nil end
+  return res
+end
+
+-- "17 crafts" / "1 craft" / "9999+ crafts" / "no profit" (false)
+function M.CraftsText(c)
+  if c == false then return "no profit" end
+  if not c then return "-" end
+  if c > 9999 then return "9999+ crafts" end
+  return c .. ((c == 1) and " craft" or " crafts")
+end
+
+-- the payoff of the recipe item that pays off soonest among those teaching a
+-- recipe for this product (nil: none with a price, trainer recipes)
+function M.ProductPayoff(id, mob, fc)
+  local list = M.Recipes().taughtBy[tonumber(id) or 0]
+  if not list then return nil end
+  local best
+  for _, item in ipairs(list) do
+    local p = M.RecipePayoff(item, mob, fc)
+    if p then
+      local a, b = p.crafts[NOW], best and best.crafts[NOW]
+      if not best or (a and (not b or a < b or (a == b and p.price[NOW] < best.price[NOW])))
+         or (not a and not b and p.price[NOW] < best.price[NOW]) then
+        best = p
+      end
+    end
+  end
+  return best
 end
 
 -- ===== Disenchanting ========================================================
@@ -739,7 +962,7 @@ local function pct(p)
   return string.format("  %s%+.0f%%|r", col, p * 100)
 end
 
--- adds the craft / disenchant / used-in lines; `header` puts the Midas title
+-- adds the craft / disenchant / payoff / used-in lines; `header` puts the Midas title
 -- first (items without market data); returns true when it added anything
 function M.CraftTipLines(tip, id, mode, header)
   if not (M.db and M.db.config) or M.db.config.tooltipCraft == false then return false end
@@ -749,9 +972,10 @@ function M.CraftTipLines(tip, id, mode, header)
   local Rx = M.Recipes()
   local p = Rx.byItem[id] and M.CraftProfit(id)
   local de = M.DisenchantValue(id)
+  local pay = Rx.teach[id] and M.RecipePayoff(id)
   local nRec, nEnch = M.UsedInCount(id)
   local uses = (nRec + nEnch) > 0
-  if not (p or de or (uses and mode ~= "reduced")) then return false end
+  if not (p or de or pay or (uses and mode ~= "reduced")) then return false end
   if header then
     tip:AddLine(" ")
     tip:AddLine("|cffE8B44AMidas|r")
@@ -767,6 +991,19 @@ function M.CraftTipLines(tip, id, mode, header)
     local tag = de.complete and "" or "  |cff9a968c(partial)|r"
     tip:AddDoubleLine("Disenchant  " .. G .. "~" .. money(de.now) .. "|r" .. tag,
       P .. "fair ~" .. money(de.fair) .. "|r", 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
+  end
+  if pay then
+    -- a recipe item: how many crafts until their profit pays for it
+    local n = pay.crafts[1]
+    local note = pay.partial and "  |cff9a968c(partial)|r" or ""
+    -- a recipe on a cooldown (transmutes): the first craft at once, then one per cooldown
+    if n and n > 1 and n <= 9999 and pay.rec.cd then
+      local days = math.ceil((n - 1) * pay.rec.cd / 86400 - 1e-9)
+      note = note .. string.format("  |cff9a968c(cooldown, ~%d %s)|r", days, (days == 1) and "day" or "days")
+    end
+    local right = (pay.crafts[2] ~= nil) and (P .. "fair " .. M.CraftsText(pay.crafts[2]) .. "|r") or ""
+    tip:AddDoubleLine("Payoff  " .. ((n == false) and "|cfff0645a" or G) .. M.CraftsText(n) .. "|r" .. note,
+      right, 0.78, 0.76, 0.70, 0.78, 0.76, 0.70)
   end
   if uses and mode ~= "reduced" then
     tip:AddLine("Used in  " .. M.UsedInText(nRec, nEnch), 0.55, 0.58, 0.64)

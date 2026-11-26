@@ -128,7 +128,7 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
    the actual characters and items behind it. Active auctions are counted at a discount based on how likely
    they are to sell (high-volume mats keep most of their value, expensive BoE gear is discounted hard).
    A snapshot is stored once a day, so the net-worth line chart grows over time.
-   **The whole tab reads ONE timeframe** (the 1W / 1M / 3M / All switch): the hero line decomposes the
+   **The whole tab reads ONE timeframe** (the 1D / 1W / 1M / 3M / All switch): the hero line decomposes the
    change into **market** (prices moving under what you hold), **quantity** (what you gained/consumed),
    **gold** and an honest rest; **TOP GAINERS / TOP LOSERS** name the items behind it right in the header;
    the class and character lists show their change over the same window; and **"what moved?"** opens the
@@ -160,7 +160,7 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
 6. **Charts** – the item's full price history on a real time axis, drawn as a smooth
    anti-aliased curve (missing scan days show as dashed gaps), with Floor MA, the Fair line and
    your own buys/sells as dots – all toggleable from the top-right of the window. A **timeframe
-   switch** (1W / 1M / 3M / All) on the plot zooms every big chart, including Net Worth.
+   switch** (1D / 1W / 1M / 3M / All) on the plot zooms every big chart, including Net Worth.
    The **offer book** button shows every price the item is listed at in your newest full scan
    (cheapest 20) as a ladder, cheapest on top: each price is a row whose bar continues a cumulative
    "tree" (grey = everything cheaper, green = this price under Fair, gold = above). Fair, quick-sell,
@@ -293,7 +293,8 @@ Midas_Uplink folder - your settings carry over (an older app still needs it, so 
   by the companion app from version 1.3.1).
 - **Server prices** (on by default, `/midas prices off`): the app downloads the daily prices of your markets
   into `Prices.lua`; Midas imports them as the source "Midas Server" like Auctionator data - your own scans
-  always win. Works without sharing; to fetch them the app asks midasmarket.app for the markets you play
+  always win. Along with them come the prices every scanner saw over the last 7 days in 3-hour steps: the big
+  chart shows them on 1W and 1D between your own scans, and Midas never stores them. Works without sharing; to fetch them the app asks midasmarket.app for the markets you play
   on (realm, faction).
 - `/uplink` still works as a short form of the Datalink commands.
 
@@ -348,8 +349,14 @@ each from the game's own data tables, so changed Forever recipes show as they ar
 - **Top crafts** – the start view lists the crafts with market data by profit now; **All professions** narrows
   it to one profession, **Known recipes** in the bar above to what one of your characters can make.
   **Columns** under the list picks what it shows – profession, materials, AH price, profit, profit with every
-  material bought or with make or buy, margin, making saves, sales per day; a column that does not fit next to the
-  item name says "no room" there. Click a column header to sort the list by it, highest first.
+  material bought or with make or buy, margin, making saves, sales per day, recipe payoff; a column that does not fit next to the
+  item name says "no room" there. Click a column header to sort the list by it, highest first (Payoff: fewest crafts first).
+- **Recipe payoff** – for a recipe you learn from an item (Recipe, Pattern, Plans, Formula, Schematic ...): how many
+  crafts it takes until their profit after the 5% AH cut has paid for the recipe item, at its cheapest listing
+  (or a merchant price Midas knows), now and at Fair. It shows on the recipe item's tooltip (*Payoff*, with the days a
+  cooldown recipe needs for it), in the **Payoff** column of Top crafts (with the recipe's price below, or *known*)
+  and in the footer of an item none of your characters knows yet. Recipes taught by a trainer and enchants (no item
+  to sell) have no payoff.
 - **The tree** – the item sits on the right, its materials fan out to the left, level by level. Every card
   shows the quantity for one craft, what this step costs in total (big) and per unit (small), **now**
   (cheapest listing of the newest scan, Fair when nothing is listed) in gold and **Fair** in purple below
@@ -388,10 +395,13 @@ each from the game's own data tables, so changed Forever recipes show as they ar
   watch), then what the item is **used in** (best profit first), what gear **disenchants into** with
   the expected value and whether disenchanting, selling or vendoring pays most, and for dust, essences and
   shards **which disenchants yield them**. Disenchant odds are the known approximate values.
-- **Tooltips** – items carry a *Craft* line (cost now and Fair with the profit), gear a *Disenchant* line
-  and materials a *Used in* count; Settings > *Craft lines* turns them off.
+- **Tooltips** – items carry a *Craft* line (cost now and Fair with the profit), gear a *Disenchant* line,
+  recipe items a *Payoff* line and materials a *Used in* count; Settings > *Craft lines* turns them off.
 - **Charts** – the market line shows **Crafted** (what it costs to make now, with its distance to Current)
-  next to Current and Fair, and the big chart draws it as a dashed mint line. Hover the underlined value
+  next to Current and Fair. The big chart draws it as a mint line over time: each earlier day priced with
+  that day's materials (on 1D each scan with the materials' prices at that moment), so you see what got cheaper
+  or dearer to make; a point at which a material had no price yet stays empty. The *Crafted* tick box left of
+  the alert fields hides the line. Hover the underlined value
   or the *Craft tree* chip next to the name for a small preview of the tree, click to open it.
 - **Beta switch** – crafting is in beta. **Enable crafting** next to the BETA plaque in the tab (or Settings >
   *Crafting (beta)*) turns all of it off: the tree, the Crafted price and line in Charts, the tooltip craft

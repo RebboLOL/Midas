@@ -1682,9 +1682,9 @@ function M.BuildSettings(panel)
   s.tcCb = tcCb
   if T.HelpTip then
     T.HelpTip(tcCb, "Craft lines", {
-      "Adds what an item costs to make from its materials (now in gold, Fair in purple, with the profit after the AH cut), what gear disenchants into, and how many recipes use a material.",
+      "Adds what an item costs to make from its materials (now in gold, Fair in purple, with the profit after the AH cut), what gear disenchants into, how many crafts pay for a recipe item, and how many recipes use a material.",
       "Craftable items without market data get these lines too. The full tree is in the Crafting tab.",
-      "Also draws the dashed mint \"Crafted\" line (what it costs to make now) in the item's big chart." })
+      "Also draws the mint \"Crafted\" line in the item's big chart: what it cost to make on each day, from that day's material prices." })
   end
 
   -- live preview of the tooltip block (mirrors Tooltip.lua's example output)
@@ -5990,7 +5990,7 @@ function M.BuildCharts(panel)
     "The maths:  B = sum(w\194\183low) / sum(w) over the last 14 daily lows, w = 0.5^(age/half-life) - the half-life is yours to set (Settings > FAIR PRICE, default 7d); days with low > 1.5\194\183median are trimmed as no-demand spikes, and one-scan dips under median/1.5 that were gone by the day's last scan.",
     "P(sell at r) = sigmoid(a - 3\194\183ln(r/r0)) with r = price/floor7, fitted from your sold/expired record; r* is the r where P = 50%.",
     "Fair = B \194\183 clamp(floor7\194\183r*/B, 1, 1.10) - at most +10% over the base, and never past the prices your sales really cleared at.",
-    "Crafted - what it costs to make from its materials at the newest prices (each material bought or made, whichever is cheaper); the % is the distance to Current. Hover it for a peek at the tree, click to open the Crafting tab.",
+    "Crafted - what it costs to make from its materials at the newest prices (each material bought or made, whichever is cheaper); the % is the distance to Current. Hover it for a peek at the tree, click to open the Crafting tab. The mint line in the chart shows the same cost for each earlier day, from that day's material prices; a day on which a material had no price yet stays empty.",
     "Quick-sell - at/just under the current floor: sells near-certainly, with less margin.",
     "Sells - how fast it moves: your realized sales per day and the market's liquidity class.",
     "How these are computed, with examples: Help tab." })
@@ -6189,6 +6189,27 @@ function M.BuildCharts(panel)
     b.edit:SetScript("OnEditFocusLost", saveAlerts)
   end
   M.alertUI = { bar = alertBar, below = alertLo, above = alertHi }
+
+  -- "Crafted" toggle left of the alert fields: shows / hides the mint Crafted
+  -- line (its hover read-outs and label) in the big chart. Default on,
+  -- persisted (config.chartCraft = false hides it). Only there for an item
+  -- with a crafting cost while Crafting and Settings "Craft lines" are on -
+  -- otherwise the chart draws no Crafted line anyway (RefreshCharts).
+  local craftTog = T.Checkbox(panel, "Crafted", function(on)
+    if M.db and M.db.config then
+      if on then M.db.config.chartCraft = nil else M.db.config.chartCraft = false end
+    end
+    M.RerenderCharts()
+  end)
+  craftTog:SetPoint("RIGHT", alertBar, "LEFT", -18, 0)
+  craftTog:SetChecked(not (M.db and M.db.config and M.db.config.chartCraft == false))
+  craftTog:Hide()
+  M.chartCraftToggle = craftTog
+  if T.HelpTip then
+    T.HelpTip(craftTog, "Crafted line", {
+      "Shows the mint Crafted line in the chart: what the item cost to make on each day, from that day's material prices (each material bought or made, whichever was cheaper). On 1D it follows every scan of the day.",
+      "A point at which a material had no price yet stays empty. Midas remembers the choice." })
+  end
   if T.HelpTip then
     T.HelpTip(alertBar, "Price alert", {
       "Rings the raid-warning bell (plus a chat line) when this item's newest scanned or synced price reaches your limit: below = buy chance, above = sell moment.",
@@ -7573,6 +7594,15 @@ function M.RefreshCharts()
       M.chartLine1:SetText("")
       if M.chartCraftHot then M.chartCraftHot:Hide() end
     end
+    -- the Crafted toggle only where the chart can draw a Crafted line
+    if M.chartCraftToggle then
+      local cid = M.BaseID and M.BaseID(key)
+      local can = cid and M.CraftCost and (not M.CraftingOn or M.CraftingOn())
+        and not (M.db.config and M.db.config.tooltipCraft == false)
+      local cc = can and M.CraftCost(cid)
+      M.chartCraftToggle:SetShown((cc and cc.now and cc.now > 0) and true or false)
+      M.chartCraftToggle:SetChecked(not (M.db.config and M.db.config.chartCraft == false))
+    end
     -- 3) your own record, dimmed -- and simply absent when there is none
     local sid = (M.BaseID and M.BaseID(key) and tostring(M.BaseID(key))) or key
     local srec, skey
@@ -7631,6 +7661,7 @@ function M.RefreshCharts()
     end)
   else
     if M.alertUI then M.alertUI.bar:Hide() end
+    if M.chartCraftToggle then M.chartCraftToggle:Hide() end
     M.chartTitle:SetText("No data \226\128\148 scan the AH first.")
     M.chartTitle:SetTextColor(T.Unpack(C.sub))
     if M.chartTitleIcon then M.chartTitleIcon:Hide() end

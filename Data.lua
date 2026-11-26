@@ -279,7 +279,7 @@ function M.CommitQuick(acc)
     end
   end
   if items == 0 then return 0 end
-  M.DirtyAnalysis(true)   -- quick rows never move the newest scan day
+  M.DirtyAnalysis(true, true)   -- quick rows never move the newest scan day, only touch today
   if M.CheckAlerts then M.CheckAlerts() end
   if M.ShowSellDock then M.ShowSellDock() end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
@@ -325,7 +325,7 @@ end
 local liveTimer = false
 local function liveSettled()
   liveTimer = false
-  M.DirtyAnalysis(true)   -- live prices stay out of the archive
+  M.DirtyAnalysis(true, true)   -- live prices stay out of the archive
   if M.CheckAlerts then M.CheckAlerts() end
   if M.frame and M.frame:IsShown() and M.RefreshUI then M.RefreshUI() end
 end

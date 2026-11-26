@@ -76,7 +76,17 @@
 --   ts, day0, match = { { client, region, realm, faction }, ... },
 --   items = { [itemID] = "off:low:qty;off:low:qty;..." } }, ... } }
 -- off = UTC days after day0 (UTC midnight), low = day minimum (copper),
--- qty = day maximum of listed units.
+-- qty = day maximum of listed units; ts = the server's newest scan.
+-- The server's intraday prices travel in items as well, as pseudo items with
+-- keys from PSEUDO_MIN up and prices lifted by 1e9 (Midas up to 1.3.6 drops
+-- every row above LOW_MAX, so they never reached an archive):
+--   items[9000000]      = "0:<1e9 + step>:<n>;1:<1e9 + t0>:1"   head, format 1
+--   items[8000000 + id] = "b:<1e9 + low>:qty;..."               per item
+-- bucket b (0 .. n-1) covers [t0 + b*step, t0 + (b+1)*step), low = median of the
+-- cheapest unit buyouts of all scanners' scans in it (single outliers already
+-- dropped by the server), qty = median of the listed units. Only the big item
+-- charts read them (M.ServerIntra); the import, the item counts and the price
+-- history backfill leave every key from PSEUDO_MIN up alone.
 local ADDON, M = ...
 
 local FORMAT    = 1
@@ -101,6 +111,7 @@ local DAY_0       = time({ year = 2020, month = 1, day = 1, hour = 0 })
 local PRUNE_DAYS  = 730               -- Midas history horizon (M.C.PRUNE_DAYS)
 local LOW_MAX     = 5e8               -- same plausibility limits as Midas' imports
 local QTY_MAX     = 1e5
+local PSEUDO_MIN  = 8000000           -- Prices.lua keys from here up: server intraday, no items
 
 M.DATALINK_URL = "https://midasmarket.app/download"
 
@@ -561,11 +572,26 @@ local function scanDay()
   return math.floor((time() - DAY_0) / 86400)
 end
 
+-- an item of the Prices.lua entry (not a pseudo item of the server intraday)
+local function realKey(k)
+  local id = tonumber(k)
+  return not (id and id >= PSEUDO_MIN)
+end
+
+-- items of entry e without the pseudo items
+local function itemCount(e)
+  local n = 0
+  for k in pairs(e.items) do
+    if realKey(k) then n = n + 1 end
+  end
+  return n
+end
+
 -- "off:low:qty;..." of one item -> archive key, { [midasDay] = { low, qty } } | nil.
 -- A UTC day is filed under the Midas (local) day that holds its noon.
 local function priceRows(e, key)
   local id = tonumber(key)
-  if not id or id < 1 or id > ITEM_ID_MAX or id % 1 ~= 0 then return nil end
+  if not id or id < 1 or id > ITEM_ID_MAX or id % 1 ~= 0 or id >= PSEUDO_MIN then return nil end
   local s = e.items[key]
   if type(s) ~= "string" or s == "" then return nil end
   local day0 = tonumber(e.day0)
@@ -604,9 +630,11 @@ local priceSource = {
     -- state must import again
     return "srv:" .. tostring(e.market) .. ":" .. tostring(e.ts) .. ":" .. tostring(e.day0)
   end,
-  Keys = function(e)   -- one frame: a plain walk, about 6,000 keys
+  Keys = function(e)   -- one frame: a plain walk, about 6,000 keys (and the pseudo items)
     local keys, n = {}, 0
-    for k in pairs(e.items) do n = n + 1; keys[n] = k end
+    for k in pairs(e.items) do
+      if realKey(k) then n = n + 1; keys[n] = k end
+    end
     return keys
   end,
   Rows = priceRows,
@@ -614,6 +642,119 @@ local priceSource = {
 
 if MidasAPI and type(MidasAPI.RegisterImportSource) == "function" then
   pcall(MidasAPI.RegisterImportSource, priceSource)
+end
+
+-- ===== server intraday -> big item charts (1W / 1D) ===========================
+-- M.ServerIntra(key) -> the server's intraday points of one item of this
+-- character's market, ascending: { { ts, low, qty, srv = true, b0, b1 }, ... },
+-- or nil (server prices off, no entry, no usable head, no points). Read from
+-- the pseudo items of the entry (format at the top of this file). ts = the
+-- middle of the bucket (t0 + (b + 0.5) * step), at most the entry's ts (the
+-- server's newest scan): the newest bucket is still running and must not plot
+-- in the future; a head whose last bucket starts after the entry's ts is
+-- refused for the same reason. b0 / b1 = start / end of the bucket. Only plain item IDs
+-- 1 .. 999,999 (like the import source); gear keys (g:, gr:) and pets (p:)
+-- have none. Parsed per item on first use and kept in RAM until the entry
+-- changes (another entry or entry.ts: a new file), never in SavedVariables. A
+-- bad head drops the whole intraday, a bad segment only itself. The returned
+-- list is shared: read only.
+local INTRA_HEAD      = 9000000          -- key of the head pseudo item
+local INTRA_BASE      = 8000000          -- 8000000 + itemID: the item's buckets
+local INTRA_ID_MAX    = 999999
+local INTRA_LIFT      = 1000000000       -- prices are lifted by this (above LOW_MAX)
+local INTRA_STEPS     = { [3600] = true, [7200] = true, [10800] = true, [21600] = true }
+local INTRA_N_MAX     = 168
+local INTRA_SPAN_MAX  = 8 * 86400        -- n * step at most (server: 7 days)
+local INTRA_FORMAT    = 1
+local INTRA_CACHE_MAX = 400              -- parsed items kept; more starts the cache over
+
+-- memo of the entry in use: entry + its ts, the checked head (false when
+-- unusable) and the parsed items ([id] = list | false)
+local intraMemo = { entry = nil, ts = nil, head = false, count = 0, items = {} }
+
+local function pseudo(e, k)
+  local s = e.items[k]
+  if s == nil then s = e.items[tostring(k)] end
+  return type(s) == "string" and s or nil
+end
+
+-- "b:low:qty;..." -> { [b] = { low, qty } } (digits only, first of a b wins)
+local function headSegs(s)
+  local out = {}
+  for seg in s:gmatch("[^;]+") do
+    local b, l, q = seg:match("^%s*(%d+):(%d+):(%d+)%s*$")
+    if b then
+      b = tonumber(b)
+      if not out[b] then out[b] = { tonumber(l), tonumber(q) } end
+    end
+  end
+  return out
+end
+
+-- the head of entry e: { t0, step, n, ts } when it is usable, else false.
+-- Point 0 = (1e9 + step, n), point 1 = (1e9 + t0, format version).
+local function intraHead(e)
+  local s = pseudo(e, INTRA_HEAD)
+  local ts = tonumber(e.ts)
+  if not (s and ts) then return false end
+  local p = headSegs(s)
+  local a, b = p[0], p[1]
+  if not (a and b) then return false end
+  local step, n, t0 = a[1] - INTRA_LIFT, a[2], b[1] - INTRA_LIFT
+  if not INTRA_STEPS[step] or n < 1 or n > INTRA_N_MAX or n * step > INTRA_SPAN_MAX
+     or t0 < 0 or b[2] ~= INTRA_FORMAT then
+    return false
+  end
+  -- the last bucket holds the newest scan (tEnd = floor(ts / step) * step): a
+  -- window whose buckets start after the entry's ts would plot in the future
+  if t0 + (n - 1) * step > ts then return false end
+  return { t0 = t0, step = step, n = n, ts = ts }
+end
+
+-- the buckets of one item -> ascending point list | nil
+local function intraParse(s, h)
+  if not s then return nil end
+  local out, last = {}, -1
+  for seg in s:gmatch("[^;]+") do
+    local b, l, q = seg:match("^%s*(%d+):(%d+):(%d+)%s*$")
+    if b then
+      b, l, q = tonumber(b), tonumber(l) - INTRA_LIFT, tonumber(q)
+      -- buckets strictly ascending inside the window, a believable price
+      if b > last and b < h.n and l >= 1 and l <= LOW_MAX then
+        if q > QTY_MAX then q = 0 end
+        local b0 = h.t0 + b * h.step
+        local mid = b0 + h.step / 2
+        if mid > h.ts then mid = h.ts end    -- stays >= b0: the head check keeps b0 <= ts
+        out[#out + 1] = { ts = mid, low = l, qty = q, srv = true, b0 = b0, b1 = b0 + h.step }
+        last = b
+      end
+    end
+  end
+  return out[1] and out or nil
+end
+
+function M.ServerIntra(key)
+  if not pricesOn() then return nil end
+  local ks = (type(key) == "string" or type(key) == "number") and tostring(key) or ""
+  if not ks:find("^[1-9]%d*$") then return nil end
+  local id = tonumber(ks)
+  if id > INTRA_ID_MAX then return nil end
+  local e = priceEntry()
+  if not e then return nil end
+  local memo = intraMemo
+  if memo.entry ~= e or memo.ts ~= e.ts or memo.count >= INTRA_CACHE_MAX then
+    memo.entry, memo.ts, memo.count, memo.items = e, e.ts, 0, {}
+    memo.head = intraHead(e)
+  end
+  local h = memo.head
+  if not h then return nil end
+  local hit = memo.items[id]
+  if hit == nil then
+    hit = intraParse(pseudo(e, INTRA_BASE + id), h) or false
+    memo.items[id] = hit
+    memo.count = memo.count + 1
+  end
+  return hit or nil
 end
 
 -- ===== price history backfill =================================================
@@ -689,7 +830,7 @@ local function prepareHistory(quiet)
   local keys, n = {}, 0
   for k in pairs(store) do
     local id = tonumber(k)
-    if id and id >= 1 and id <= ITEM_ID_MAX and id % 1 == 0 and tostring(id) == tostring(k) then
+    if id and id >= 1 and id <= ITEM_ID_MAX and id < PSEUDO_MIN and id % 1 == 0 and tostring(id) == tostring(k) then
       n = n + 1; keys[n] = k
     end
   end
@@ -856,9 +997,7 @@ function M.DatalinkInfo()
   local ok, e = pcall(priceEntry)
   if ok and e then
     if e ~= cntEntry then
-      local n = 0
-      for _ in pairs(e.items) do n = n + 1 end
-      cntEntry, cntItems = e, n
+      cntEntry, cntItems = e, itemCount(e)
     end
     info.market, info.priceTs, info.priceItems = tostring(e.market), tonumber(e.ts), cntItems
   end
@@ -869,10 +1008,8 @@ local function pricesText()
   if db.prices == false then return "Server prices: OFF (/midas prices on)." end
   local e = priceEntry()
   if not e then return "Server prices: none." end
-  local n = 0
-  for _ in pairs(e.items) do n = n + 1 end
   return string.format("Server prices: %s from %s, %d items.",
-    tostring(e.market), date("%d.%m. %H:%M", tonumber(e.ts) or 0), n)
+    tostring(e.market), date("%d.%m. %H:%M", tonumber(e.ts) or 0), itemCount(e))
 end
 
 local function legacyNote()

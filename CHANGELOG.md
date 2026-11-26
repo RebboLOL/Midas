@@ -1,5 +1,11 @@
 # Midas – Changelog
 
+## 1.3.7 – 2026-11-26
+- **Charts: prices of all scanners through the day.** With the Midas Companion app the 1W and 1D charts show what every scanner saw during the day, and a single outlier that was gone by the next scan no longer shows in the line.
+- **Charts: Crafted over time.** The mint Crafted line shows what the item cost to make on each day (on 1D at each scan) from the material prices of that moment, and a Crafted tick box in the Charts tab hides it.
+- **Crafting: recipe payoff.** A recipe item's tooltip, the new Payoff column of Top crafts and the footer of a recipe you do not know yet show how many crafts it takes until their profit pays for the recipe.
+- **Charts: fixed bugs where the 1W chart showed the quantity of an earlier scan without its bar and broke the line at scans a few minutes apart.** Every scan now has its own volume bar beside its neighbors, and the line runs through.
+
 ## 1.3.6 – 2026-11-25
 - **Crafting: table view with your own make or buy.** A Tree | Table switch shows the chain as rows with make, buy, saving and profit side by side and a total under the last step, and lets you choose make or buy for each material.
 - **Crafting: totals for several items.** A number box at the table under the tree shows every value for that many items and warns when your last full scan lists too few materials.

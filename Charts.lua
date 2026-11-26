@@ -209,8 +209,13 @@ local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA)
     end
   end
 
-  -- render each interval with cubic Hermite + even pixel dashing
-  local DASH, GAP = 6, 4
+  -- render each interval with cubic Hermite + even pixel dashing. A solid
+  -- piece shorter than MINSEG px is not drawn on its own but carried on
+  -- (`pend`, across intervals) until it is long enough: scans minutes apart
+  -- sit a pixel apart on 1W, and sub-pixel line pieces do not render - the
+  -- curve showed a gap there.
+  local DASH, GAP, MINSEG = 6, 4, 1.5
+  local pend, lx, ly
   for i = 1, n - 1 do
     local x1, y1, x2, y2 = pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y
     local h, m1, m2 = x2 - x1, m[i], m[i + 1]
@@ -227,17 +232,30 @@ local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA)
       local y = (2 * t3 - 3 * t2 + 1) * y1 + (t3 - 2 * t2 + t) * h * m1
               + (-2 * t3 + 3 * t2) * y2 + (t3 - t2) * h * m2
       if y < ylo then y = ylo elseif y > yhi then y = yhi end
+      if dashed and pend then
+        -- a dashed interval starts: the carried solid piece ends here
+        Seg(canvas, pend[1], pend[2], x, y, w, r, g, b, a, true); pend = nil
+      end
       if px then
         if dashed then
           if (dist % (DASH + GAP)) < DASH then Seg(canvas, px, py, x, y, w, r, g, b, col, true) end
           dist = dist + math.sqrt((x - px) ^ 2 + (y - py) ^ 2)
         else
-          Seg(canvas, px, py, x, y, w, r, g, b, col, true)
+          local sx, sy = px, py
+          if pend then sx, sy = pend[1], pend[2] end
+          if (x - sx) ^ 2 + (y - sy) ^ 2 >= MINSEG * MINSEG then
+            Seg(canvas, sx, sy, x, y, w, r, g, b, col, true); pend = nil
+          elseif not pend then
+            pend = { px, py }
+          end
         end
       end
       px, py = x, y
     end
+    lx, ly = px, py
   end
+  -- the line's last short piece still draws (it ends at the newest point)
+  if pend and lx then Seg(canvas, pend[1], pend[2], lx, ly, w, r, g, b, a, true) end
 end
 
 -- Subtle volume bars: quantity per price point along the bottom of the plot.
@@ -255,7 +273,8 @@ local function VolumeBars(canvas, bars, bottom, ph, bw, qmax)
     if q > 0 then
       local t = GetTex(canvas, "BACKGROUND")
       t:SetTexture(WHITE); t:SetVertexColor(r, g, b, 0.22)
-      t:SetSize(bw, math.max(1, volH * (q / qmax))); t:ClearAllPoints()
+      -- bars[i].w: a narrower bar of its own (close neighbours, see RenderAllTime)
+      t:SetSize(bars[i].w or bw, math.max(1, volH * (q / qmax))); t:ClearAllPoints()
       t:SetPoint("BOTTOM", canvas, "BOTTOMLEFT", bars[i].x, bottom)
     end
   end
@@ -269,6 +288,7 @@ end
 local READ_STYLE = {
   price = { dot = "teal",   txt = "text",   bg = 0.97, big = true },
   fair  = { dot = "purple", txt = "purple", bg = 0.58 },
+  craft = { dot = "mint",   txt = "mint",   bg = 0.58 },   -- cost of making ("Crafted")
   ma    = { dot = "blue",   txt = "blue",   bg = 0.58 },
   qty   = { dot = "sub",    txt = "sub",    bg = 0.50 },
   tbuy  = { dot = "green",  txt = "green",  bg = 0.58 },   -- your buys ("My trades")
@@ -597,6 +617,43 @@ local function FloorMA(arr, dSpan)
   return ma
 end
 
+-- Single outliers of an intraday point list (ascending by ts), the server's
+-- rule for its intraday prices: a point with a neighbour on each side, both at
+-- most 6 h away, goes when it lies below min(neighbours) / FAIR_TRIM (one cheap
+-- offer, bought out by the next scan) or above max(neighbours) x FAIR_TRIM (a
+-- single spike). Judged against the original neighbours (no cascade); the
+-- newest point always stays. Returns a new list (the same one when nothing goes).
+local TRIM_GAP = 6 * 3600
+function M.IntraTrim(list)
+  local n = list and #list or 0
+  if n < 3 then return list end
+  local f = M.C.FAIR_TRIM or 1.5
+  local out, drop = {}, false
+  for i = 1, n do
+    local e, go = list[i], false
+    if i > 1 and i < n then
+      local a, c = list[i - 1], list[i + 1]
+      if e.ts - a.ts <= TRIM_GAP and c.ts - e.ts <= TRIM_GAP then
+        local lo = (a.low < c.low) and a.low or c.low
+        local hi = (a.low > c.low) and a.low or c.low
+        go = e.low * f < lo or e.low > f * hi
+      end
+    end
+    if go then drop = true else out[#out + 1] = e end
+  end
+  return drop and out or list
+end
+
+-- hover text of an intraday point: an own scan names its time, a server point
+-- its bucket ("15:00-18:00", with an en dash) and, on a second line, its source
+local SRV_NOTE = "Midas Server  \194\183  all scanners"
+local function intraWhen(e)
+  if e.srv and e.b0 and e.b1 then
+    return "  " .. date("%H:%M", e.b0) .. "\226\128\147" .. date("%H:%M", e.b1)
+  end
+  return "  " .. date("%H:%M", e.ts)
+end
+
 -- ===== All-time line (Scalable style: thin teal line over the full history) ==
 function M.RenderAllTime(canvas, key)
   ResetPools(canvas)
@@ -621,25 +678,88 @@ function M.RenderAllTime(canvas, key)
 
   -- 1W / 1D intraday: per-scan points from the intraday tail (big chart only).
   -- Every intraday day also has a daily row (CommitScan writes both), so the
-  -- day list in arr stays the backbone; lastOf marks each day's newest scan.
+  -- day list in arr stays the backbone; lastOf marks each day's newest point.
   -- win0 (1D only) is the window start as a float day.
+  -- The server's intraday points (Datalink.lua M.ServerIntra: the median of
+  -- all scanners per time bucket, delivered by the companion app) join the own
+  -- scans: never in a bucket that holds an own scan (own scans are exact), only
+  -- on days with a daily row in this chart and only inside the window. The
+  -- merged list then loses its single outliers (M.IntraTrim) - for the picture
+  -- only: daily rows, Fair, sync and the stores stay as they are.
   local ipts, covered, lastOf, win0
-  if not canvas._compact and (M.ChartRangeDays() == 7 or is1D) and M.db and M.db.intra then
-    local ist = M.db.intra[M.RealmKey()]
+  -- big charts on the global 1W / 1D timeframe only (a canvas with its own
+  -- pinned range never takes intraday points)
+  if not canvas._compact and not canvas._rangeOverride and (M.ChartRangeDays() == 7 or is1D) then
+    local ist = M.db and M.db.intra and M.db.intra[M.RealmKey()]
     local st = ist and ist[key]
-    if st and st[1] then
+    local srv = not canvas._rangeOverride and M.ServerIntra and M.ServerIntra(key)
+    if (st and st[1]) or srv then
+      local D0 = M.C.SCAN_DAY_0
+      local all = {}
+      for i = 1, (st and #st or 0) do
+        local t = (st[i].ts - D0) / 86400
+        all[#all + 1] = { day = math.floor(t), t = t, ts = st[i].ts, low = st[i].low, qty = st[i].qty or 0 }
+      end
+      local nOwn = #all
+      if srv then
+        local rows = {}
+        for i = 1, n do rows[arr[i].day] = true end
+        for _, p in ipairs(srv) do
+          local mine = false
+          for j = 1, nOwn do
+            local o = all[j].ts
+            if o >= p.b0 and o < p.b1 then mine = true; break end
+          end
+          if not mine then
+            local t = (p.ts - D0) / 86400
+            all[#all + 1] = { day = math.floor(t), t = t, ts = p.ts, low = p.low, qty = p.qty or 0,
+                              srv = true, b0 = p.b0, b1 = p.b1, row = rows[math.floor(t)] or false }
+          end
+        end
+        if #all > nOwn then
+          table.sort(all, function(a, b)
+            if a.ts ~= b.ts then return a.ts < b.ts end
+            return not a.srv and b.srv or false
+          end)
+        end
+      end
+      all = M.IntraTrim(all)
+      -- the newest day ends on the price the headers show (Logic.lua: a newer
+      -- live price, else the row's current price) when that one is newer than
+      -- the day's last server point: it joins as an own point at its time
+      local nd = arr[n].day
+      local lastNew
+      for _, e in ipairs(all) do
+        if e.day == nd and e.row ~= false and (not lastNew or e.ts >= lastNew.ts) then lastNew = e end
+      end
+      if lastNew and lastNew.srv then
+        local rec = series[nd]
+        local lv = M.FreshLive and M.FreshLive(key, rec, nd)
+        local cp, cts, cq
+        if lv and lv.p and M.DayOf(lv.ts) == nd then
+          cp, cts, cq = lv.p, lv.ts, tonumber(lv.q)
+        elseif rec and rec.cur and rec.ts and math.floor((rec.ts - D0) / 86400) == nd then
+          cp, cts = rec.cur, rec.ts
+        end
+        -- a synced row carries the sender's clock: never past now
+        if cts and cts > time() then cts = time() end
+        if cts and cts > lastNew.ts then
+          all[#all + 1] = { day = nd, t = (cts - D0) / 86400, ts = cts, low = cp, qty = cq or arr[n].qty or 0 }
+          table.sort(all, function(a, b) return a.ts < b.ts end)
+        end
+      end
       local cutoff = arr[n].day - 6
       if is1D then
-        local tEnd = (st[#st].ts - M.C.SCAN_DAY_0) / 86400
-        if arr[n].day > tEnd then tEnd = arr[n].day end
+        local tEnd = arr[n].day
+        for _, e in ipairs(all) do
+          if e.row ~= false and e.t > tEnd then tEnd = e.t end
+        end
         win0 = tEnd - 1
       end
-      for i = 1, #st do
-        local t = (st[i].ts - M.C.SCAN_DAY_0) / 86400
-        local d = math.floor(t)
-        if (win0 and t >= win0) or (not win0 and d >= cutoff) then
+      for _, e in ipairs(all) do
+        if e.row ~= false and ((win0 and e.t >= win0) or (not win0 and e.day >= cutoff)) then
           ipts = ipts or {}
-          ipts[#ipts + 1] = { day = d, t = t, ts = st[i].ts, low = st[i].low, qty = st[i].qty or 0 }
+          ipts[#ipts + 1] = e
         end
       end
       if ipts and #ipts < 2 then ipts = nil end
@@ -668,11 +788,11 @@ function M.RenderAllTime(canvas, key)
   end
 
   -- the newest day's point is the CURRENT price (that day's latest scan, the
-  -- number the headers show); older days plot their daily low. A 1W intraday
-  -- day already ends on its own last scan; on 1D a covered day scales by its
-  -- last scan in the window (its daily low may lie before the window).
+  -- number the headers show); older days plot their daily low. A day covered
+  -- by intraday points ends on its last point and scales by it: its daily low
+  -- may lie before the 1D window or be the single dip the line left out.
   for i = 1, n do
-    local lp = win0 and lastOf[arr[i].day]
+    local lp = lastOf and lastOf[arr[i].day]
     arr[i].px = lp and lp.low or arr[i].low
   end
   if arr[n].cur and not (lastOf and lastOf[arr[n].day]) then arr[n].px = arr[n].cur end
@@ -746,18 +866,79 @@ function M.RenderAllTime(canvas, key)
     end
   end
   -- what it costs to MAKE (Crafting tab, newest prices, make or buy per
-  -- material): a dashed mint level line in the big chart. Settings "Craft
-  -- lines" turns it off together with the tooltip lines, the Crafting (beta)
-  -- switch together with everything crafting.
-  local craftNow
+  -- material): a mint line in the big chart. The Charts tab's "Crafted" toggle
+  -- (config.chartCraft) hides it, Settings "Craft lines" too together with the
+  -- tooltip lines, the Crafting (beta) switch together with everything crafting.
+  -- On a day range it follows the cost over time (craftByDay): every earlier
+  -- day of the chart priced with that day's materials (Crafting.lua
+  -- M.CraftCostOn), the newest day at the cost above. A day on which some
+  -- material had no price yet (an item that reached the auction house later)
+  -- stays empty instead of plotting a cost without it.
+  -- 1D with intraday points follows the cost through the day (craftAt, keyed
+  -- by the ipts entry): at every scan of the 24 h line each material counts at
+  -- its newest scan before it (M.CraftCostAt), the line's end at the cost
+  -- above; single outliers go by the rule of the price points (M.IntraTrim).
+  -- A chart without any complete earlier point keeps the dashed level line.
+  -- craftEnd: on 1D the cost now, when the price line ends on a daily row of
+  -- the newest day without own scans (pts[n] at dayX[n], after every ipts)
+  local craftNow, craftByDay, craftAt, craftEnd
   if not canvas._compact and not canvas._rangeOverride and M.CraftCost
      and not (M.db and M.db.config and M.db.config.tooltipCraft == false)
+     and not (M.db and M.db.config and M.db.config.chartCraft == false)
      and (not M.CraftingOn or M.CraftingOn()) then
     local cid = (M.BaseID and M.BaseID(key)) or tonumber(key)
     local cc = cid and M.CraftCost(cid)
     if cc and cc.now and cc.now > 0 then
       craftNow = cc.now
       widen(craftNow / 10000)
+      if win0 and ipts and M.CraftCostAt then
+        local list, ni = {}, #ipts
+        local atEnd = lastOf[arr[n].day] == ipts[ni]
+        for j = 1, atEnd and ni - 1 or ni do
+          local e = ipts[j]
+          local c, ok = M.CraftCostAt(cid, e.ts)
+          if ok then list[#list + 1] = { ts = e.ts, low = c, e = e } end
+        end
+        if list[1] then
+          if atEnd then list[#list + 1] = { ts = ipts[ni].ts, low = craftNow, e = ipts[ni] } end
+          craftAt = {}
+          for _, p in ipairs(M.IntraTrim(list)) do
+            craftAt[p.e] = p.low
+            widen(p.low / 10000)
+          end
+          -- (only after the last scan: the line needs strictly rising x)
+          if not atEnd and arr[n].day > ipts[ni].t then craftEnd = craftNow end
+        end
+      elseif not win0 and M.CraftCostOn and n >= 2 then
+        local byDay, got = {}, false
+        for i = 1, n - 1 do
+          local c, ok = M.CraftCostOn(cid, arr[i].day)
+          if ok then byDay[arr[i].day] = c; got = true end
+        end
+        if got then
+          byDay[arr[n].day] = craftNow
+          -- a single day far off both neighbours (one material's one-day spike
+          -- or dip) leaves the line, the rule of M.IntraTrim on day points:
+          -- above max(neighbours) x FAIR_TRIM or below min(neighbours) /
+          -- FAIR_TRIM, both neighbours at most 3 days away, judged against the
+          -- original neighbours; the first and the newest day stay
+          local f, ds, drop = M.C.FAIR_TRIM or 1.5, {}, {}
+          for i = 1, n do if byDay[arr[i].day] then ds[#ds + 1] = arr[i].day end end
+          for j = 2, #ds - 1 do
+            if ds[j] - ds[j - 1] <= 3 and ds[j + 1] - ds[j] <= 3 then
+              local a, e, b = byDay[ds[j - 1]], byDay[ds[j]], byDay[ds[j + 1]]
+              local lo, hi = math.min(a, b), math.max(a, b)
+              if e * f < lo or e > f * hi then drop[#drop + 1] = ds[j] end
+            end
+          end
+          for _, d in ipairs(drop) do byDay[d] = nil end
+          craftByDay = byDay
+          for i = 1, n - 1 do
+            local c = byDay[arr[i].day]
+            if c then widen(c / 10000) end
+          end
+        end
+      end
     end
   end
   vmin, vmax = minSpan(vmin, vmax, 0.0001)
@@ -803,12 +984,25 @@ function M.RenderAllTime(canvas, key)
   local function qtyY(q) return (qmax > 0) and (bottom + volH * (q / qmax)) or bottom end
 
   -- subtle volume bars (quantity per day) at each day's real time position;
-  -- on 1D one bar per scan (a day is the whole axis there)
+  -- with intraday points (1W, 1D) one bar per scan, so every Qty read-out of
+  -- the hover sits on its own bar (a day bar at the last scan only left the
+  -- earlier scans' Qty floating over empty ground); days without scans keep
+  -- their day bar. Scans minutes apart sit a few px apart (1W: 12 minutes =
+  -- 1.4 px): such a bar stays narrower than 0.8 x the gap to its nearest
+  -- neighbour, so close scans stand side by side instead of on top of each other
   local bars = {}
-  if win0 then
+  if ipts then
     for i = 1, n do if not lastOf[arr[i].day] then bars[#bars + 1] = { x = dayX[i], q = dayQ[i] } end end
     for _, e in ipairs(ipts) do bars[#bars + 1] = { x = X(e.t), q = e.qty or 0 } end
-    VolumeBars(canvas, bars, bottom, ph, math.max(2, math.min(10, pw / (#bars * 3))), qmax)
+    local bw = math.max(2, math.min(10, pw / (#bars * 3)))
+    table.sort(bars, function(p, q) return p.x < q.x end)
+    for k, b in ipairs(bars) do
+      local gap = math.huge
+      if bars[k - 1] then gap = b.x - bars[k - 1].x end
+      if bars[k + 1] and bars[k + 1].x - b.x < gap then gap = bars[k + 1].x - b.x end
+      if gap * 0.8 < bw then b.w = math.max(1, gap * 0.8) end
+    end
+    VolumeBars(canvas, bars, bottom, ph, bw, qmax)
   else
     for i = 1, n do bars[i] = { x = dayX[i], q = dayQ[i] } end
     VolumeBars(canvas, bars, bottom, ph, capped and 18 or math.max(1.5, math.min(10, dayW)), qmax)
@@ -821,14 +1015,22 @@ function M.RenderAllTime(canvas, key)
     local lp = lastOf and lastOf[d]
     local price = lp and lp.low or arr[i].px
     local priceY = Y(price / 10000)
-    local when = lp and ("  " .. date("%H:%M", lp.ts)) or ""
+    local when = lp and intraWhen(lp) or ""
     local reads = { { kind = "price", y = priceY,
-      l1 = M.DayLabel(d) .. when .. "  \194\183  " .. M.MoneyPlain(price) } }
+      l1 = M.DayLabel(d) .. when .. "  \194\183  " .. M.MoneyPlain(price),
+      l2 = lp and lp.srv and SRV_NOTE or nil } }
     local fv = fairByDay[d]
     if fv then
       local fGold = fv / 10000
       reads[#reads + 1] = { kind = "fair", y = clampY(fGold),
         l1 = "Fair  " .. M.MoneyPlain(fv) .. (inScale(fGold) and "" or "  \194\183  off scale") }
+    end
+    local cv = (craftByDay and craftByDay[d]) or (craftAt and lp and craftAt[lp])
+      or (craftEnd and i == n and craftEnd)
+    if cv then
+      local cGold = cv / 10000
+      reads[#reads + 1] = { kind = "craft", y = clampY(cGold),
+        l1 = "Crafted  " .. M.MoneyPlain(cv) .. (inScale(cGold) and "" or "  \194\183  off scale") }
     end
     reads[#reads + 1] = { kind = "qty", y = qtyY(dayQ[i]), l1 = "Qty  " .. math.floor(dayQ[i] + 0.5) }
     pts[i] = { x = dayX[i], y = priceY, reads = reads }
@@ -995,7 +1197,14 @@ function M.RenderAllTime(canvas, key)
       if lastOf[e.day] ~= e then
         local py = Y(e.low / 10000)
         local reads = { { kind = "price", y = py,
-          l1 = M.DayLabel(e.day) .. "  " .. date("%H:%M", e.ts) .. "  \194\183  " .. M.MoneyPlain(e.low) } }
+          l1 = M.DayLabel(e.day) .. intraWhen(e) .. "  \194\183  " .. M.MoneyPlain(e.low),
+          l2 = e.srv and SRV_NOTE or nil } }
+        local cv = craftAt and craftAt[e]
+        if cv then
+          local cGold = cv / 10000
+          reads[#reads + 1] = { kind = "craft", y = clampY(cGold),
+            l1 = "Crafted  " .. M.MoneyPlain(cv) .. (inScale(cGold) and "" or "  \194\183  off scale") }
+        end
         reads[#reads + 1] = { kind = "qty", y = qtyY(e.qty or 0), l1 = "Qty  " .. math.floor((e.qty or 0) + 0.5) }
         pts[#pts + 1] = { x = X(e.t), y = py, day = e.day, reads = reads }
       end
@@ -1075,13 +1284,46 @@ function M.RenderAllTime(canvas, key)
     if alertRec.above then local r2, g2, b2 = TC("accent"); alertLine(alertRec.above, "above", r2, g2, b2) end
   end
 
-  -- crafting cost level (see the scale block): labelled "Crafted" at the right
+  -- crafting cost (see the scale block): labelled "Crafted" at the right. Over
+  -- time it runs like the Fair line: an off-scale point breaks it, a segment
+  -- that skips a point without a complete cost (or a day without a scan) is
+  -- dashed. 1D runs through the scans of the window, other ranges by day.
   if craftNow then
     local cr, cg, cb = TC("mint")
     local g = craftNow / 10000
+    local drew = false
+    if craftByDay or craftAt then
+      local run, prev = {}, nil
+      local function flush()
+        if #run >= 2 then
+          SmoothLine(canvas, run, 1.3, cr, cg, cb, 0.6, bottom, bottom + ph, 0.4)
+          drew = true
+        end
+        run = {}
+      end
+      local function add(i, x, c, gap)
+        if c then
+          if inScale(c / 10000) then
+            run[#run + 1] = { x = x, y = Y(c / 10000), dash = prev ~= nil and (prev ~= i - 1 or gap) }
+          else
+            flush()
+          end
+          prev = i
+        end
+      end
+      if craftAt then
+        for j, e in ipairs(ipts) do add(j, X(e.t), craftAt[e], false) end
+        if craftEnd then add(#ipts + 1, dayX[n], craftEnd, false) end
+      else
+        for i = 1, n do
+          add(i, dayX[i], craftByDay[arr[i].day], prev ~= nil and arr[i].day - arr[prev].day > 1)
+        end
+      end
+      flush()
+    end
     if inScale(g) then
       local cy = Y(g)
-      DashSeg(canvas, left, cy, left + pw, cy, 1.2, cr, cg, cb, 0.6)
+      if not drew then DashSeg(canvas, left, cy, left + pw, cy, 1.2, cr, cg, cb, 0.6) end
       sideLabel(cy, "Crafted", cr, cg, cb, NUDGE)
     else
       edgeNote("Crafted  " .. M.MoneyPlain(craftNow) .. "  \194\183  off scale", g > vmax, cr, cg, cb)
