@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.3.7"
+M.version = "1.3.8"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -327,8 +327,9 @@ local function realmOfRuleset(db, chars, ruleset)
       last[r] = math.max(last[r] or 0, charLast(c))
     end
   end
-  local depth = db and type(db.depth) == "table" and db.depth
-  if depth then
+  -- the offer books, old (depth) and compact (book, 1.3.8) alike
+  for _, depth in ipairs({ db and type(db.depth) == "table" and db.depth or {},
+                           db and type(db.book) == "table" and db.book or {} }) do
     for key, d in pairs(depth) do
       local r = type(key) == "string" and key:match("^(.-) %a+$")   -- "<realm> <Faction>"
       if r and last[r] and type(d) == "table" then last[r] = math.max(last[r], tonumber(d.ts) or 0) end
@@ -575,7 +576,7 @@ function M.PrintMarketProbe()
       put(ns, "missing")
     end
   end
-  local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
+  local d = M.BookOf and M.BookOf() or (M.db and M.db.depth and M.db.depth[M.RealmKey()])
   local n = 0
   if d and d.items then for _ in pairs(d.items) do n = n + 1 end end
   M.Print(string.format("market: %s / %s / %s / %s / %s   (realm key \"%s\")",
@@ -688,6 +689,11 @@ function M.OnLogin()
   -- empty realm moves to the realm Midas names now, before anything else writes
   if M.AdoptHiddenRealm then M.AdoptHiddenRealm() end
   MidasDB.realmOf = nil   -- the first 1.3.3 test build kept guessed realms here
+  -- 1.3.8: intraday tails and offer books as compact strings (Data.lua) - the
+  -- old tables move over a few hundred items per frame, after the realm moves
+  MidasDB.intra2 = MidasDB.intra2 or {}
+  MidasDB.book = MidasDB.book or {}
+  if M.MigrateStores then M.MigrateStores() end
   if M.NWMigrate then M.NWMigrate() end   -- net worth history per realm+faction (1.2.1)
   if M.MergeForkedChars then M.MergeForkedChars() end   -- Forever short-name fork (1.2.4)
   if M.MergeImport then M.MergeImport() end
@@ -883,7 +889,7 @@ function M.MergeRealm(old)
       if type(k) == "string" and k:lower():match("^%s*(.-)%s*$") == want then return k end
     end
   end
-  local oldKey = resolve(db.realms) or resolve(db.nw) or resolve(db.depth) or resolve(db.alerts)
+  local oldKey = resolve(db.realms) or resolve(db.nw) or resolve(db.depth) or resolve(db.book) or resolve(db.alerts)
     or (type(db.ledger) == "table" and resolve(db.ledger.d))
   if not oldKey then return false, "notfound" end
   if oldKey == new then return false, "same" end
@@ -990,11 +996,11 @@ function M.MergeRealm(old)
   end
   -- short-lived per-realm tails: move only where the new key has nothing yet
   -- (the offer book: the newer scan stays)
-  for _, fld in ipairs({ "nwi", "intra", "depth" }) do
+  for _, fld in ipairs({ "nwi", "intra", "intra2", "depth", "book" }) do
     local t = db[fld]
     if t and t[oldKey] then
       local o, n = t[oldKey], t[new]
-      if n == nil or (fld == "depth" and type(o) == "table" and type(n) == "table"
+      if n == nil or ((fld == "depth" or fld == "book") and type(o) == "table" and type(n) == "table"
                       and (tonumber(o.ts) or 0) > (tonumber(n.ts) or 0)) then
         t[new] = o
       end
@@ -1136,7 +1142,7 @@ function M.AdoptHiddenRealm()
     db.config = db.config or {}
     db.config.hiddenHint = db.config.hiddenHint or {}
     local any = false
-    for _, fld in ipairs({ "realms", "nw", "depth", "alerts" }) do
+    for _, fld in ipairs({ "realms", "nw", "depth", "book", "alerts" }) do
       if type(db[fld]) == "table" and db[fld][old] ~= nil then any = true; break end
     end
     if any and not db.config.hiddenHint[old] then

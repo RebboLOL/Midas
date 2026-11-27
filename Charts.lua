@@ -361,11 +361,12 @@ function M.SetupHover(canvas)
       if CC then m.box:SetBackdropColor(CC.bg2[1], CC.bg2[2], CC.bg2[3], a); m.box:SetBackdropBorderColor(0, 0, 0, 0) end
     end
     if self._compact then
-      -- small preview: ONE box = current price (main) + a small line of qty / MA / fair
+      -- small preview: ONE box = current price (main) + a small line of qty / MA /
+      -- fair / crafted (the Crafted line of the Watchlist and Trades cards)
       local price
       for _, r in ipairs(reads) do if r.kind == "price" then price = r; break end end
       price = price or reads[1]
-      local ord = { qty = 1, ma = 2, fair = 3 }
+      local ord = { qty = 1, ma = 2, fair = 3, craft = 4 }
       local extras = {}
       for _, r in ipairs(reads) do if r.kind ~= "price" and ord[r.kind] then extras[#extras + 1] = r end end
       table.sort(extras, function(a, b) return (ord[a.kind] or 9) < (ord[b.kind] or 9) end)
@@ -380,8 +381,20 @@ function M.SetupHover(canvas)
       m.t1:SetText(price.l1 or ""); m.t1:SetTextColor(TC("text"))
       m.t2:SetText(sub); m.t2:SetShown(sub ~= "")
       if sub ~= "" then m.t2:SetTextColor(TC("sub")) end
-      local tw = math.max(m.t1:GetStringWidth(), (sub ~= "" and m.t2:GetStringWidth()) or 0)
-      m.box:SetSize(tw + 14, (sub ~= "") and 34 or 20)
+      local tw2, extra = (sub ~= "" and m.t2:GetStringWidth()) or 0, 0
+      -- three or more read-outs wider than the chart (Floor MA, Fair and
+      -- Crafted together): the small line takes two lines instead
+      if #parts > 2 and tw2 + 14 > W - 4 then
+        local h = math.ceil(#parts / 2)
+        local a = table.concat(parts, "  \194\183  ", 1, h)
+        local b = table.concat(parts, "  \194\183  ", h + 1)
+        m.t2:SetText(a); local wa = m.t2:GetStringWidth() or 0
+        m.t2:SetText(b); local wb = m.t2:GetStringWidth() or 0
+        m.t2:SetText(a .. "\n" .. b)
+        tw2, extra = math.max(wa, wb), 11
+      end
+      local tw = math.max(m.t1:GetStringWidth(), tw2)
+      m.box:SetSize(tw + 14, (sub ~= "") and (34 + extra) or 20)
       -- sit the box ABOVE the top of the plot so it never covers the graph itself
       local hw = m.box:GetWidth() / 2
       local cx = best.x + OFFX + hw
@@ -598,23 +611,55 @@ local function minSpan(lo, hi, unit)
 end
 
 -- Floor MA shared by the market and the holding chart: a trailing simple MA of
--- the daily lows over `period` calendar days (capped at 20, shrinking on short
--- spans so it still shows). It starts once a full window of history exists.
--- Returns ma[i] (copper) for the indices of arr that have one.
-local function FloorMA(arr, dSpan)
-  local period = math.min(20, math.max(4, math.floor(dSpan / 3)))
-  local ma, dMin = {}, arr[1] and arr[1].day
-  for i = 1, #arr do
-    if arr[i].day - dMin >= period - 1 then
+-- the daily lows over `period` calendar days, computed over the item's WHOLE
+-- history (the series), not over the days the timeframe shows: the first day
+-- of 1W or 1D averages the days before it exactly like 1M does, so every
+-- timeframe draws the same values. The period follows the length of the
+-- history (capped at 20, at least 4, shorter on a young history so it still
+-- shows) - never the timeframe. It starts once a full window of history exists.
+-- Returns byDay[day] = ma (copper) and the ascending list of those days.
+local function FloorMA(series)
+  local days = {}
+  for day, v in pairs(series) do
+    if v.low and v.low > 0 then days[#days + 1] = day end
+  end
+  table.sort(days)
+  local byDay, list, nd = {}, {}, #days
+  if nd == 0 then return byDay, list end
+  local dMin = days[1]
+  local period = math.min(20, math.max(4, math.floor((days[nd] - dMin) / 3)))
+  for i = 1, nd do
+    local d = days[i]
+    if d - dMin >= period - 1 then
       local s, c = 0, 0
       for j = i, 1, -1 do
-        if arr[i].day - arr[j].day >= period then break end
-        s = s + arr[j].low; c = c + 1
+        if d - days[j] >= period then break end
+        s = s + series[days[j]].low; c = c + 1
       end
-      if c > 0 then ma[i] = s / c end
+      byDay[d] = s / c; list[#list + 1] = d
     end
   end
-  return ma
+  return byDay, list
+end
+
+-- The MA line's entry at the left plot edge. Its vertices sit on the day rows
+-- the chart shows, and the first of them can lie well right of the edge (1W:
+-- that day's last scan; 1D: a row inside the 24 h window). When the MA has a
+-- day before the window, that day's value (at its own x, left of the edge)
+-- joins the first vertex in a straight line, cut at the edge - the line then
+-- enters from the edge like the price line. Returns the y at xEdge or nil.
+local function maEdgeY(maBy, maDays, firstDay, x1, y1, xEdge, X, Y)
+  if not (x1 > xEdge + 0.5) then return nil end
+  local prev
+  for _, d in ipairs(maDays) do
+    if d >= firstDay then break end
+    prev = d
+  end
+  if not prev then return nil end
+  local x0 = X(prev)
+  if not (x0 < xEdge) then return nil end
+  local y0 = Y(maBy[prev] / 10000)
+  return y0 + (y1 - y0) * (xEdge - x0) / (x1 - x0)
 end
 
 -- Single outliers of an intraday point list (ascending by ts), the server's
@@ -690,8 +735,12 @@ function M.RenderAllTime(canvas, key)
   -- big charts on the global 1W / 1D timeframe only (a canvas with its own
   -- pinned range never takes intraday points)
   if not canvas._compact and not canvas._rangeOverride and (M.ChartRangeDays() == 7 or is1D) then
-    local ist = M.db and M.db.intra and M.db.intra[M.RealmKey()]
-    local st = ist and ist[key]
+    local st
+    if M.IntraList then st = M.IntraList(key)
+    else
+      local ist = M.db and M.db.intra and M.db.intra[M.RealmKey()]
+      st = ist and ist[key]
+    end
     local srv = not canvas._rangeOverride and M.ServerIntra and M.ServerIntra(key)
     if (st and st[1]) or srv then
       local D0 = M.C.SCAN_DAY_0
@@ -865,6 +914,18 @@ function M.RenderAllTime(canvas, key)
       if fv then widen(fv / 10000) end
     end
   end
+  -- Floor MA ("Floor MA" toggle): its values come from the whole history
+  -- (FloorMA), so a trend from before the window can put it beside the price
+  -- range: the shown days join the scale like Fair (near ones only, the widen
+  -- rule); a far-off day breaks the line below and its read-out says off scale
+  local maBy, maDays
+  if M.chartMA then
+    maBy, maDays = FloorMA(series)
+    for i = 1, n do
+      local v = maBy[arr[i].day]
+      if v then widen(v / 10000) end
+    end
+  end
   -- what it costs to MAKE (Crafting tab, newest prices, make or buy per
   -- material): a mint line in the big chart. The Charts tab's "Crafted" toggle
   -- (config.chartCraft) hides it, Settings "Craft lines" too together with the
@@ -881,10 +942,16 @@ function M.RenderAllTime(canvas, key)
   -- A chart without any complete earlier point keeps the dashed level line.
   -- craftEnd: on 1D the cost now, when the price line ends on a daily row of
   -- the newest day without own scans (pts[n] at dayX[n], after every ipts)
+  -- The preview cards of the Watchlist and Trades tabs (canvas._craft, UI.lua
+  -- CreateChartCard) draw the line too, by day, behind the header's "Crafted"
+  -- toggle (config.watchCraft); every other preview stays without it.
   local craftNow, craftByDay, craftAt, craftEnd
-  if not canvas._compact and not canvas._rangeOverride and M.CraftCost
-     and not (M.db and M.db.config and M.db.config.tooltipCraft == false)
-     and not (M.db and M.db.config and M.db.config.chartCraft == false)
+  local cfgC = M.db and M.db.config
+  local craftHere
+  if canvas._compact then craftHere = canvas._craft and not (cfgC and cfgC.watchCraft == false)
+  else craftHere = not (cfgC and cfgC.chartCraft == false) end
+  if craftHere and not canvas._rangeOverride and M.CraftCost
+     and not (cfgC and cfgC.tooltipCraft == false)
      and (not M.CraftingOn or M.CraftingOn()) then
     local cid = (M.BaseID and M.BaseID(key)) or tonumber(key)
     local cc = cid and M.CraftCost(cid)
@@ -1087,6 +1154,17 @@ function M.RenderAllTime(canvas, key)
   -- The Y scale is stretched above to include trade prices; clampY stays as a
   -- safety net only.
   local legend = false
+  -- on the Charts tab the button row (Crafted / ALERT / offer book /
+  -- timeframe, UI.lua) lies over the plot's upper edge: text at the top of
+  -- the plot stays under it (ceilY)
+  local ceilY = bottom + ph
+  if canvas == M.canvas and not canvas._compact then
+    local bar = M.alertUI and M.alertUI.bar
+    local cb, rb = canvas:GetBottom(), bar and bar:GetBottom()
+    ceilY = math.min(ceilY, (cb and rb) and (rb - cb - 3) or (H - 28))
+  end
+  local rowCut = ceilY < bottom + ph
+  local legendY
   if M.chartTrades ~= false and not canvas._compact and M.db and M.db.trade then
     local id = (M.BaseID and M.BaseID(key)) or tonumber(key)
     if id then
@@ -1158,10 +1236,12 @@ function M.RenderAllTime(canvas, key)
         end
         -- compact legend along the top edge of the plot (only while dots show)
         if marks[1] then
-          local ly = bottom + ph + 2
-          RoundDot(canvas, left + 6, ly, 8, gr, gg, gb)
-          local f1 = Label(canvas, left + 12, ly, "Buys", "LEFT", TC("sub"))
-          local lx2 = left + 12 + (f1:GetStringWidth() or 26) + 14
+          local ly = rowCut and (ceilY - 7) or (bottom + ph + 2)
+          legendY = rowCut and ly or nil
+          local lx0 = left + 6
+          RoundDot(canvas, lx0, ly, 8, gr, gg, gb)
+          local f1 = Label(canvas, lx0 + 6, ly, "Buys", "LEFT", TC("sub"))
+          local lx2 = lx0 + 6 + (f1:GetStringWidth() or 26) + 14
           RoundDot(canvas, lx2, ly, 8, rr, rg, rb)
           Label(canvas, lx2 + 6, ly, "Sells", "LEFT", TC("sub"))
           legend = true
@@ -1171,23 +1251,42 @@ function M.RenderAllTime(canvas, key)
   end
 
   -- optional moving-average overlay (broker style), drawn with the same
-  -- monotone curve as the price line (no x-overshoot)
-  local maLabelY
-  if M.chartMA then
-    local ma = FloorMA(arr, dSpan)
-    local mapts = {}
+  -- monotone curve as the price line (no x-overshoot); its values come from
+  -- the whole history (FloorMA, maBy above), the line enters at the left edge
+  -- (maEdgeY). Off-scale days break the line like Fair's and say so in their
+  -- read-out; maOff: the newest day's value when it lies off the scale.
+  local maLabelY, maOff
+  if maBy then
+    local ar, ag, ab = TC("blue")   -- cool blue: gold is reserved for the price line
+    local run = {}
+    local function flush()
+      if #run >= 2 then
+        SmoothLine(canvas, run, 1.4, ar, ag, ab, 0.5, bottom, bottom + ph, 0.5)
+        if run[#run].i == n then maLabelY = run[#run].y end
+      end
+      run = {}
+    end
     for i = 1, n do
-      if ma[i] then
-        local maY = Y(ma[i] / 10000)
-        mapts[#mapts + 1] = { x = pts[i].x, y = maY }
-        pts[i].reads[#pts[i].reads + 1] = { kind = "ma", y = maY, l1 = "Floor MA  " .. M.MoneyPlain(ma[i]) }
+      local v = maBy[arr[i].day]
+      if v then
+        local g = v / 10000
+        local inS = inScale(g)
+        pts[i].reads[#pts[i].reads + 1] = { kind = "ma", y = clampY(g),
+          l1 = "Floor MA  " .. M.MoneyPlain(v) .. (inS and "" or "  \194\183  off scale") }
+        if inS then
+          local maY = Y(g)
+          if i == 1 then
+            local ey = maEdgeY(maBy, maDays, arr[1].day, pts[1].x, maY, X(tMin), X, Y)
+            if ey and ey >= bottom and ey <= bottom + ph then run[1] = { x = X(tMin), y = ey } end
+          end
+          run[#run + 1] = { x = pts[i].x, y = maY, i = i }
+        else
+          flush()
+          if i == n then maOff = v end
+        end
       end
     end
-    if #mapts >= 2 then
-      local ar, ag, ab = TC("blue")   -- cool blue: gold is reserved for the price line
-      SmoothLine(canvas, mapts, 1.4, ar, ag, ab, 0.5, bottom, bottom + ph, 0.5)
-      maLabelY = mapts[#mapts].y
-    end
+    flush()
   end
 
   -- remaining intraday scans as extra hover points, appended AFTER the MA and
@@ -1249,9 +1348,13 @@ function M.RenderAllTime(canvas, key)
     sideLabel(maLabelY, "Floor MA", ar, ag, ab, NUDGE)
   end
 
+  -- text at the top of the plot starts here on the Charts tab: under the
+  -- button row (ceilY) and the legend under it
+  local topTextY = rowCut and ((legendY and legendY - 11) or (ceilY - 7)) or nil
   -- off-scale notes stack inward from the plot edges (the top stack starts
-  -- under the Buys/Sells legend)
+  -- under the Buys/Sells legend and the button row)
   local noteTop, noteBot = bottom + ph - (legend and 10 or 6), bottom + 7
+  if topTextY and topTextY < noteTop then noteTop = topTextY end
   local function edgeNote(txt, above, r, g, b)
     local y
     if above then y = noteTop; noteTop = noteTop - 11 else y = noteBot; noteBot = noteBot + 11 end
@@ -1260,6 +1363,10 @@ function M.RenderAllTime(canvas, key)
   if fOff and not canvas._compact then
     local fr, fg, fb = TC("purple")
     edgeNote("Fair  " .. M.MoneyPlain(fLast) .. "  \194\183  off scale", fLast / 10000 > vmax, fr, fg, fb)
+  end
+  if maOff and not canvas._compact then
+    local ar, ag, ab = TC("blue")
+    edgeNote("Floor MA  " .. M.MoneyPlain(maOff) .. "  \194\183  off scale", maOff / 10000 > vmax, ar, ag, ab)
   end
 
   -- price-alert limit lines: dashed horizontals at the below (green, the buy
@@ -1277,7 +1384,9 @@ function M.RenderAllTime(canvas, key)
       local ay = Y(g)
       DashSeg(canvas, left, ay, left + pw, ay, 1.2, cr, cg, cb, 0.55)
       -- the text sits above its line, below it right under the plot ceiling
-      local ty = (ay + 14 > bottom + ph) and (ay - 7) or (ay + 7)
+      -- (on the Charts tab under the button row)
+      local lim = topTextY and (topTextY + 7) or (bottom + ph)
+      local ty = (ay + 14 > lim) and math.min(ay - 7, lim - 7) or (ay + 7)
       Label(canvas, left + 4, ty, "ALERT " .. word .. "  " .. M.MoneyPlain(v), "LEFT", cr, cg, cb)
     end
     if alertRec.below then local r2, g2, b2 = TC("green"); alertLine(alertRec.below, "below", r2, g2, b2) end
@@ -1326,6 +1435,8 @@ function M.RenderAllTime(canvas, key)
       if not drew then DashSeg(canvas, left, cy, left + pw, cy, 1.2, cr, cg, cb, 0.6) end
       sideLabel(cy, "Crafted", cr, cg, cb, NUDGE)
     else
+      -- (the Watchlist card too: a big margin often puts the cost far below
+      -- the price, and the card would show no trace of it otherwise)
       edgeNote("Crafted  " .. M.MoneyPlain(craftNow) .. "  \194\183  off scale", g > vmax, cr, cg, cb)
     end
   end
@@ -1783,6 +1894,14 @@ function M.RenderHoldingChart(canvas, key, qty)
       if e.day >= dMin and e.day <= dMax then widen(e.fair / 10000) end
     end
   end
+  -- Floor MA from the whole history (FloorMA): the shown days join the scale
+  local maBy = M.chartMA and FloorMA(series) or nil
+  if maBy then
+    for i = 1, n do
+      local v = maBy[arr[i].day]
+      if v then widen(v / 10000) end
+    end
+  end
   pMin, pMax = minSpan(pMin, pMax, 0.0001)
   vMin, vMax = minSpan(vMin, vMax, 0.0001)
   local pPad = (pMax - pMin) * 0.12
@@ -1879,16 +1998,23 @@ function M.RenderHoldingChart(canvas, key, qty)
   SmoothLine(canvas, vpts, 1.7, lr, lg, lb, 1, vZ0, vZ1, 0.5)
   -- Floor MA / Fair overlays on the LEFT price scale -- the same three toggles
   -- work here exactly like in the market chart
-  if M.chartMA then
-    local ma = FloorMA(arr, dSpan)
-    local mapts = {}
+  -- (values from the whole history, maBy above; the first day sits on the
+  -- edge; off-scale days break the line like Fair's below)
+  if maBy then
+    local r2, g2, b2 = TC("blue")   -- cool blue: gold is reserved for the price line
+    local run = {}
+    local function flush()
+      if #run >= 2 then SmoothLine(canvas, run, 1.3, r2, g2, b2, 0.5, pZ0, pZ1, 0.4) end
+      run = {}
+    end
     for i = 1, n do
-      if ma[i] then mapts[#mapts + 1] = { x = X(arr[i].day), y = YP(ma[i] / 10000) } end
+      local v = maBy[arr[i].day]
+      if v then
+        local g = v / 10000
+        if g >= pMin and g <= pMax then run[#run + 1] = { x = X(arr[i].day), y = YP(g) } else flush() end
+      end
     end
-    if #mapts >= 2 then
-      local r2, g2, b2 = TC("blue")   -- cool blue: gold is reserved for the price line
-      SmoothLine(canvas, mapts, 1.3, r2, g2, b2, 0.5, pZ0, pZ1, 0.4)
-    end
+    flush()
   end
   if showFair then
     -- FairSeries covers the item's WHOLE history: keep only the days this

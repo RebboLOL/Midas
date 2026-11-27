@@ -1,6 +1,6 @@
 -- Midas – Navigation: every item links to every page Midas has for it.
 -- One table names the pages an item can open (chart, craft tree, offer book,
--- your trades, your stock) and M.Go reaches each of them from anywhere. A jump
+-- heat map, your trades, your stock) and M.Go reaches each of them from anywhere. A jump
 -- to another tab leaves a Back pill in the window header that returns to the
 -- exact place you came from. M.LinkBar draws an item's pages as chips on the
 -- detail views, M.ItemMenu lists them on right-click wherever an item is shown.
@@ -29,12 +29,14 @@ local DEST = {
               tip = "The Crafting tab: what it costs to make, every material down to the raw goods, bought or made, now and at Fair." },
   book    = { label = "Offer book",  short = "Book",   color = "blue",
               tip = "Every price it is listed at in your newest full scan, cheapest first, with the supply up to each price." },
+  heat    = { label = "Heat map",    short = "Heat",   color = "teal",
+              tip = "The last 7 days by time of day in 3-hour windows: when it was cheap, when dear, and which times have no scan yet." },
   trades  = { label = "Your trades", short = "Trades", color = "green",
               tip = "The Trades tab, By Item, filtered to this item: every sale, return and purchase with its price." },
   holding = { label = "Your stock",  short = "Stock",  color = "purple",
               tip = "Net Worth: what your stock of this item was worth day by day, with what you paid for it." },
 }
-local ORDER = { "chart", "tree", "book", "trades", "holding" }
+local ORDER = { "chart", "tree", "book", "heat", "trades", "holding" }
 M.LINK_DEST, M.LINK_ORDER = DEST, ORDER
 
 -- ===== What exists for an item ==============================================
@@ -100,6 +102,7 @@ function M.ItemLinkInfo(key)
   if d and d.levels and d.levels[1] then
     info.book = { d = d, extra = tostring(d.listed or d.units or "") }
   end
+  if M.HeatAvailable and M.HeatAvailable(key) then info.heat = {} end
   local s, sk = tradeEntry(id)
   if s and ((s.soldStacks or 0) + (s.retStacks or 0) + (s.boughtUnits or 0)) > 0 then
     local extra
@@ -125,13 +128,14 @@ local function capture()
   if t == TAB.Charts then
     s.key = M.chartKey
     if M.depthView and M.depthView:IsShown() then s.sub = "book"
+    elseif M.heatView and M.heatView:IsShown() then s.sub = "heat"
     elseif M.whyView and M.whyView:IsShown() then s.sub = "why" end
   elseif t == TAB.Crafting then
     local id = M.craftUI and M.craftUI.id
     s.key = id and tostring(id) or nil
   elseif t == TAB.Trades then
     local ts = M.TradesState and M.TradesState()
-    if ts then s.view, s.search, s.expanded = ts.view, ts.search, ts.expanded end
+    if ts then s.view, s.search, s.expanded, s.prof = ts.view, ts.search, ts.expanded, ts.prof end
   elseif t == TAB["Net Worth"] then
     local w = M.wealth
     if w then
@@ -159,6 +163,7 @@ local function same(a, b)
   if not (a and b) then return false end
   return a.tab == b.tab and a.key == b.key and a.sub == b.sub and a.ck == b.ck
     and a.cls == b.cls and a.view == b.view and a.search == b.search and a.focus == b.focus
+    and a.prof == b.prof
 end
 
 local function charName(ck)
@@ -171,13 +176,15 @@ local function placeName(s)
   local TAB = M.TAB or {}
   local name = (M.TABS and M.TABS[s.tab]) or "Midas"
   if s.tab == TAB.Charts and s.sub == "book" then name = "Offer book"
+  elseif s.tab == TAB.Charts and s.sub == "heat" then name = "Heat map"
   elseif s.tab == TAB["Net Worth"] and s.sub == "holding" then name = "Your stock" end
   local what
   if s.key then what = M.ItemName(s.key)
   elseif s.ck then what = charName(s.ck)
   elseif s.cls then what = s.cls
   elseif s.focus and s.focus.label then what = s.focus.label
-  elseif s.search and s.search ~= "" then what = "\"" .. s.search .. "\"" end
+  elseif s.search and s.search ~= "" then what = "\"" .. s.search .. "\""
+  elseif s.prof and M.ProfName then what = M.ProfName(s.prof) end
   return name, what
 end
 M.NavPlaceName = placeName
@@ -188,11 +195,12 @@ local function restore(s)
     if s.key then M.chartKey = s.key end     -- no re-sort of the recently-viewed list
     M.SelectTab(TAB.Charts)
     if s.sub == "book" and s.key and M.ShowDepth then M.ShowDepth(s.key)
+    elseif s.sub == "heat" and s.key and M.ShowHeat then M.ShowHeat(s.key)
     elseif s.sub == "why" and s.key and M.ShowWhy then M.ShowWhy(s.key) end
   elseif s.tab == TAB.Crafting then
     if M.CraftOpen then M.CraftOpen(s.key and tonumber(s.key), true) else M.SelectTab(TAB.Crafting) end
   elseif s.tab == TAB.Trades then
-    if M.TradesRestore then M.TradesRestore(s.view, s.search, s.expanded) end
+    if M.TradesRestore then M.TradesRestore(s.view, s.search, s.expanded, s.prof) end
     M.SelectTab(TAB.Trades)
   elseif s.tab == TAB["Net Worth"] then
     M.SelectTab(s.tab)
@@ -230,10 +238,11 @@ local function openDest(dest, key, arg)
   if dest == "chart" then
     if not key then return false end
     M.SetChartKey(key); M.SelectTab(TAB.Charts)
-  elseif dest == "book" or dest == "why" then
+  elseif dest == "book" or dest == "why" or dest == "heat" then
     if not key then return false end
     M.SetChartKey(key); M.SelectTab(TAB.Charts)
     if dest == "book" and M.ShowDepth then M.ShowDepth(key)
+    elseif dest == "heat" and M.ShowHeat then M.ShowHeat(key)
     elseif dest == "why" and M.ShowWhy then M.ShowWhy(key) end
   elseif dest == "tree" then
     if not (id and M.ShowCraftTree) then return false end

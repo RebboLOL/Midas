@@ -199,14 +199,19 @@ function API.GetDepth(item)
 end
 
 function API.GetDepthSnapshot()
-  local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
+  -- the stored book (Data.lua: compact strings since 1.3.8, the old tables
+  -- until the first full scan or the move at login)
+  local d = M.BookOf and M.BookOf()
   if not (d and d.items) then return nil end
   local mk = d.market or {}
   local items = {}
-  for id, flat in pairs(d.items) do
-    local lv = {}
-    for i = 2, #flat, 3 do lv[#lv + 1] = { price = flat[i], qty = flat[i + 1], auctions = flat[i + 2] } end
-    items[id] = { auctions = flat[1], listed = d.qty and d.qty[id], levels = lv }
+  for id in pairs(d.items) do
+    local flat, listed = M.BookFlat(id)
+    if flat then
+      local lv = {}
+      for i = 2, #flat, 3 do lv[#lv + 1] = { price = flat[i], qty = flat[i + 1], auctions = flat[i + 2] } end
+      items[id] = { auctions = flat[1], listed = listed, levels = lv }
+    end
   end
   return {
     ts = d.ts,

@@ -54,8 +54,12 @@ local function buildLines(itemID, mode)
   -- prefer the last own scan when it is from that day; nothing is listed when
   -- the newest scan did not see the item
   local curQty = (series[m.lastDay] and series[m.lastDay].qty) or 0
-  local ist = M.db.intra and M.db.intra[M.RealmKey()]
-  local st = ist and ist[tostring(itemID)]
+  local st
+  if M.IntraList then st = M.IntraList(tostring(itemID))
+  else
+    local ist = M.db.intra and M.db.intra[M.RealmKey()]
+    st = ist and ist[tostring(itemID)]
+  end
   local lp = st and st[#st]
   if lp and math.floor((lp.ts - M.C.SCAN_DAY_0) / 86400) == m.lastDay then curQty = lp.qty or 0 end
   -- a newer live price from the AH brings its own count (when the source had one)

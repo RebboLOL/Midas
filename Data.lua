@@ -64,27 +64,338 @@ function M.PruneNeutral()
   end
 end
 
--- intraday tail (1W chart): last scans per item, own top-level store so the
--- daily rows (and the community sync built on them) stay byte-identical.
--- A repeat of the same low+qty only slides the newest point's ts forward.
-local function intraStore()
-  M.db.intra = M.db.intra or {}
-  local rk = M.RealmKey()
-  local istore = M.db.intra[rk]; if not istore then istore = {}; M.db.intra[rk] = istore end
-  return istore
+-- ===== Compact stores (1.3.8) ================================================
+-- The intraday tails and the offer book are written as one short string per
+-- item (base-36 numbers) instead of a table per point: the SavedVariables
+-- writer puts every table field on a line of its own, which made the tails the
+-- biggest block of the file. New fields, so an older Midas finds nothing it
+-- cannot read: MidasDB.intra2 (tails) and MidasDB.book (offer book). The old
+-- MidasDB.intra / MidasDB.depth are still read and move over at login
+-- (M.MigrateStores, a few hundred items per frame).
+local B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+local function enc36(n)
+  n = math.floor((tonumber(n) or 0) + 0.5)
+  if n <= 0 then return "0" end
+  local t = {}
+  while n > 0 do
+    local d = n % 36
+    t[#t + 1] = B36:sub(d + 1, d + 1)
+    n = (n - d) / 36
+  end
+  return string.reverse(table.concat(t))
+end
+local function dec36(s) return tonumber(s, 36) end
+M.Enc36, M.Dec36 = enc36, dec36
+
+-- One item's tail: "<base>|", then the points ascending by ts with ";"
+-- between them, each
+--   <ts - base>,<low>,<qty>[,w<w0>.<wm>]
+-- base = a ts at or before the first point. A scan only appends or replaces
+-- the last point and drops the oldest as plain string operations (pushIntra),
+-- so a full scan of 15,000 items does not decode and re-encode every tail.
+-- w = the 3-hour windows of a run at an unchanged price (heat map); other
+-- fields (",b" price bands of the 1.3.8 test builds) are skipped, and they
+-- leave a tail as its points are rewritten or age out. Strings without "|"
+-- (the first 1.3.8 builds) count each ts from the point before.
+local function segOf(e, base)
+  local p = enc36((tonumber(e.ts) or base) - base) .. "," .. enc36(e.low or 1) .. "," .. enc36(e.qty or 0)
+  if e.w0 and type(e.wm) == "string" and e.wm:find("^[01]+$") then p = p .. ",w" .. enc36(e.w0) .. "." .. e.wm end
+  return p
 end
 
-local function pushIntra(istore, key, low, qty, now)
-  local st = istore[key]
-  if not st then st = {}; istore[key] = st end
+-- one point; ts counts from `from` (the base, or the point before)
+local function segParse(seg, from)
+  local o, lo, q, rest = seg:match("^(%w+),(%w+),(%w+)(.*)$")
+  if not o then return nil end
+  local low = dec36(lo)
+  if not low or low < 1 then low = 1 end     -- a price is at least 1c
+  local e = { ts = from + (dec36(o) or 0), low = low, qty = dec36(q) or 0 }
+  for v in rest:gmatch(",w([^,]*)") do
+    local w0, wm = v:match("^(%w+)%.([01]+)$")
+    if w0 then e.w0, e.wm = dec36(w0), wm end
+  end
+  return e
+end
+
+local function decodeIntra(s)
+  local list = {}
+  local b, body = s:match("^(%w+)|(.*)$")
+  local base = b and dec36(b)
+  if not base then body = s end
+  local prev = 0
+  for seg in body:gmatch("[^;]+") do
+    local e = segParse(seg, base or prev)
+    if e then list[#list + 1] = e; prev = e.ts end
+  end
+  return list
+end
+
+local function encodeIntra(list)
+  local base = list[1] and math.floor(tonumber(list[1].ts) or 0) or 0
+  local out, prev = {}, base
+  for _, e in ipairs(list) do
+    local ts = math.floor(tonumber(e.ts) or 0)
+    if ts < prev then ts = prev end
+    out[#out + 1] = segOf({ ts = ts, low = e.low, qty = e.qty, w0 = e.w0, wm = e.wm }, base)
+    prev = ts
+  end
+  return enc36(base) .. "|" .. table.concat(out, ";")
+end
+M.DecodeIntra, M.EncodeIntra = decodeIntra, encodeIntra
+
+-- the intraday tail of an item (ascending { ts, low, qty, w0?, wm? }),
+-- read only; nil when there is none. Decoded lists are kept per string.
+local tailCache, tailCacheN = {}, 0
+function M.IntraList(key, rk)
+  if key == nil or not M.db then return nil end
+  key = tostring(key)
+  rk = rk or M.RealmKey()
+  local s2 = M.db.intra2 and M.db.intra2[rk]
+  local s = s2 and s2[key]
+  if type(s) == "string" then
+    local ck = rk .. "\1" .. key
+    local c = tailCache[ck]
+    if c and c.s == s then return c.list end
+    if tailCacheN > 6000 then tailCache, tailCacheN = {}, 0 end
+    local list = decodeIntra(s)
+    if not c then tailCacheN = tailCacheN + 1 end
+    tailCache[ck] = { s = s, list = list }
+    return list
+  end
+  local leg = M.db.intra and M.db.intra[rk]
+  local t = leg and leg[key]
+  return type(t) == "table" and t or nil
+end
+
+-- intraday tail (1W chart): last scans per item, own top-level store so the
+-- daily rows (and the community sync built on them) stay byte-identical.
+-- A repeat of the same low+qty only slides the newest point's ts forward and
+-- marks its 3-hour window (heat map).
+local INTRA_KEEP, INTRA_MAX = 8 * 86400, 16
+local INTRA_REBASE = 20 * 86400        -- a base older than this is renewed
+
+-- the 3-hour windows an unchanged run was scanned in, for the heat map
+-- (Heatmap.lua): w0 = the run's first window, wm = "1" scanned / "0" not, one
+-- character per window from w0, the newest 56 (7 days) kept
+local function markWindow(e, now)
+  local w = math.floor(now / 10800)
+  if not e.w0 then e.w0, e.wm = math.floor(e.ts / 10800), "1" end
+  local off, n = w - e.w0, #e.wm
+  if off >= n then
+    e.wm = e.wm .. string.rep("0", off - n) .. "1"
+    if #e.wm > 56 then
+      local cut = #e.wm - 56
+      e.wm, e.w0 = e.wm:sub(cut + 1), e.w0 + cut
+    end
+  end
+end
+
+-- a repeat of point e's run at `now` (the chart reads ts only)
+local function slide(e, now)
+  markWindow(e, now)
+  e.ts = now
+  return true
+end
+
+local function repeats(e, low, qty)
+  return e and e.low == low and e.qty == qty
+end
+
+-- a decoded tail + an old table tail (not moved yet, or written by an older
+-- Midas after a downgrade): the table's points newer than the tail join it
+local function joinOld(st, old)
+  if type(old) ~= "table" then return st end
+  local lastTs = st[#st] and st[#st].ts or -math.huge
+  for _, oe in ipairs(old) do
+    if type(oe) == "table" and tonumber(oe.ts) and tonumber(oe.low) and oe.ts > lastTs then
+      st[#st + 1] = { ts = oe.ts, low = oe.low, qty = oe.qty, w0 = oe.w0, wm = oe.wm }
+      lastTs = oe.ts
+    end
+  end
+  return st
+end
+
+local function pushIntra(rk, key, low, qty, now)
+  M.db.intra2 = M.db.intra2 or {}
+  local dst = M.db.intra2[rk]
+  if not dst then dst = {}; M.db.intra2[rk] = dst end
+  local s = dst[key]
+  local leg = M.db.intra and M.db.intra[rk]
+  local old = leg and leg[key]
+  local bs = type(s) == "string" and s:match("^(%w+)|")
+  local base = bs and dec36(bs)
+  local icut = now - INTRA_KEEP
+  if base and old == nil and now - base <= INTRA_REBASE then
+    -- the fast way: only the last point and the oldest ones are touched
+    local hp = #bs + 1                          -- the "|"
+    local sc = s:match(".*();")                 -- the last ";"
+    local p = (sc and sc > hp) and (sc + 1) or (hp + 1)
+    local e = segParse(s:sub(p), base)
+    -- a clock set back: never before the newest point (the tail stays ascending)
+    if e and now < e.ts then now = e.ts end
+    if repeats(e, low, qty) and slide(e, now) then
+      s = s:sub(1, p - 1) .. segOf(e, base)
+    else
+      s = s .. ((s:sub(-1) == "|") and "" or ";") .. segOf({ ts = now, low = low, qty = qty }, base)
+    end
+    -- the oldest points go: older than INTRA_KEEP or past the newest INTRA_MAX
+    local n = select(2, s:gsub(";", ";")) + 1
+    while s do
+      local first = s:match("^%w+|(%w+)")
+      local fts = first and (base + (dec36(first) or 0))
+      if not fts or not (n > INTRA_MAX or fts < icut) then break end
+      local cut = s:find(";", hp + 1, true)
+      if cut then s = s:sub(1, hp) .. s:sub(cut + 1); n = n - 1 else s = nil end
+    end
+    dst[key] = s
+    return
+  end
+  -- the full way: a first point, an old table tail, the older string format
+  -- or a base that lies far back (renewed here)
+  local st = joinOld((type(s) == "string") and decodeIntra(s) or {}, old)
+  if old ~= nil and leg then leg[key] = nil end
   local lp = st[#st]
-  if lp and lp.low == low and lp.qty == qty then
-    lp.ts = now
-  else
+  if lp and now < lp.ts then now = lp.ts end     -- a clock set back (see above)
+  if not (repeats(lp, low, qty) and slide(lp, now)) then
     st[#st + 1] = { ts = now, low = low, qty = qty }
   end
-  local icut = now - 8 * 86400
-  while st[1] and (st[1].ts < icut or #st > 16) do table.remove(st, 1) end
+  while st[1] and (st[1].ts < icut or #st > INTRA_MAX) do table.remove(st, 1) end
+  dst[key] = st[1] and encodeIntra(st) or nil
+end
+M._PushIntra = pushIntra   -- for the tests
+
+-- the offer book of one item as stored in MidasDB.book:
+--   <auctions>,<listed>,<p1>:<q1>:<n1>,<p2 - p1>:<q2>:<n2>,...
+-- (unit prices ascending, each after the first as the step from the one
+-- before). flat = { N, p1, q1, n1, ... } as the old table format had it.
+local function encodeBook(flat, listed)
+  local out, prev = { enc36(flat[1] or 0), enc36(listed or 0) }, 0
+  for i = 2, #flat, 3 do
+    local p = math.floor((tonumber(flat[i]) or 0) + 0.5)
+    out[#out + 1] = enc36(p - prev) .. ":" .. enc36(flat[i + 1]) .. ":" .. enc36(flat[i + 2])
+    prev = p
+  end
+  return table.concat(out, ",")
+end
+
+local function decodeBook(s)
+  local flat, listed, p, k = {}, nil, 0, 0
+  for part in s:gmatch("[^,]+") do
+    k = k + 1
+    if k == 1 then flat[1] = dec36(part) or 0
+    elseif k == 2 then
+      listed = dec36(part)
+      if listed == 0 then listed = nil end   -- not known (an item on the AH has units)
+    else
+      local dp, q, n = part:match("^(%w+):(%w+):(%w+)$")
+      if dp then
+        p = p + (dec36(dp) or 0)
+        flat[#flat + 1] = p; flat[#flat + 1] = dec36(q) or 0; flat[#flat + 1] = dec36(n) or 0
+      end
+    end
+  end
+  return flat, listed
+end
+M.EncodeBook, M.DecodeBook = encodeBook, decodeBook
+
+-- the stored book of this realm (MidasDB.book, else until the next full scan
+-- the old MidasDB.depth): { ts, market, items = { [id] = string or flat },
+-- qty = { [id] = listed } }. A full scan writes tables (no encoding in the
+-- frame that commits 15,000 items), the logout packs them into strings
+-- (M.CompactBook); an item is read in either form.
+local function bookOf(rk)
+  rk = rk or M.RealmKey()
+  local b = M.db and M.db.book and M.db.book[rk]
+  if b and b.items then return b, true end
+  local d = M.db and M.db.depth and M.db.depth[rk]
+  if d and d.items then return d, false end
+  return nil
+end
+M.BookOf = bookOf
+
+-- flat { N, p1, q1, n1, ... } + listed of one item of the stored book
+function M.BookFlat(itemID, rk)
+  local b = bookOf(rk)
+  local id = tonumber(itemID)
+  local v = b and id and b.items[id]
+  if type(v) == "string" then return decodeBook(v) end
+  if type(v) ~= "table" then return nil end
+  return v, b.qty and b.qty[id]
+end
+
+-- every book still in tables -> compact strings (PLAYER_LOGOUT, before the
+-- client writes the SavedVariables; a /reload counts as a logout)
+function M.CompactBook()
+  local db = M.db
+  if not (db and type(db.book) == "table") then return end
+  for _, d in pairs(db.book) do
+    if type(d) == "table" and type(d.items) == "table" then
+      local q = type(d.qty) == "table" and d.qty or nil
+      for id, v in pairs(d.items) do
+        if type(v) == "table" then d.items[id] = encodeBook(v, q and q[id]) end
+      end
+      d.qty = nil
+    end
+  end
+end
+do
+  local lf = CreateFrame("Frame")
+  if M.SafeRegister then M.SafeRegister(lf, "PLAYER_LOGOUT") else lf:RegisterEvent("PLAYER_LOGOUT") end
+  lf:SetScript("OnEvent", function() M.CompactBook() end)
+end
+
+-- Old tables -> compact strings, a few hundred items per frame (a 50 MB
+-- SavedVariables file holds 150,000 tail points; one frame doing them all
+-- could hit the client's script time limit). Readers use whichever store
+-- holds an item meanwhile.
+local MIGRATE_CHUNK = 300
+function M.MigrateStores()
+  local db = M.db
+  if not db then return end
+  db.intra2 = db.intra2 or {}
+  db.book = db.book or {}
+  local function step()
+    -- the offer books: one realm per frame
+    for rk, d in pairs(db.depth or {}) do
+      if type(d) == "table" then
+        local nb = db.book[rk]
+        if type(d.items) == "table" and not (nb and (tonumber(nb.ts) or 0) >= (tonumber(d.ts) or 0)) then
+          -- moved as it is; the logout packs it (M.CompactBook)
+          db.book[rk] = { ts = d.ts, market = d.market, items = d.items, qty = d.qty }
+        end
+      end
+      db.depth[rk] = nil
+      C_Timer.After(0, step)
+      return
+    end
+    -- the tails: MIGRATE_CHUNK items per frame
+    for rk, leg in pairs(db.intra or {}) do
+      if type(leg) ~= "table" then
+        db.intra[rk] = nil
+      else
+        local dst = db.intra2[rk]
+        if not dst then dst = {}; db.intra2[rk] = dst end
+        local n = 0
+        for key, list in pairs(leg) do
+          if type(list) == "table" then
+            -- a compact tail already there (written before a downgrade):
+            -- the table's newer points join it
+            local cur = dst[key]
+            local st = joinOld((type(cur) == "string") and decodeIntra(cur) or {}, list)
+            while st[INTRA_MAX + 1] do table.remove(st, 1) end
+            if st[1] then dst[key] = encodeIntra(st) end
+          end
+          leg[key] = nil
+          n = n + 1
+          if n >= MIGRATE_CHUNK then break end
+        end
+        if next(leg) == nil then db.intra[rk] = nil end
+      end
+      C_Timer.After(0, step)
+      return
+    end
+  end
+  step()
 end
 
 -- A scan that does not look like this faction's auction house: far fewer items
@@ -171,7 +482,6 @@ function M.CommitScan(acc, opts)
   local now = time()
   local store = Store()
   local rk = M.RealmKey()
-  local istore = intraStore()
   M.db.names = M.db.names or {}
   local names = M.db.names
   local items, changed = 0, {}
@@ -188,7 +498,7 @@ function M.CommitScan(acc, opts)
       local key = tostring(itemID)
       local low = unitPrice(a.low)
       local it = store[key]; if not it then it = {}; store[key] = it end
-      pushIntra(istore, key, low, a.qty or 0, now)
+      pushIntra(rk, key, low, a.qty or 0, now)
       local rec = it[day]
       if not rec then
         it[day] = { low = low, qty = a.qty or 0, cur = low, ts = now }
@@ -259,14 +569,14 @@ function M.CommitQuick(acc)
     return items
   end
   local store = Store()
-  local istore = intraStore()
+  local rk = M.RealmKey()
   for itemID, a in pairs(acc) do
     if type(a) == "table" and type(a.low) == "number" and a.low > 0 then
       items = items + 1
       local key = tostring(itemID)
       local low, qty = unitPrice(math.floor(a.low)), a.qty or 0
       local it = store[key]; if not it then it = {}; store[key] = it end
-      pushIntra(istore, key, low, qty, now)
+      pushIntra(rk, key, low, qty, now)
       local rec = it[day]
       if not rec then
         it[day] = { low = low, qty = qty, cur = low, ts = now, quick = true }
@@ -369,14 +679,17 @@ function M.PruneLive()
 end
 
 -- Supply ladder of the NEWEST scan only (no history, keeps the SV small):
--- MidasDB.depth[realmKey] = { ts, market, items = { [itemID] = { N, p1, q1, n1, p2, ... } } }
+-- MidasDB.book[realmKey] = { ts, market, items = { [itemID] = { N, p1, q1, n1,
+-- p2, ... } }, qty = { [itemID] = listed } } while the session runs, packed
+-- into one string per item at the logout (M.CompactBook, encodeBook above).
 -- N = buyout auctions over ALL prices; p = unit buyout (copper, ascending),
--- q = units, n = auctions at that price (cheapest DEPTH_LEVELS prices only).
--- A new scan replaces the whole realm entry, so sold-out items drop out.
+-- q = units, n = auctions at that price (cheapest DEPTH_LEVELS prices only);
+-- listed = ALL units on the AH. A new scan replaces the whole realm entry, so
+-- sold-out items drop out (and an old MidasDB.depth entry of the realm with it).
 local DEPTH_LEVELS = 20
 
 function M.CommitDepth(acc, now)
-  M.db.depth = M.db.depth or {}
+  M.db.book = M.db.book or {}
   local items, qty = {}, {}
   for itemID, a in pairs(acc) do
     if a.lv then
@@ -397,24 +710,26 @@ function M.CommitDepth(acc, now)
       qty[itemID] = a.qty          -- ALL listed units, not only the stored levels
     end
   end
-  M.db.depth[M.RealmKey()] = { ts = now, market = M.MarketInfo(), items = items, qty = qty }
+  -- tables now, strings at the logout (M.CompactBook)
+  local rk = M.RealmKey()
+  M.db.book[rk] = { ts = now, market = M.MarketInfo(), items = items, qty = qty }
+  if M.db.depth then M.db.depth[rk] = nil end
 end
 
 -- Depth of one item on the current realm: levels = { {price, qty, auctions, cum}, ... },
 -- plus ts of the scan it comes from and the item's total auction count.
 -- nil when the newest scan did not list it.
 function M.GetDepth(itemID)
-  local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
-  local flat = d and d.items and d.items[tonumber(itemID)]
-  if not flat then return nil end
+  local d = bookOf()
+  local flat, listed = M.BookFlat(itemID)
+  if not (d and flat) then return nil end
   local levels, cum = {}, 0
   for i = 2, #flat, 3 do
     cum = cum + flat[i + 1]
     levels[#levels + 1] = { price = flat[i], qty = flat[i + 1], auctions = flat[i + 2], cum = cum }
   end
   -- listed = every unit on the AH (scans before 1.2.3 final: the stored levels only)
-  local listed = (d.qty and d.qty[tonumber(itemID)]) or cum
-  return { ts = d.ts, levels = levels, units = cum, auctions = flat[1], listed = listed }
+  return { ts = d.ts, levels = levels, units = cum, auctions = flat[1], listed = listed or cum }
 end
 
 -- A buyout the player just made thins the stored ladder immediately - the
@@ -422,19 +737,25 @@ end
 -- the bought price level was found and reduced (then the open books refresh).
 function M.DepthBuyout(itemID, unit, units)
   if M.AtNeutralAH() then return false end   -- the stored ladder is your own market's
-  local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
+  local d = bookOf()
   local id = tonumber(itemID)
-  local flat = d and d.items and id and d.items[id]
-  if not flat or not unit then return false end
+  local flat, listed = M.BookFlat(id)
+  if not (d and flat) or not unit then return false end
+  local packed = type(d.items[id]) == "string"
   unit = unitPrice(unit)
   for i = 2, #flat, 3 do
     if flat[i] == unit then
       flat[i + 1] = flat[i + 1] - (units or 1)
       flat[i + 2] = flat[i + 2] - 1
       flat[1] = math.max(0, (flat[1] or 1) - 1)
-      if d.qty and d.qty[id] then d.qty[id] = math.max(0, d.qty[id] - (units or 1)) end
+      if listed then listed = math.max(0, listed - (units or 1)) end
       if flat[i + 1] <= 0 or flat[i + 2] <= 0 then
         table.remove(flat, i); table.remove(flat, i); table.remove(flat, i)
+      end
+      if packed then
+        d.items[id] = encodeBook(flat, listed)    -- a decoded copy: pack it back
+      elseif d.qty and d.qty[id] then
+        d.qty[id] = listed                         -- the table itself was thinned
       end
       return true
     end

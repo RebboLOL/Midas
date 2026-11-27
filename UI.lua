@@ -253,16 +253,55 @@ function M.EnsureUI()
   if T.HelpTip then
     T.HelpTip(fairToggle, "Fair line", T.HELP.fair[2])
   end
-  -- nine tabs share the row with the three toggles: at the minimum window width
-  -- the tab padding shrinks until the bar ends before the first toggle (again
-  -- after a new text size, once the toggles have measured themselves)
+
+  -- "Crafted" toggle, leftmost: the mint Crafted line in the preview charts of
+  -- the Watchlist and Trades cards (CreateChartCard opts.craft). Default on,
+  -- persisted on its own (config.watchCraft = false hides it); the Charts tab
+  -- keeps its Crafted box in the button row (config.chartCraft). Shown on those
+  -- two tabs only, and only while Crafting and Settings "Craft lines" are on
+  -- (M.UpdateChartToggles) - otherwise no chart draws a Crafted line anyway.
+  local craftToggle = T.Checkbox(f, "Crafted", function(on)
+    if M.db and M.db.config then
+      if on then M.db.config.watchCraft = nil else M.db.config.watchCraft = false end
+    end
+    M.RerenderCharts()
+  end)
+  craftToggle:SetPoint("RIGHT", fairToggle, "LEFT", -14, 0)
+  craftToggle:SetChecked(not (M.db and M.db.config and M.db.config.watchCraft == false))
+  craftToggle:Hide()
+  M.headCraftToggle = craftToggle
+  if T.HelpTip then
+    T.HelpTip(craftToggle, "Crafted line", {
+      "Shows the mint Crafted line in the preview charts of the Watchlist and Trades tabs: what a craftable item cost to make on each day, from that day's material prices (each material bought or made, whichever was cheaper).",
+      "A day on which a material had no price yet stays empty. The Charts tab has its own Crafted tick box; Midas remembers both." })
+  end
+  -- nine tabs share the row with the four toggles: in a narrow window the tab
+  -- padding shrinks until the bar ends before the first toggle (again after a
+  -- new text size, once the toggles have measured themselves, and after a
+  -- resize - a wide window keeps the roomy tabs). Where even the tightest tabs
+  -- do not fit (980 px with a large text size), the toggles close up from 14
+  -- to 6 px apart. Room for Crafted stays reserved on every tab, so the tabs
+  -- never move when it comes and goes.
   if M.tabBar.Fit then
     local function fitTabs()
-      local togW = maToggle:GetWidth() + trToggle:GetWidth() + fairToggle:GetWidth() + 28
-      M.tabBar:Fit(980 - 28 - togW - 16)
+      local fw = math.max(980, math.floor((f:GetWidth() or 980) + 0.5))
+      local base = maToggle:GetWidth() + trToggle:GetWidth() + fairToggle:GetWidth()
+        + craftToggle:GetWidth()
+      local gap = 14
+      local maxW = fw - 28 - (base + 3 * gap) - 16
+      local w = M.tabBar:Fit(maxW)
+      if w and w > maxW then
+        gap = 6
+        M.tabBar:Fit(fw - 28 - (base + 3 * gap) - 16)
+      end
+      trToggle:ClearAllPoints(); trToggle:SetPoint("RIGHT", maToggle, "LEFT", -gap, 0)
+      fairToggle:ClearAllPoints(); fairToggle:SetPoint("RIGHT", trToggle, "LEFT", -gap, 0)
+      craftToggle:ClearAllPoints(); craftToggle:SetPoint("RIGHT", fairToggle, "LEFT", -gap, 0)
+      M._headTogGap = gap
     end
     fitTabs()
     T.OnFontScale(fitTabs)
+    f:HookScript("OnSizeChanged", fitTabs)
   end
 
   local div = T.Divider(f)
@@ -336,6 +375,7 @@ function M.SelectTab(i)
   if M.NWNavReset then M.NWNavReset() end
   if M.whyView then M.whyView:Hide() end
   if M.depthView then M.depthView:Hide() end
+  if M.heatView then M.heatView:Hide() end
   if M.alertsView then M.alertsView:Hide() end
   if M.ledgerUI and M.ledgerUI.pop then M.ledgerUI.pop:Hide() end
   if M.HideCraftPopups then M.HideCraftPopups() end
@@ -358,6 +398,15 @@ function M.UpdateChartToggles()
   if M.maToggle then M.maToggle:SetShown(showCtl) end
   if M.trToggle then M.trToggle:SetShown(showCtl) end
   if M.fairToggle then M.fairToggle:SetShown(showCtl) end
+  -- Crafted: only where a preview card draws the line (Watchlist, Trades By
+  -- Item); the Charts tab has its own box in the button row
+  local ht = M.headCraftToggle
+  if ht then
+    local cfg = M.db and M.db.config
+    local craftOn = (not M.CraftingOn or M.CraftingOn()) and not (cfg and cfg.tooltipCraft == false)
+    ht:SetShown(craftOn and ((t == TAB.Watchlist) or (t == TAB.Trades and M.tradeView ~= "log")) and true or false)
+    ht:SetChecked(not (cfg and cfg.watchCraft == false))
+  end
 end
 
 function M.RefreshUI()
@@ -1443,7 +1492,7 @@ sdkEv:SetScript("OnEvent", function(_, ev)
 end)
 
 -- ===== Reusable detail card (mini chart + stats), borderless ================
-local function CreateChartCard(parent, x0, w, h)
+local function CreateChartCard(parent, x0, w, h, opts)
   local card = CreateFrame("Frame", nil, parent)
   -- fully elastic: pinned between the table's right edge (x0) and the parent's
   -- bottom-right corner, so a wider/taller window all goes into the preview
@@ -1485,6 +1534,10 @@ local function CreateChartCard(parent, x0, w, h)
   canvas:SetPoint("TOPLEFT", 8, -48); canvas:SetPoint("BOTTOMRIGHT", -8, 142)
   canvas._compact = true   -- small preview: hover shows ONE compact read-out, not per-series boxes
   obj.canvas = canvas
+
+  -- Watchlist and Trades cards (opts.craft): the preview chart draws the mint
+  -- Crafted line too, behind the header's "Crafted" toggle (config.watchCraft)
+  if opts and opts.craft then canvas._craft = true end
 
   obj.stats = {}
   for i = 1, 5 do
@@ -2797,7 +2850,8 @@ local function CreateRankTab(panel, opts)
   scroll:EnableMouseWheel(true); scroll:SetScript("OnMouseWheel", onWheel)
   T.StyleScrollbar(opts.scrollName)
 
-  local card = CreateChartCard(panel, 702, 250, 420)
+  -- (the rank tab is the Watchlist: its card draws the Crafted line)
+  local card = CreateChartCard(panel, 702, 250, 420, { craft = true })
 
   -- permanent group-chip row between the search and the column headers
   -- (watchlist views only): click a chip to FILTER the list to that group
@@ -3372,6 +3426,17 @@ local function fairOnDay(id, day)
   return v or nil
 end
 
+-- profession filter of the Trades tab: does one of the profession's recipes
+-- make this item? (recipe index of Crafting.lua)
+local function madeByProf(id, prof)
+  local recs = id and M.Recipes and M.Recipes().byItem[tonumber(id)]
+  if not recs then return false end
+  for _, r in ipairs(recs) do
+    if r.prof == prof then return true end
+  end
+  return false
+end
+
 local function tradeSortVal(e, fld)
   if fld == "iname" then return (e.s.name or (e.s.id and M.ItemName(tostring(e.s.id))) or e.key):lower() end
   if fld == "icat"  then return (e.s.id and M.ItemCategory(tostring(e.s.id)) or ""):lower() end
@@ -3416,6 +3481,7 @@ function M.BuildTrades(panel)
   }, function(key)
     st.view = key; M.tradeView = key
     if M.db and M.db.config then M.db.config.tradeView = key end
+    if st.profPop then st.profPop:Hide() end   -- its counts belong to the other view
     -- full RefreshUI, not just st.Refresh: the header chart toggles are shown
     -- only in By Item (History has no chart), and the footer hint follows too
     M.RefreshUI()
@@ -3435,6 +3501,97 @@ function M.BuildTrades(panel)
     st.Refresh()
   end)
   search:SetPoint("TOPLEFT", 0, -2)
+
+  -- profession filter beside it (both views): only items a profession makes.
+  -- The list offers the professions whose crafts turn up in the view you are
+  -- in, each with the number of such items; the summary strip stays whole.
+  st.prof = nil
+  local profBtn = T.Button(panel, "All professions", 130, 22)
+  profBtn:SetPoint("LEFT", search, "RIGHT", 6, 0)
+  local profPop = T.Surface(panel, "bg1", "borderlt")
+  profPop:SetPoint("TOPLEFT", profBtn, "BOTTOMLEFT", 0, -2)
+  profPop:SetWidth(200); profPop:SetFrameStrata("DIALOG"); profPop:Hide()
+  panel:HookScript("OnHide", function() profPop:Hide() end)
+  st.profPop = profPop
+  local profRows = {}
+  local function setProf(p)
+    st.prof = p
+    profBtn.text:SetText(p and M.ProfName(p) or "All professions")
+    profPop:Hide()
+  end
+  local function profCounts()
+    local Rx, realm = M.Recipes(), M.RealmKey()
+    local seen, count = {}, {}
+    local function add(id)
+      id = tonumber(id)
+      if not id or seen[id] then return end
+      seen[id] = true
+      local got = {}
+      for _, r in ipairs(Rx.byItem[id] or {}) do
+        if r.prof and not got[r.prof] then got[r.prof] = true; count[r.prof] = (count[r.prof] or 0) + 1 end
+      end
+    end
+    if st.view == "item" then
+      for _, s in pairs(M.TradeStats(realm)) do add(s.id) end
+    else
+      for _, e in ipairs(M.TradeLog(realm)) do
+        local id = e.id
+        if not id and e.name and M.NameToID then
+          id = M.NameToID((M.CleanItemName and M.CleanItemName(e.name)) or e.name)
+        end
+        add(id)
+      end
+    end
+    return count
+  end
+  local function fillProfPop()
+    local count = profCounts()
+    local list = { { name = "All professions" } }
+    for p, n in pairs(count) do list[#list + 1] = { id = p, name = M.ProfName(p), n = n } end
+    if st.prof and not count[st.prof] then list[#list + 1] = { id = st.prof, name = M.ProfName(st.prof), n = 0 } end
+    table.sort(list, function(a, b)
+      if (a.id == nil) ~= (b.id == nil) then return a.id == nil end
+      return a.name < b.name
+    end)
+    for _, b in ipairs(profRows) do b:Hide() end
+    for i, e in ipairs(list) do
+      local b = profRows[i]
+      if not b then
+        b = CreateFrame("Button", nil, profPop)
+        b:SetHeight(20)
+        b.l = T.Text(b, T.SIZE.small, "text", T.FONT_MED); b.l:SetPoint("LEFT", 8, 0)
+        b.r = T.Text(b, T.SIZE.tiny, "muted", T.FONT_MED); b.r:SetPoint("RIGHT", -8, 0)
+        local hl = b:CreateTexture(nil, "BACKGROUND"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.06); hl:Hide()
+        b:SetScript("OnEnter", function() hl:Show() end)
+        b:SetScript("OnLeave", function() hl:Hide() end)
+        b:SetScript("OnClick", function(self)
+          setProf(self.prof)
+          if st.ResetLists then st.ResetLists() end
+          st.Refresh()
+        end)
+        profRows[i] = b
+      end
+      b:ClearAllPoints()
+      b:SetPoint("TOPLEFT", profPop, "TOPLEFT", 2, -2 - (i - 1) * 20)
+      b:SetPoint("RIGHT", profPop, "RIGHT", -2, 0)
+      b.prof = e.id
+      b.l:SetText(e.name)
+      b.l:SetTextColor(T.Unpack((st.prof == e.id) and C.accent or C.text))
+      b.r:SetText(e.n and tostring(e.n) or "")
+      b:Show()
+    end
+    profPop:SetHeight(4 + #list * 20)
+    profPop:Show()
+  end
+  st.FillProfPop = fillProfPop
+  profBtn:SetScript("OnClick", function()
+    if profPop:IsShown() then profPop:Hide() else fillProfPop() end
+  end)
+  if T.HelpTip then
+    T.HelpTip(profBtn, "Profession", {
+      "Shows only the items a profession makes, in History and By Item, so the sell-through, margin and net of your crafts stand on their own. The number beside a profession is how many of its crafts you traded.",
+      "The totals at the top keep counting all your trades." })
+  end
 
   -- summary strip
   local function stat(x, w, label, tip)
@@ -3606,7 +3763,7 @@ function M.BuildTrades(panel)
     FauxScrollFrame_OnVerticalScroll(self, offset, TRADE_ROWH, st.FillItem)
   end)
   T.StyleScrollbar("MidasTradeItemScroll")
-  local itemCard = CreateChartCard(itemView, 702, 250, 330)
+  local itemCard = CreateChartCard(itemView, 702, 250, 330, { craft = true })
   -- sticky group header: when you scroll into an expanded item's transactions this
   -- pins the item name + the transaction column labels over the normal header, so you
   -- always know which item you're inside and what the columns mean.
@@ -3692,6 +3849,7 @@ function M.BuildTrades(panel)
         if not cat then cat = (M.ItemCategory(tostring(id)) or ""):lower(); catCache[id] = cat end
         hit = cat:find(q, 1, true)
       end
+      if hit and st.prof and not madeByProf(id, st.prof) then hit = false end
       if hit then
         local cnt = e.count
         if (not cnt or cnt == 0) and e.kind == "sold" and M.AuctionSize then cnt = M.AuctionSize(id, e.gross or 0) end
@@ -3775,7 +3933,9 @@ function M.BuildTrades(panel)
       local btn = logRows[1]
       btn.zb:Hide(); btn.key = nil
       for i = 1, #LOG_COLS do btn.fs[i]:SetText("") end
-      btn.fs[3]:SetText("No trades yet \226\128\147 collect AH mail"); colorize(btn.fs[3], C.muted)
+      local filtered = (st.search or "") ~= "" or st.prof
+      btn.fs[3]:SetText(filtered and "No trades match the filter" or "No trades yet \226\128\147 collect AH mail")
+      colorize(btn.fs[3], C.muted)
       btn:Show()
     end
   end
@@ -3822,6 +3982,13 @@ function M.BuildTrades(panel)
         local nm = (e.s.name or (e.s.id and M.ItemName(tostring(e.s.id))) or e.key):lower()
         local cat = (e.s.id and M.ItemCategory(tostring(e.s.id)) or ""):lower()
         if nm:find(q, 1, true) or cat:find(q, 1, true) then f[#f + 1] = e end
+      end
+      list = f
+    end
+    if st.prof then
+      local f = {}
+      for _, e in ipairs(list) do
+        if madeByProf(e.s.id, st.prof) then f[#f + 1] = e end
       end
       list = f
     end
@@ -3977,15 +4144,35 @@ function M.BuildTrades(panel)
     if total == 0 then
       st.sticky:Hide()
       M.FillChartCard(itemCard, nil)
-      itemCard.title:SetText("No item stats yet"); colorize(itemCard.title, C.sub)
-      itemCard.cat:SetText("open your mailbox after selling or buying \226\128\148 AH mail is logged automatically")
+      if (st.search or "") ~= "" or st.prof then
+        itemCard.title:SetText("No items match the filter"); colorize(itemCard.title, C.sub)
+        itemCard.cat:SetText("change the search or pick All professions")
+      else
+        itemCard.title:SetText("No item stats yet"); colorize(itemCard.title, C.sub)
+        itemCard.cat:SetText("open your mailbox after selling or buying \226\128\148 AH mail is logged automatically")
+      end
     elseif itemCard.shownKey or (list[1] and list[1].s.id) then
       M.FillChartCard(itemCard, itemCard.shownKey or tostring(list[1].s.id))
+    else
+      -- rows again after an empty filter, but the top one has no item id
+      itemCard.title:SetText("Hover an item for details"); colorize(itemCard.title, C.sub)
+      itemCard.cat:SetText("")
     end
   end
 
   function st.RefreshItem()
     buildItems(); st.FillItem()
+  end
+
+  -- a profession pick starts both lists at the top, and the card follows the
+  -- new list instead of keeping an item the filter just removed
+  function st.ResetLists()
+    for _, sc in ipairs({ logScroll, itemScroll }) do
+      FauxScrollFrame_SetOffset(sc, 0)
+      local sb = _G[sc:GetName() .. "ScrollBar"]
+      if sb then sb:SetValue(0) end
+    end
+    itemCard.shownKey = nil
   end
 
   -- ----- jumps in from other pages (Nav.lua) ------------------------------
@@ -4005,6 +4192,7 @@ function M.BuildTrades(panel)
     if M.db and M.db.config then M.db.config.tradeView = "item" end
     st.expanded = {}
     if sk then st.expanded[sk] = true end
+    setProf(nil)   -- the item you jump to shows whatever makes it
     setSearch(id and M.ItemName(tostring(id)) or "")
     FauxScrollFrame_SetOffset(itemScroll, 0)
     local sb = _G["MidasTradeItemScrollScrollBar"]
@@ -4015,13 +4203,14 @@ function M.BuildTrades(panel)
   function M.TradesState()
     local ex = {}
     for k, v in pairs(st.expanded) do ex[k] = v end
-    return { view = st.view, search = search.edit:GetText() or "", expanded = ex }
+    return { view = st.view, search = search.edit:GetText() or "", expanded = ex, prof = st.prof }
   end
-  function M.TradesRestore(view, txt, expanded)
+  function M.TradesRestore(view, txt, expanded, prof)
     st.view = view or st.view; M.tradeView = st.view
     if M.db and M.db.config then M.db.config.tradeView = st.view end
     st.expanded = {}
     for k, v in pairs(expanded or {}) do st.expanded[k] = v end
+    setProf(prof)
     setSearch(txt)
   end
 
@@ -4072,6 +4261,8 @@ function M.BuildTrades(panel)
     logView:SetShown(st.view == "log")
     itemView:SetShown(st.view == "item")
     if st.view == "log" then st.RefreshLog() else st.RefreshItem() end
+    -- new mail while the profession list is open: its counts follow
+    if st.profPop and st.profPop:IsShown() then st.FillProfPop() end
   end
 
   M.RefreshTrades = st.Refresh
@@ -6103,6 +6294,7 @@ function M.BuildCharts(panel)
 
   function M.ShowWhy(key)
     if M.depthView then M.depthView:Hide() end
+    if M.heatView then M.heatView:Hide() end
     wy.key = key
     M.FillWhy()
     wy:Show()
@@ -6874,6 +7066,7 @@ function M.BuildCharts(panel)
 
   function M.ShowDepth(key)
     wy:Hide()
+    if M.heatView then M.heatView:Hide() end
     dv.key = key
     if layoutDepth then layoutDepth() end
     depthSeg.frame:Hide()
@@ -6883,6 +7076,10 @@ function M.BuildCharts(panel)
     -- its old span otherwise and pokes under the book until the next resize
     if M.chartKey and M.RenderItemChart and M.canvas then M.RenderItemChart(M.canvas, M.chartKey) end
   end
+
+  -- heat map of the item (Heatmap.lua): the last 7 days by time of day, a
+  -- full-tab page on the same layer as the offer book
+  if M.BuildHeat then M.BuildHeat(panel) end
 
   local canvas = CreateFrame("Frame", nil, panel)
   canvas:SetPoint("TOPLEFT", 206, -106); canvas:SetPoint("BOTTOMRIGHT", 0, 0)
@@ -7655,6 +7852,9 @@ function M.RefreshCharts()
       -- geometry (a tab return leaves the chart re-anchored to full width)
       if M.depthView and M.depthView:IsShown() and M.ShowDepth then
         M.ShowDepth(M.chartKey)
+      elseif M.heatView and M.heatView:IsShown() and M.ShowHeat then
+        -- an open heat map follows the item switch and new scans too
+        M.ShowHeat(M.chartKey)
       else
         M.RenderItemChart(M.canvas, M.chartKey)
       end
@@ -7685,12 +7885,15 @@ end
 -- most listed units (so the preview is never empty after a scan)
 local function demoItem()
   if M.chartKey then return M.chartKey end
-  local d = M.db and M.db.depth and M.db.depth[M.RealmKey()]
+  -- the item with the most units in the stored offer book (Data.lua: compact
+  -- since 1.3.8, M.BookFlat decodes either form)
+  local d = M.BookOf and M.BookOf()
   local best, bestU
-  if d and d.items then
-    for id, flat in pairs(d.items) do
+  if d and d.items and M.BookFlat then
+    for id in pairs(d.items) do
+      local flat = M.BookFlat(id)
       local u = 0
-      for i = 3, #flat, 3 do u = u + flat[i] end
+      for i = 3, #(flat or {}), 3 do u = u + flat[i] end
       if not bestU or u > bestU then best, bestU = id, u end
     end
   end

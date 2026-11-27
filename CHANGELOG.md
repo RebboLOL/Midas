@@ -1,5 +1,12 @@
 # Midas – Changelog
 
+## 1.3.8 – 2026-11-27
+- **Charts: heat map (beta).** The new Heat map page of an item shows its lowest price or the units listed for every 3-hour window of the last 7 days, with the cheapest and dearest times and the windows that have no scan yet.
+- **Watchlist and Trades: Crafted line in the preview.** The preview chart shows what a craftable item cost to make on each day, and a Crafted tick box next to Fair hides the line.
+- **Trades: filter by profession.** A profession list beside the search shows only the items that profession makes, in History and By Item, so you can compare the sell-through of your crafts on their own.
+- **Smaller saved data.** Intraday prices and the offer book are stored in a compact form, which makes the saved file several megabytes smaller on a busy auction house.
+- **Charts: fixed a bug where the Floor MA started late on the shorter timeframes.** It now also counts the days before the timeframe, so every timeframe shows the same values and the line starts at the left edge.
+
 ## 1.3.7 – 2026-11-26
 - **Charts: prices of all scanners through the day.** With the Midas Companion app the 1W and 1D charts show what every scanner saw during the day, and a single outlier that was gone by the next scan no longer shows in the line.
 - **Charts: Crafted over time.** The mint Crafted line shows what the item cost to make on each day (on 1D at each scan) from the material prices of that moment, and a Crafted tick box in the Charts tab hides it.

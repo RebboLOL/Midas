@@ -2,7 +2,7 @@
 ## Title: Midas |cffE8B44AAH|r
 ## Notes: AH market analysis: today's Top Picks, opportunity ranking & price charts (built-in full AH scanner)
 ## Author: Rebo
-## Version: 1.3.7
+## Version: 1.3.8
 ## SavedVariables: MidasDB, MidasUplinkDB
 ## AddonCompartmentFunc: Midas_OnCompartmentClick
 ## X-Category: Auction/Economy
@@ -21,6 +21,7 @@ Logic.lua
 Recipes.lua
 Trades.lua
 Charts.lua
+Heatmap.lua
 Sankey.lua
 UI.lua
 Home.lua

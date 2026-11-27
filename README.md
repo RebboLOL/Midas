@@ -169,8 +169,12 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
    cost of everything under Fair and what it takes to buy up to each marker (buyout only, no seller
    names; the AH has no buy orders). A **split** button next to the offer book shows the price
    chart on the left and the supply ladder on the right, and the chart / offer-book headers carry
-   the item's icon. **Chips next to the item's name** open its craft tree, your trades and your
-   stock and put it on the watchlist; clicking the name opens the item menu.
+   the item's icon. The **heat map** (beta) lays the last 7 days out by time of day in 3-hour
+   windows: each cell is the lowest price against Fair (or the units listed against the usual
+   supply), with the cheapest and dearest times, a day-trade pattern after the 5 % AH cut, and the
+   windows without a scan hatched or outlined. **Chips next to the item's name** open its craft
+   tree, heat map, your trades and your stock and put it on the watchlist; clicking the
+   name opens the item menu.
    Bigger new features introduce themselves once after an update with a short what's-new note
    (`/midas news` shows it again).
 
@@ -205,6 +209,7 @@ Every item in Midas links to every page that has something on it:
 - **Chart** – price history, Fair and the signal, your trades as dots, the price alerts.
 - **Craft tree** – what it costs to make, or for a material what it is used in (while Crafting (beta) is on).
 - **Offer book** – every price it is listed at in your newest full scan.
+- **Heat map** – the last 7 days by time of day: when it was cheap, when dear, which times have no scan yet.
 - **Your trades** – the Trades tab's By Item view searched for the item, its transactions unfolded.
 - **Your stock** – what your stock of it was worth day by day (Net Worth), with what you paid.
 
@@ -401,7 +406,8 @@ each from the game's own data tables, so changed Forever recipes show as they ar
   next to Current and Fair. The big chart draws it as a mint line over time: each earlier day priced with
   that day's materials (on 1D each scan with the materials' prices at that moment), so you see what got cheaper
   or dearer to make; a point at which a material had no price yet stays empty. The *Crafted* tick box left of
-  the alert fields hides the line. Hover the underlined value
+  the alert fields hides the line. The preview charts of the Watchlist and Trades tabs draw the same line by
+  day; the *Crafted* tick box in the window header, left of *Fair*, hides it there. Hover the underlined value
   or the *Craft tree* chip next to the name for a small preview of the tree, click to open it.
 - **Beta switch** – crafting is in beta. **Enable crafting** next to the BETA plaque in the tab (or Settings >
   *Crafting (beta)*) turns all of it off: the tree, the Crafted price and line in Charts, the tooltip craft

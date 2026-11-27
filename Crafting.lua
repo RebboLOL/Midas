@@ -262,8 +262,13 @@ end
 local function ahAt(id, s)
   local t, D0 = priceTs, M.C.SCAN_DAY_0
   local key = tostring(id)
-  local ist = M.db and M.db.intra and M.RealmKey and M.db.intra[M.RealmKey()]
-  local best = intraBefore(ist and ist[key], t, nil)
+  local tail
+  if M.IntraList then tail = M.IntraList(key)
+  else
+    local ist = M.db and M.db.intra and M.RealmKey and M.db.intra[M.RealmKey()]
+    tail = ist and ist[key]
+  end
+  local best = intraBefore(tail, t, nil)
   best = intraBefore(M.ServerIntra and M.ServerIntra(key), t, best)
   if best and best.ts < t - DAY_LOOKBACK * 86400 then best = nil end
   if s then
@@ -548,6 +553,7 @@ end
 
 -- true when this realm has the price ladder of a full scan (the offer book)
 function M.HasDepth()
+  if M.BookOf then return M.BookOf() ~= nil end
   local d = M.db and M.db.depth and M.RealmKey and M.db.depth[M.RealmKey()]
   return d ~= nil and d.items ~= nil
 end
