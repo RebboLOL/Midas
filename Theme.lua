@@ -67,6 +67,7 @@ T.C = {
   teal     = { 0.99,  0.80,  0.38  }, -- the Midas touch: price & value lines in gold
   mint     = { 0.20,  0.88,  0.74  }, -- Crafting asset class (the old teal)
   purple   = { 0.62,  0.55,  0.98  }, -- gold tied up in active auctions
+  neutral  = { 0.95,  0.52,  0.80  }, -- rose: own scans at a neutral AH (chart line)
   -- brightened 1.2.14 after "everything too grey" feedback: the hierarchy
   -- keeps its three steps, each step just sits higher above the background
   text     = { 0.97,  0.95,  0.90  }, -- primary text (warm ivory)

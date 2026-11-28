@@ -26,7 +26,7 @@ snapshot scan, commodities included):
 - **Open the auction house** – a **Midas Scan** button appears at the top-right of the AH window.
   Click it to run a full scan; a **progress bar** shows while it runs.
 - You can also scan with `/midas scan`, the window's "Scan AH" button, or Shift + right-click on the minimap coin.
-- Automatic scanning on AH open is **off by default** – turn it on in the **Settings** tab or with `/midas auto`.
+- Automatic scanning on AH open is **off by default** – turn it on in **Settings > Auction house** or with `/midas auto`.
 - Every scan is stored permanently, so your history keeps growing.
 - **Between two scans** the current price follows what the auction house shows you: every search in
   the AH window (and every price Auctionator records, if installed) updates the item's current price,
@@ -58,19 +58,20 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
 ## Usage
 - **Minimap button** (gold coin) – mouseover shows the best sells from your holdings;
   left-click opens the window, right-click opens the **gold timer**, Shift + right-click runs a scan,
-  dragging moves the button (hide it in the **Settings** tab if you prefer a clean minimap).
+  dragging moves the button (hide it in **Settings > Interface** if you prefer a clean minimap).
 - **Alt-click any item** – a link someone posted in chat, an item in your bags, or any row
   inside Midas – **posts its price card into chat**: current price, fair (± vs fair),
   7-day floor and the 60-day low with its date, sent to your last-used chat channel (a whisper
   answers the same person). The one-click answer to a guildmate's "price check?".
-  The Alt/Shift shortcuts start switched off on a new install – turn them on in **Settings**
-  ("Alt/Shift shortcuts") or bind them with `/midas keys`.
+  The Alt/Shift shortcuts start switched off on a new install – turn them on in **Settings > Interface**
+  ("Click shortcuts", with a key for each) or bind them with `/midas keys`.
 - **Right-click any item inside Midas** – a list row, a card in the crafting tree, the name on the
   chart – for the **item menu**: its chart, craft tree, offer book, your trades and your stock, plus
   add to / remove from the watchlist, post its price to chat and (at the AH) search it. On the Start
   page and in the Watchlist tab right-click keeps toggling the watchlist. See *Item pages and links*.
 - `/midas` – open/close the window (ESC closes too)
 - `/midas help` – print this command list in-game (any unknown command shows it too)
+- `/midas set <word>` – open the Settings tab and search it (`/midas set` alone just opens it)
 - `/midas scan` – run a full AH scan now (must be at the auction house)
 - `/midas auto` – toggle automatic scan on AH open (off by default; the Midas Scan button is the normal way)
 - `/midas quick` – toggle the quick scan of your own items while the full scan is slow or on cooldown (WoW Forever, on by default)
@@ -158,8 +159,11 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
    not be tied to a cause. In **beta**: the bookings are still being tuned, and the "Record ledger"
    switch in the tab (or in Settings) turns recording off.
 6. **Charts** – the item's full price history on a real time axis, drawn as a smooth
-   anti-aliased curve (missing scan days show as dashed gaps), with Floor MA, the Fair line and
-   your own buys/sells as dots – all toggleable from the top-right of the window. A **timeframe
+   anti-aliased curve with a faint gold glow under it (missing scan days show as dashed gaps),
+   with Floor MA, the Fair line and
+   your own buys/sells as dots – all toggleable from the top-right of the window. With
+   **Neutral AH line** (Settings > Charts) your own scans at Booty Bay, Gadgetzan or Everlook
+   join as a rose line with the day's lowest price there. A **timeframe
    switch** (1D / 1W / 1M / 3M / All) on the plot zooms every big chart, including Net Worth.
    The **offer book** button shows every price the item is listed at in your newest full scan
    (cheapest 20) as a ladder, cheapest on top: each price is a row whose bar continues a cumulative
@@ -183,16 +187,17 @@ keep prices from that list get the scan too; `/run MidasDB.config.shareScan = fa
    and what gear disenchants into. The start view ranks the most profitable crafts. In beta: the
    "Enable crafting" switch in the tab (or in Settings) turns crafting off. See *Crafting tree (beta)*.
 
-8. **Settings** – everything configurable in one place. **General:** the item-tooltip style
-   (**Full / Reduced / Off**, with a live preview of exactly what each produces), the minimap
-   button on/off, auto-scan on AH open, the default chart timeframe, a separate
-   timeframe for the small preview cards and the **text size** of every Midas window (90-130%;
-   item tooltips keep the game's font size). **Community sync:**
-   on/off, whose data to accept (everyone / guild only), the **cross-guild (nearby)** channel
-   (Off / Say / Yell), a compact status (peers, rows in/out, throttle counter) and a **live log**
-   of each scan, beacon and backfill. (`/midas share on|off`, `/midas vicinity` and
-   `/midas syncstatus` still work from chat.) **Datalink:** whether the Midas Companion app is
-   found, the switch to share your scans with midasmarket.app and the state of the server prices.
+8. **Settings** – every option in one of eight groups (**Interface, Tooltips, Auction house, Charts,
+   Fair price, Features, Data sharing, Advanced**), each with its explanation right under it. The
+   **search box** finds an option by its name, its description, its slash command or the words people
+   use for it ("font size", "gold icons", "lag", "missing data" ...) and says why a row matched;
+   **Show in <group>** opens the group with that option marked. **Changed** lists every option that
+   differs from a fresh install, each with a **Reset**, and every group has **Reset group**. Highlights:
+   the item-tooltip style with a live preview, the text size of every Midas window (90-130%), the
+   click-shortcut keys, the chart timeframes and lines, the Fair half-life with a live chart, the
+   beta modules, a "what leaves your PC" summary for the Datalink and the community sync, and under
+   **Advanced** the sync log, price imports, archive cleanup and a performance check.
+   `/midas set <word>` opens the tab with that search (`/midas set coin`).
 
 9. **Help** – how the numbers are made, for humans: Fair and the sell odds explained with a
    worked example and two illustrative charts, plus a one-line glossary of every figure in the UI.
@@ -260,8 +265,8 @@ because someone else did. It works in two layers:
 - **Cross-guild / nearby** (on by default, `yell`; Classic Era only – WoW Forever blocks say/yell addon messages): at the auction house Midas also beacons that tiny
   manifest to **nearby players in other guilds** and answers their backfill requests – that's how data
   crosses guild boundaries, since Midas users meet at the AH. Pick the channel or turn it off in the
-  **Settings** tab or with `/midas vicinity say|yell|off`.
-- **Live log:** the **Settings** tab lists the Midas users online (last 10 minutes) with their version and
+  **Settings > Data sharing** or with `/midas vicinity say|yell|off`.
+- **Live log:** **Settings > Advanced** lists the Midas users online (last 10 minutes) with their version and
   keeps a scrollable log of the last 300 sync events – **PUSH** = sent by you, **PULL** = received or asked
   for, **WARN** = throttled or unreadable traffic, **INFO** = everything else.
 
@@ -288,7 +293,7 @@ Addons cannot use the network, so the app does it for them; until 1.2.28 this ne
 Midas_Uplink, which is now part of Midas: once the companion app is version 1.3.0 or newer, delete the
 Midas_Uplink folder - your settings carry over (an older app still needs it, so update the app first).
 
-- **Share my scans** (Settings > Datalink or `/midas datalink on`, **off by default**): after every full scan
+- **Share my scans** (Settings > Data sharing or `/midas datalink on`, **off by default**): after every full scan
   the offer book (the 20 cheapest unit prices of each item, units and auctions listed) is handed to the app,
   which uploads it after the next `/reload` or logout; once per market the daily prices of your last 90 days
   follow. Realm, faction and game version come along, and for the scanned items their names and item data
@@ -401,7 +406,7 @@ each from the game's own data tables, so changed Forever recipes show as they ar
   the expected value and whether disenchanting, selling or vendoring pays most, and for dust, essences and
   shards **which disenchants yield them**. Disenchant odds are the known approximate values.
 - **Tooltips** – items carry a *Craft* line (cost now and Fair with the profit), gear a *Disenchant* line,
-  recipe items a *Payoff* line and materials a *Used in* count; Settings > *Craft lines* turns them off.
+  recipe items a *Payoff* line and materials a *Used in* count; Settings > Tooltips > *Craft cost lines* turns them off.
 - **Charts** – the market line shows **Crafted** (what it costs to make now, with its distance to Current)
   next to Current and Fair. The big chart draws it as a mint line over time: each earlier day priced with
   that day's materials (on 1D each scan with the materials' prices at that moment), so you see what got cheaper

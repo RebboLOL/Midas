@@ -19,7 +19,8 @@ end
 -- ===== Neutral auction houses =================================================
 -- Scans and prices seen at a neutral AH (Core.lua M.AtNeutralAH) land in
 -- M.db.realms[M.NeutralKey()] - same daily rows (low = MIN, qty = MAX, cur/ts =
--- newest), but no list, chart, alert or sync reads that key. It also keeps
+-- newest), but no list, alert or sync reads that key; only the big chart's
+-- optional "Neutral AH" line shows it (M.NeutralSeries). It also keeps
 -- neutral day lows out of the Auctionator/aux import (M.NeutralBlocks): both
 -- addons file the neutral AH under the faction's key.
 local NEUTRAL_KEEP = 60   -- days
@@ -50,6 +51,23 @@ function M.NeutralBlocks(key, day, low)
   end
   local rec = it and it[day]
   return (rec and rec.low and low >= rec.low) and true or false
+end
+
+-- One item's neutral day rows ({ [day] = { low, qty, cur, ts } }) for the
+-- "Neutral AH" line of the big chart (Charts.lua, Settings "Neutral AH line in
+-- charts"): this realm's own neutral scans only, nothing shared or downloaded.
+-- Plain gear ("g:<id>") falls back to its base item; gear with a random suffix
+-- ("gr:") and pets ("p:") stay without - their base rows are another price level.
+function M.NeutralSeries(key)
+  local ns = M.db and M.db.realms and M.db.realms[M.NeutralKey()]
+  if type(ns) ~= "table" or key == nil then return nil end
+  local it = ns[tostring(key)]
+  if not it then
+    local base = tostring(key):match("^g:(%d+)")
+    it = base and ns[base]
+  end
+  if type(it) ~= "table" or next(it) == nil then return nil end
+  return it
 end
 
 function M.PruneNeutral()

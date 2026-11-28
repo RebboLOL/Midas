@@ -1,6 +1,6 @@
 -- Midas – Core: namespace, constants, helpers, events, slash, init
 local ADDON, M = ...
-M.version = "1.3.8"
+M.version = "1.3.9"
 -- community server: Help tab, the get-started tour, what's new and /midas discord
 M.DISCORD_URL = "https://discord.gg/CfZgeyxAn5"
 
@@ -824,6 +824,7 @@ function M.PrintHelp()
   M.Print("commands:")
   local lines = {
     "/midas  -  open / close the window",
+    "/midas set <word>  -  open Settings and search them (e.g. /midas set coin)",
     "/midas scan  -  full AH scan (auction house must be open)",
     "/midas auto  -  toggle auto-scan when the AH opens",
     "/midas quick  -  toggle the price scan / quick scan while the full scan is slow or on cooldown (WoW Forever)",

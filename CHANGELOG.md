@@ -1,5 +1,10 @@
 # Midas – Changelog
 
+## 1.3.9 – 2026-11-28
+- **Settings: reworked and searchable.** The options sit in eight groups with their explanation under each one, a search box finds any option by its name, a word for it or its slash command, and Changed lists everything that differs from a fresh install with a Reset for each.
+- **Charts: neutral auction house line.** With Neutral AH line in Settings > Charts, the big chart shows the lowest price of your own scans at Booty Bay, Gadgetzan or Everlook for each day as a rose line next to your faction's prices.
+- **Charts: glow under the price line.** A faint gold glow under the price line fades out towards the bottom in the big chart, the preview charts and the tooltip chart, while Fair, Floor MA and the other lines stay as they were.
+
 ## 1.3.8 – 2026-11-27
 - **Charts: heat map (beta).** The new Heat map page of an item shows its lowest price or the units listed for every 3-hour window of the last 7 days, with the cheapest and dearest times and the windows that have no scan yet.
 - **Watchlist and Trades: Crafted line in the preview.** The preview chart shows what a craftable item cost to make on each day, and a Crafted tick box next to Fair hides the line.

@@ -13,6 +13,32 @@ local AA_LINE = "Interface\\AddOns\\" .. (ADDON or "Midas") .. "\\Media\\AALine"
 local AA_PAD = 1.5
 local aaOK = true          -- false once the texture failed to load: plain lines
 
+-- Price glow: a faint gold fade under the market chart's price line only
+-- (big chart, preview cards, tooltip chart). It starts at GLOW_A right under
+-- the line and falls off steeply - (1 - t)^3 in three linear pieces - over
+-- GLOW_DEPTH of the plot height; where the plot bottom comes first the fade
+-- is squeezed to end there. Fair, Floor MA, Crafted and Neutral get none.
+-- Each piece is a vertical-sided trapezoid whose top and bottom follow the
+-- drawn curve (SetVertexOffset, as in the Sankey ribbons), coloured with a
+-- vertical alpha ramp; on BORDER, so it lies over the volume bars and under
+-- every line. Clients without SetVertexOffset / SetGradient draw no glow.
+local GLOW_A, GLOW_DEPTH = 0.12, 0.60
+local GLOW_T = { 0, 0.2, 0.5, 1 }          -- depth fractions where the pieces meet
+local GLOW_K = { 1, 0.512, 0.125, 0 }      -- (1 - t)^3 at those depths
+-- the traced curve is simplified as it is drawn: a sample is kept only where
+-- the chord from the last kept point would pass a skipped sample farther than
+-- GLOW_TOL px (perpendicular), or the column would grow wider than GLOW_MAXW
+-- (samples farther apart than that give one column per sample step, where the
+-- drawn line is straight too) - corners and steps keep their shape, flat
+-- stretches give few wide columns
+local GLOW_TOL, GLOW_MAXW, GLOW_MAXB = 1.0, 12, 64
+local V_UL = UPPER_LEFT_VERTEX or 1
+local V_LL = LOWER_LEFT_VERTEX or 2
+local V_UR = UPPER_RIGHT_VERTEX or 3
+local V_LR = LOWER_RIGHT_VERTEX or 4
+local glowOK               -- nil = not probed yet, false = no glow on this client
+local glowCols             -- the ramp colours (CreateColor), made once per colour
+
 -- label gutters grow with the text size (Settings > Text size), so axis
 -- labels stay inside the canvas; at 100 % or below they are as drawn
 local function gut(v)
@@ -64,11 +90,27 @@ local function GetFS(canvas)
   return s
 end
 
+-- the price glow keeps a pool of its own: its textures carry vertex offsets
+-- and a colour ramp the shared texture pool must never inherit
+local function GetGlowTex(canvas)
+  canvas._gl = canvas._gl or {}; canvas._glN = (canvas._glN or 0) + 1
+  local t = canvas._gl[canvas._glN]
+  if not t then
+    t = canvas:CreateTexture(nil, "BORDER"); t:SetColorTexture(1, 1, 1, 1)
+    if t.SetSnapToPixelGrid then t:SetSnapToPixelGrid(false) end
+    if t.SetTexelSnappingBias then t:SetTexelSnappingBias(0) end
+    canvas._gl[canvas._glN] = t
+  end
+  t:Show()
+  return t
+end
+
 local function ResetPools(canvas)
   for i = 1, (canvas._lnN or 0) do canvas._ln[i]:Hide() end
   for i = 1, (canvas._texN or 0) do canvas._tex[i]:Hide() end
   for i = 1, (canvas._fsN or 0) do canvas._fs[i]:Hide() end
-  canvas._lnN, canvas._texN, canvas._fsN = 0, 0, 0
+  for i = 1, (canvas._glN or 0) do canvas._gl[i]:Hide() end
+  canvas._lnN, canvas._texN, canvas._fsN, canvas._glN = 0, 0, 0, 0
   canvas._pts = nil
 end
 
@@ -174,12 +216,58 @@ local function DashSeg(canvas, x1, y1, x2, y2, w, r, g, b, a)
   end
 end
 
+-- ===== Glow trace: the price curve simplified for the glow (see GLOW_TOL) =====
+-- T = { n = kept values, kx / ky = last kept point, b = skipped samples, bn }
+local function NewTrace() return { n = 0, b = {}, bn = 0 } end
+
+local function TraceAdd(T, x, y)
+  local n = T.n
+  if n == 0 then
+    T[1], T[2], T.n, T.kx, T.ky, T.bn = x, y, 2, x, y, 0
+    return
+  end
+  local B, bn, kx, ky = T.b, T.bn, T.kx, T.ky
+  local ok = x - kx <= GLOW_MAXW and bn < GLOW_MAXB * 2
+  if ok and bn > 0 then
+    local dx, dy = x - kx, y - ky
+    local len = math.sqrt(dx * dx + dy * dy)
+    for i = 1, bn, 2 do
+      local ex, ey = B[i] - kx, B[i + 1] - ky
+      local d = (len > 1e-9) and math.abs(dx * ey - dy * ex) / len or math.sqrt(ex * ex + ey * ey)
+      if d > GLOW_TOL then ok = false; break end
+    end
+  end
+  if ok then
+    B[bn + 1], B[bn + 2], T.bn = x, y, bn + 2
+  elseif bn > 0 then
+    -- the newest skipped sample is a corner: keep it, then try this one from there
+    local cx, cy = B[bn - 1], B[bn]
+    T[n + 1], T[n + 2], T.n, T.kx, T.ky, T.bn = cx, cy, n + 2, cx, cy, 0
+    B[1], B[2], T.bn = x, y, 2
+    if x - cx > GLOW_MAXW then
+      T[n + 3], T[n + 4], T.n, T.kx, T.ky, T.bn = x, y, n + 4, x, y, 0
+    end
+  else
+    T[n + 1], T[n + 2], T.n, T.kx, T.ky = x, y, n + 2, x, y
+  end
+end
+
+-- the newest sample always ends the trace
+local function TraceEnd(T)
+  local bn = T.bn
+  if bn > 0 then
+    T[T.n + 1], T[T.n + 2], T.n, T.bn = T.b[bn - 1], T.b[bn], T.n + 2, 0
+  end
+end
+
 -- Monotone cubic Hermite interpolation (Fritsch-Carlson) -- the shape-preserving
 -- smoothing finance/charting libs use (this is D3's `curveMonotoneX`): smooth, but
 -- it never overshoots the data and stays single-valued in x (exactly one y per x,
 -- no loops). Points must be sorted with strictly increasing x. Any point may flag
 -- its incoming segment as dashed; dashing is even and pixel-based along the curve.
-local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA)
+-- trace (optional, NewTrace()): the sampled curve, simplified (TraceAdd), so
+-- the price glow can follow the drawn curve.
+local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA, trace)
   local n = #pts
   if n == 0 then return end
   if n == 1 then Dot(canvas, pts[1].x, pts[1].y, 3, r, g, b); return end
@@ -232,6 +320,7 @@ local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA)
       local y = (2 * t3 - 3 * t2 + 1) * y1 + (t3 - 2 * t2 + t) * h * m1
               + (-2 * t3 + 3 * t2) * y2 + (t3 - t2) * h * m2
       if y < ylo then y = ylo elseif y > yhi then y = yhi end
+      if trace then TraceAdd(trace, x, y) end
       if dashed and pend then
         -- a dashed interval starts: the carried solid piece ends here
         Seg(canvas, pend[1], pend[2], x, y, w, r, g, b, a, true); pend = nil
@@ -256,6 +345,53 @@ local function SmoothLine(canvas, pts, w, r, g, b, a, ylo, yhi, dashA)
   end
   -- the line's last short piece still draws (it ends at the newest point)
   if pend and lx then Seg(canvas, pend[1], pend[2], lx, ly, w, r, g, b, a, true) end
+  if trace then TraceEnd(trace) end
+end
+
+-- whether a render should trace its price curve for the glow at all
+local function GlowWanted() return glowOK ~= false and CreateColor ~= nil end
+
+-- The price glow under the curve SmoothLine traced (tr = NewTrace(): x, y pairs,
+-- x never falling); bottom / ph = the plot's lower edge and height. A pair
+-- with no width (a vertical step) draws nothing: there is no area under it.
+-- See GLOW_* at the top.
+local function PriceGlow(canvas, tr, bottom, ph)
+  if not GlowWanted() or not tr or (tr.n or 0) < 4 then return end
+  local r, g, b = TC("teal")
+  if not glowCols or glowCols.r ~= r or glowCols.g ~= g or glowCols.b ~= b then
+    glowCols = { r = r, g = g, b = b }
+    for k = 1, #GLOW_K do glowCols[k] = CreateColor(r, g, b, GLOW_A * GLOW_K[k]) end
+  end
+  local cols = glowCols
+  if glowOK == nil then
+    -- first glow on this client: can it bend vertices and ramp colours?
+    local t = GetGlowTex(canvas)
+    glowOK = (t.SetVertexOffset ~= nil and t.SetGradient ~= nil
+              and pcall(t.SetVertexOffset, t, V_UL, 0, 0)
+              and pcall(t.SetGradient, t, "VERTICAL", cols[2], cols[1])) and true or false
+    t:Hide(); canvas._glN = canvas._glN - 1
+    if not glowOK then return end
+  end
+  local D = ph * GLOW_DEPTH
+  for j = 1, tr.n - 3, 2 do
+    local xa, ya, xb, yb = tr[j], tr[j + 1], tr[j + 2], tr[j + 3]
+    -- fade depth at both edges, squeezed where the plot bottom comes first
+    local da, db = math.min(D, ya - bottom), math.min(D, yb - bottom)
+    if xb > xa and (da > 0.5 or db > 0.5) then
+      for k = 1, #GLOW_T - 1 do
+        local ta, ba = ya - GLOW_T[k] * da, ya - GLOW_T[k + 1] * da
+        local tb, bb = yb - GLOW_T[k] * db, yb - GLOW_T[k + 1] * db
+        local top, bot = math.max(ta, tb), math.min(ba, bb)
+        local t = GetGlowTex(canvas)
+        t:ClearAllPoints()
+        t:SetPoint("BOTTOMLEFT", canvas, "BOTTOMLEFT", xa, bot)
+        t:SetSize(xb - xa, math.max(0.1, top - bot))
+        t:SetVertexOffset(V_UL, 0, ta - top); t:SetVertexOffset(V_LL, 0, ba - bot)
+        t:SetVertexOffset(V_UR, 0, tb - top); t:SetVertexOffset(V_LR, 0, bb - bot)
+        t:SetGradient("VERTICAL", cols[k + 1], cols[k])
+      end
+    end
+  end
 end
 
 -- Subtle volume bars: quantity per price point along the bottom of the plot.
@@ -290,6 +426,7 @@ local READ_STYLE = {
   fair  = { dot = "purple", txt = "purple", bg = 0.58 },
   craft = { dot = "mint",   txt = "mint",   bg = 0.58 },   -- cost of making ("Crafted")
   ma    = { dot = "blue",   txt = "blue",   bg = 0.58 },
+  neutral = { dot = "neutral", txt = "neutral", bg = 0.58 },   -- own neutral AH scans
   qty   = { dot = "sub",    txt = "sub",    bg = 0.50 },
   tbuy  = { dot = "green",  txt = "green",  bg = 0.58 },   -- your buys ("My trades")
   tsell = { dot = "red",    txt = "red",    bg = 0.58 },   -- your sells
@@ -572,10 +709,12 @@ function M.NWWindow1D(newestDay)
   return (c >= 2) and w0 or nil
 end
 
--- clock labels along a 1D axis (four marks over the 24 h window)
-local function hourLabels(canvas, X, bottom, w0)
+-- clock labels along a 1D axis (four marks over the 24 h window; span: the
+-- axis length in days when a later neutral AH scan stretched it - the end
+-- label then names that scan's time, the others keep their whole hours)
+local function hourLabels(canvas, X, bottom, w0, span)
   for k = 0, 3 do
-    local t = w0 + k / 3
+    local t = (k == 3) and (w0 + (span or 1)) or (w0 + k / 3)
     local anchor = (k == 0) and "LEFT" or ((k == 3) and "RIGHT" or "CENTER")
     Label(canvas, X(t), bottom - 12, date("%H:%M", math.floor(M.C.SCAN_DAY_0 + t * 86400)), anchor, TC("muted"))
   end
@@ -1008,6 +1147,42 @@ function M.RenderAllTime(canvas, key)
       end
     end
   end
+  -- your own scans at a neutral auction house (Booty Bay, Gadgetzan, Everlook;
+  -- Data.lua M.NeutralSeries): each day's lowest price there as a rose line,
+  -- Settings "Neutral AH line in charts" (config.chartNeutral, default off).
+  -- Big chart only, days of the chart's span only. 1D shows each day's row at
+  -- its newest neutral scan with that scan's price (cur at ts), only inside
+  -- the window. A neutral visit right after your newest scan of the item
+  -- stretches the axis to it (see the X axis): on a day range up to one day
+  -- after the newest day, on 1D up to 6 hours after the window's end. Near
+  -- values join the scale (the widen rule); the neutral AH is often far
+  -- dearer, and such a day breaks the line and says off scale like Fair.
+  local neuPts
+  if not canvas._compact and not canvas._rangeOverride and cfgC and cfgC.chartNeutral == true
+     and M.NeutralSeries then
+    local ns = M.NeutralSeries(key)
+    if ns then
+      local D0, d0, d1 = M.C.SCAN_DAY_0, arr[1].day, arr[n].day
+      for day, r in pairs(ns) do
+        if type(day) == "number" and type(r) == "table" and type(r.low) == "number" and r.low > 0 then
+          local t, v = nil, r.low
+          if win0 then
+            t = type(r.ts) == "number" and (r.ts - D0) / 86400 or nil
+            if t and (t < win0 or t > win0 + 1.25) then t = nil end
+            if type(r.cur) == "number" and r.cur > 0 then v = r.cur end
+          elseif day >= d0 and day <= d1 + 1 then
+            t = day
+          end
+          if t then
+            neuPts = neuPts or {}
+            neuPts[#neuPts + 1] = { day = day, t = t, low = v, ts = r.ts }
+            widen(v / 10000)
+          end
+        end
+      end
+      if neuPts then table.sort(neuPts, function(a, b) return a.t < b.t end) end
+    end
+  end
   vmin, vmax = minSpan(vmin, vmax, 0.0001)
   local pad = (vmax - vmin) * 0.15
   vmin, vmax = math.max(0, vmin - pad), vmax + pad
@@ -1024,8 +1199,13 @@ function M.RenderAllTime(canvas, key)
     if ipts[1].t < tMin then tMin = ipts[1].t end
     if ipts[#ipts].t > tMax then tMax = ipts[#ipts].t end
   end
-  -- 1D: the axis is exactly the 24 h window, full width (no young-history cap)
+  -- 1D: the axis is exactly the 24 h window, full width (no young-history cap;
+  -- longer only when a later neutral AH scan stretches it, below)
   if win0 then tMin, tMax = win0, win0 + 1 end
+  -- a neutral AH scan after your newest scan of the item (the scale block
+  -- lets it through up to a day / 6 hours later) stretches the axis to it
+  local neuEnd = neuPts and neuPts[#neuPts].t
+  if neuEnd and neuEnd > tMax then tMax = neuEnd else neuEnd = nil end
   local dSpan = math.max(1, tMax - tMin)
   local dayW, capped
   if win0 then dayW, capped = pw / dSpan, false
@@ -1107,6 +1287,7 @@ function M.RenderAllTime(canvas, key)
   -- dashed ALONG the same curve, so solid<->dashed transitions stay seamless.
   local lr, lg, lb = TC("teal")
   for i = 1, n do pts[i].dash = (i > 1) and ((arr[i].day - arr[i - 1].day) > 1) or false end
+  local trace = GlowWanted() and NewTrace() or nil   -- the drawn price curve, for the glow under it
   if ipts then
     -- line through the day points (already at each covered day's last scan)
     -- plus every earlier scan of each day
@@ -1121,10 +1302,11 @@ function M.RenderAllTime(canvas, key)
     for i = 1, #linePts do
       linePts[i].dash = (i > 1) and ((linePts[i].day - linePts[i - 1].day) > 1) or false
     end
-    SmoothLine(canvas, linePts, 1.6, lr, lg, lb, 1, bottom, bottom + ph, 0.5)
+    SmoothLine(canvas, linePts, 1.6, lr, lg, lb, 1, bottom, bottom + ph, 0.5, trace)
   else
-    SmoothLine(canvas, pts, 1.6, lr, lg, lb, 1, bottom, bottom + ph, 0.5)
+    SmoothLine(canvas, pts, 1.6, lr, lg, lb, 1, bottom, bottom + ph, 0.5, trace)
   end
+  PriceGlow(canvas, trace, bottom, ph)
 
   -- fair-price line: the trailing recency-weighted value, so it moves over
   -- time. Off-scale days break the line instead of pinning it to an edge,
@@ -1310,6 +1492,37 @@ function M.RenderAllTime(canvas, key)
     end
   end
 
+  -- neutral AH read-outs: on a day range at the day's own point (x = dayX,
+  -- also on 1W, where a covered day sits at its last scan); a neutral day
+  -- without a row of yours, and every 1D point (at its scan time), names its
+  -- day (and time) and joins a hover point already appended at that x (a
+  -- trade on a day without a scan) or gets one of its own - appended, so
+  -- pts[i] stays index-parallel to arr
+  if neuPts then
+    local idx = {}
+    if not win0 then for i = 1, n do idx[arr[i].day] = i end end
+    for _, p in ipairs(neuPts) do
+      local g = p.low / 10000
+      p.g, p.inS = g, inScale(g)
+      local rd = { kind = "neutral", y = clampY(g),
+        l1 = "Neutral AH  " .. M.MoneyPlain(p.low) .. (p.inS and "" or "  \194\183  off scale") }
+      local i = idx[p.day]
+      if i then
+        p.x = dayX[i]
+        pts[i].reads[#pts[i].reads + 1] = rd
+      else
+        p.x = X(p.t)
+        rd.l2 = M.DayLabel(p.day) .. ((win0 and p.ts) and ("  " .. date("%H:%M", p.ts)) or "")
+        local host
+        for j = n + 1, #pts do
+          if pts[j].reads and math.abs(pts[j].x - p.x) < 0.5 then host = pts[j]; break end
+        end
+        if host then host.reads[#host.reads + 1] = rd
+        else pts[#pts + 1] = { x = p.x, y = rd.y, day = p.day, reads = { rd } } end
+      end
+    end
+  end
+
   canvas._pts, canvas._plotBot, canvas._plotTop, canvas._plotRight = pts, bottom, bottom + ph, left + pw
   M.SetupHover(canvas)
 
@@ -1441,13 +1654,54 @@ function M.RenderAllTime(canvas, key)
     end
   end
 
+  -- neutral AH line (see the scale block): runs of in-scale points as a thin
+  -- rose line, dashed across days without a neutral scan (1D: one run); a
+  -- point alone in its run gets a dot. Labelled "Neutral AH" at the right
+  -- like Fair and Floor MA only when the line reaches your newest day; the
+  -- newest point off the scale -> an edge note, naming its day when older.
+  if neuPts then
+    local nr, ng, nb = TC("neutral")
+    local run = {}
+    local function flush()
+      if #run >= 2 then
+        SmoothLine(canvas, run, 1.3, nr, ng, nb, 0.75, bottom, bottom + ph, 0.45)
+      elseif run[1] then
+        RoundDot(canvas, run[1].x, run[1].y, 5, nr, ng, nb, 0.9)
+      end
+      run = {}
+    end
+    local prevDay
+    for _, p in ipairs(neuPts) do
+      if p.inS then
+        run[#run + 1] = { x = p.x, y = Y(p.g),
+          dash = run[1] ~= nil and not win0 and prevDay ~= nil and p.day - prevDay > 1 }
+        prevDay = p.day
+      else
+        flush()
+        prevDay = nil
+      end
+    end
+    flush()
+    local last = neuPts[#neuPts]
+    local atEnd = last.day >= arr[n].day
+    if last.inS then
+      if atEnd then sideLabel(Y(last.g), "Neutral AH", nr, ng, nb, NUDGE) end
+    else
+      edgeNote("Neutral AH  " .. M.MoneyPlain(last.low)
+        .. (atEnd and "" or ("  \194\183  " .. M.DayLabel(last.day))) .. "  \194\183  off scale",
+        last.g > vmax, nr, ng, nb)
+    end
+  end
+
   -- date labels (bottom), evenly spaced by TIME; on a capped (left-hugging)
   -- chart only first + last, both LEFT-anchored so they cannot collide.
   -- Placement runs on the INT day span (labels name whole days even when the
   -- intraday tail stretches the plot span to a float). 1D names clock times.
-  if win0 then hourLabels(canvas, X, bottom, win0); return end
-  local ldSpan = dMax - dMin
-  local labelN = (dMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
+  -- (a later neutral AH scan that stretched the axis takes the last label)
+  if win0 then hourLabels(canvas, X, bottom, win0, tMax - tMin); return end
+  local lMax = neuEnd and math.max(dMax, math.floor(neuEnd)) or dMax
+  local ldSpan = lMax - dMin
+  local labelN = (lMax == dMin) and 1 or (capped and 2 or math.max(2, math.min(4, ldSpan + 1)))
   local placed = {}
   for k = 0, labelN - 1 do
     local day = (labelN <= 1) and dMin or (dMin + math.floor(ldSpan * k / (labelN - 1) + 0.5))
@@ -2195,32 +2449,48 @@ function M.RenderHelpFair(canvas)
   Label(canvas, left, bottom - 9, "14 days of scans", "LEFT", TC("muted"))
 end
 
--- Live Settings demo for the Fair recency slider: three weeks of lively daily
--- lows around 12g that drop to ~8g a week before the end. The purple line is
--- the market base COMPUTED PER DAY over its trailing 14-day window with the
--- chosen half-life - exactly like the Fair line in the real charts: a short
--- half-life hugs the price down right after the drop, a long one trails it.
--- Pure function of (canvas size, hl) - cheap to redraw per drag step.
+-- Live Settings demo for the Fair recency slider (Settings > Fair price): three
+-- weeks of lively daily lows around 12g that drop to ~8g a week before the end,
+-- drawn like the big item chart (RenderAllTime): the gold price line with its
+-- glow, the purple Fair line, faint quantity bars, today's price, the scale
+-- bounds and "Fair" at the right edge, dates below and the hover read-outs.
+-- The purple line is the market base COMPUTED PER DAY over its trailing 14-day
+-- window with the chosen half-life - exactly like the Fair line in the real
+-- charts: a short half-life hugs the price down right after the drop, a long
+-- one trails it. Pure function of (canvas size, hl, text size) - cheap to
+-- redraw per drag step.
+local DEMO_LOWS = { 11.6, 12.9, 10.9, 13.1, 11.4, 12.6, 10.8, 13.2, 11.5, 12.8,
+                    11.0, 12.5, 11.3, 9.4, 7.8, 8.9, 7.3, 8.8, 7.5, 8.7, 7.9 }
+local DEMO_QTY = { 14, 9, 17, 11, 15, 8, 19, 10, 13, 12, 16, 9, 12, 21, 26, 18, 24, 15, 22, 17, 20 }
 function M.RenderFairBiasDemo(canvas, hl)
   ResetPools(canvas)
   local W, H = canvas:GetWidth(), canvas:GetHeight()
   if W < 50 or H < 40 then return end   -- at the minimum window the demo zone collapses
   hl = hl or 7
-  local left, right, top, bottom = gut(34), 8, 12, gut(16)
+  local left, right, top, bottom = 10, gut(56), 14, gut(18)   -- the big chart's frame
   local pw, ph = W - left - right, H - top - bottom
-  local lows = { 11.6, 12.9, 10.9, 13.1, 11.4, 12.6, 10.8, 13.2, 11.5, 12.8,
-                 11.0, 12.5, 11.3, 9.4, 7.8, 8.9, 7.3, 8.8, 7.5, 8.7, 7.9 }
-  local n = #lows
+  local lows, qtys, n = DEMO_LOWS, DEMO_QTY, #DEMO_LOWS
   local lo, hi = 6.5, 13.8
+  local today = (M.DayOf and M.DayOf(time())) or 0
   local function X(i) return left + (i - 1) / (n - 1) * pw end
   local function Y(g) return bottom + (g - lo) / (hi - lo) * ph end
+  -- faint quantity bars behind everything
+  local qmax, bars = 0, {}
+  for i = 1, n do
+    if qtys[i] > qmax then qmax = qtys[i] end
+    bars[i] = { x = X(i), q = qtys[i] }
+  end
+  VolumeBars(canvas, bars, bottom, ph, math.max(1.5, math.min(10, pw / (n - 1))), qmax)
+  -- the price line with its glow
   local tr, tg2, tb = TC("teal")
   local pts = {}
-  for i, g in ipairs(lows) do pts[#pts + 1] = { x = X(i), y = Y(g) } end
-  SmoothLine(canvas, pts, 1.6, tr, tg2, tb, 1, bottom, bottom + ph, 0.5)
+  for i, g in ipairs(lows) do pts[i] = { x = X(i), y = Y(g) } end
+  local trace = GlowWanted() and NewTrace() or nil
+  SmoothLine(canvas, pts, 1.6, tr, tg2, tb, 1, bottom, bottom + ph, 0.5, trace)
+  PriceGlow(canvas, trace, bottom, ph)
   -- trailing base per day: the real DemandBase weighting (0.5^(age/hl)) over
   -- the last up-to-14 days known at that day (the trim cannot fire here)
-  local bpts, lastBase = {}, 0
+  local bpts, base = {}, {}
   for i = 1, n do
     local wsum, vsum = 0, 0
     for j = math.max(1, i - 13), i do
@@ -2228,18 +2498,50 @@ function M.RenderFairBiasDemo(canvas, hl)
       wsum = wsum + w
       vsum = vsum + w * lows[j]
     end
-    lastBase = vsum / wsum
-    bpts[#bpts + 1] = { x = X(i), y = Y(lastBase) }
+    base[i] = vsum / wsum
+    bpts[i] = { x = X(i), y = Y(base[i]) }
   end
   local pr, pg, pb = TC("purple")
-  SmoothLine(canvas, bpts, 1.4, pr, pg, pb, 0.9, bottom, bottom + ph, 0.5)
-  Label(canvas, X(n) - 4, bpts[n].y + 9,
-    "base " .. M.MoneyPlain(math.floor(lastBase * 10000)), "RIGHT", pr, pg, pb)
+  SmoothLine(canvas, bpts, 1.3, pr, pg, pb, 0.6, bottom, bottom + ph, 0.6)
+  -- hover: price, Fair and quantity of each day, as in the big chart
+  local volH = ph * 0.40
+  local hp = {}
+  for i = 1, n do
+    local day = today - (n - i)
+    hp[i] = { x = pts[i].x, y = pts[i].y, reads = {
+      { kind = "price", y = pts[i].y, l1 = M.DayLabel(day) .. "  \194\183  " .. M.MoneyPlain(lows[i] * 10000) },
+      { kind = "fair", y = bpts[i].y, l1 = "Fair  " .. M.MoneyPlain(base[i] * 10000) },
+      { kind = "qty", y = bottom + volH * (qtys[i] / qmax), l1 = "Qty  " .. qtys[i] } } }
+  end
+  canvas._pts, canvas._plotBot, canvas._plotTop, canvas._plotRight = hp, bottom, bottom + ph, left + pw
+  M.SetupHover(canvas)
+  -- right edge: today's price, the scale bounds and "Fair", each at least 11px apart
   local mr, mg2, mb = TC("muted")
-  Label(canvas, left - 4, Y(8), "8g", "RIGHT", mr, mg2, mb)
-  Label(canvas, left - 4, Y(12), "12g", "RIGHT", mr, mg2, mb)
-  Label(canvas, left, bottom - 9, "old level ~12g", "LEFT", mr, mg2, mb)
-  Label(canvas, left + pw, bottom - 9, "dropped to ~8g", "RIGHT", mr, mg2, mb)
+  local yCur = pts[n].y
+  Dot(canvas, pts[n].x, yCur, 4, tr, tg2, tb)
+  Label(canvas, left + pw + 8, yCur, M.MoneyPlain(lows[n] * 10000), "LEFT", tr, tg2, tb)
+  local taken = { yCur }
+  local function sideLabel(y, txt, r, g, b, shifts)
+    for _, dy in ipairs(shifts or { 0 }) do
+      local yy = y + dy
+      local free = yy >= bottom - 2 and yy <= bottom + ph + 2
+      for _, t in ipairs(taken) do if math.abs(t - yy) < 11 then free = false; break end end
+      if free then
+        taken[#taken + 1] = yy
+        Label(canvas, left + pw + 8, yy, txt, "LEFT", r, g, b)
+        return
+      end
+    end
+  end
+  sideLabel(bottom + ph, M.MoneyPlain(hi * 10000), mr, mg2, mb)
+  sideLabel(bottom, M.MoneyPlain(lo * 10000), mr, mg2, mb)
+  sideLabel(bpts[n].y, "Fair", pr, pg, pb, { 0, 6, -6, 11, -11, 16, -16 })
+  -- four dates below, evenly spaced
+  for k = 0, 3 do
+    local i = 1 + math.floor((n - 1) * k / 3 + 0.5)
+    local anchor = (k == 0) and "LEFT" or ((k == 3) and "RIGHT" or "CENTER")
+    Label(canvas, X(i), bottom - 12, M.DayLabel(today - (n - i)), anchor, mr, mg2, mb)
+  end
 end
 
 function M.RenderHelpOdds(canvas)
